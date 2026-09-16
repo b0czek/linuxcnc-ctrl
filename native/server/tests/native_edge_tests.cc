@@ -562,8 +562,11 @@ void hal_value_telemetry_test() {
   const auto updated = telemetry.update(created->subscription_id, 1, changed,
                                         std::chrono::milliseconds(100));
   assert(updated && updated->revision == 2 && updated->bindings.size() == 2);
+  assert(updated->websocket_path == created->websocket_path);
   assert(updated->bindings[0].slot == created->bindings[0].slot);
   assert(updated->bindings[1].slot > created->bindings[1].slot);
+  assert(telemetry.detach(created->subscription_id));
+  assert(telemetry.claim(token) == created->subscription_id);
   assert(telemetry.erase(created->subscription_id));
   assert(!telemetry.snapshot(created->subscription_id));
 

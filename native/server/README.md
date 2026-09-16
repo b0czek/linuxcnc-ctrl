@@ -61,12 +61,14 @@ with a replacement followed by deltas. A clear, reconfiguration, generation
 change, or retention rollover produces another replacement. Values retain the
 stable ten-double X, Y, Z, A, B, C, U, V, W, motion-type layout.
 
-HAL value telemetry uses the same listener. Create and update a subscription
-with `HalService.CreateValueSubscription` and `UpdateValueSubscription`, then
-attach the returned single-use path at `/v1/hal-values/{token}`. Configuration
-changes preserve the socket and advance its revision; the first frame for each
-revision is a complete replacement. `DeleteValueSubscription` and WebSocket
-disconnects release the subscription.
+HAL value telemetry uses the same attachment lifecycle as scope telemetry.
+Create or update a subscription with `HalService.CreateValueSubscription` and
+`UpdateValueSubscription`; both return its stable WebSocket path. At most one
+WebSocket may be attached at a time. Configuration changes preserve the socket
+and advance its revision; the first frame for each revision is a complete
+replacement. A disconnect releases the attachment for 30 seconds, during which
+the same path can reconnect. `DeleteValueSubscription` explicitly releases the
+subscription.
 
 HAL frames contain slot/value entries. An absent `HalScalar` marks a slot as
 temporarily unavailable; `s64`, `u64`, revisions, and sequences remain exact

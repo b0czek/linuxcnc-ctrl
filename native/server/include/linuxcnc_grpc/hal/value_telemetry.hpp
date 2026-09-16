@@ -93,6 +93,7 @@ class HalValueTelemetry {
   std::optional<HalTelemetryDescriptor> descriptor(
       const std::string& subscription_id) const;
   std::optional<std::string> claim(const std::string& token);
+  bool detach(const std::string& subscription_id);
   bool erase(const std::string& subscription_id);
   void close();
 

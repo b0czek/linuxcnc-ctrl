@@ -45,11 +45,8 @@ std::string HalValueTelemetry::key(const HalTelemetryReference& item) {
 }
 
 HalTelemetryDescriptor HalValueTelemetry::describe(const State& state) const {
-  return {state.id,
-          state.attachment_token.empty()
-              ? std::string{}
-              : "/v1/hal-values/" + state.attachment_token,
-          state.revision, state.sample_period, state.bindings};
+  return {state.id, "/v1/hal-values/" + state.attachment_token, state.revision,
+          state.sample_period, state.bindings};
 }
 
 void HalValueTelemetry::expire_locked(
@@ -188,12 +185,20 @@ std::optional<std::string> HalValueTelemetry::claim(
     return std::nullopt;
   auto state = state_found->second;
   state->attached = true;
-  state->attachment_token.clear();
   state->next_due = std::chrono::steady_clock::now();
   auto id = state->id;
-  tokens_.erase(token_found);
   state->wakes.publish(state->sequence);
   return id;
+}
+
+bool HalValueTelemetry::detach(const std::string& subscription_id) {
+  std::lock_guard lock(mutex_);
+  const auto found = states_.find(subscription_id);
+  if (found == states_.end() || !found->second->attached) return false;
+  auto& state = *found->second;
+  state.attached = false;
+  state.expires = std::chrono::steady_clock::now() + attachment_ttl_;
+  return true;
 }
 
 bool HalValueTelemetry::erase(const std::string& subscription_id) {

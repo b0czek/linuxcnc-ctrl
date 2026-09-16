@@ -69,6 +69,85 @@ void verify_position_telemetry(const std::string& endpoint) {
   socket.close(websocket::close_code::normal);
 }
 
+linuxcnc::v1::HalValueFrame read_hal_value_frame(
+    websocket::stream<beast::tcp_stream>* socket) {
+  beast::flat_buffer buffer;
+  socket->read(buffer);
+  std::vector<std::uint8_t> bytes(buffer.size());
+  asio::buffer_copy(asio::buffer(bytes), buffer.data());
+  linuxcnc::v1::HalValueFrame frame;
+  assert(frame.ParseFromArray(bytes.data(), static_cast<int>(bytes.size())));
+  return frame;
+}
+
+void verify_hal_value_subscription_lifecycle(
+    linuxcnc::v1::HalService::Stub* hal, const std::string& telemetry_endpoint,
+    const std::string& pin_name) {
+  linuxcnc::v1::CreateHalValueSubscriptionRequest create_request;
+  create_request.set_sample_period_ms(50);
+  auto* create_item = create_request.add_items();
+  create_item->set_kind(linuxcnc::v1::HAL_ITEM_KIND_PIN);
+  create_item->set_name(pin_name);
+  grpc::ClientContext create_context;
+  linuxcnc::v1::HalValueSubscription created;
+  assert(hal->CreateValueSubscription(&create_context, create_request, &created)
+             .ok());
+  assert(created.revision() == 1);
+  assert(!created.websocket_path().empty());
+
+  const auto [host, port] = split_endpoint(telemetry_endpoint);
+  asio::io_context first_io;
+  tcp::resolver first_resolver(first_io);
+  websocket::stream<beast::tcp_stream> first_socket(first_io);
+  beast::get_lowest_layer(first_socket).expires_after(std::chrono::seconds(5));
+  beast::get_lowest_layer(first_socket)
+      .connect(first_resolver.resolve(host, port));
+  first_socket.handshake(host, created.websocket_path());
+  const auto initial = read_hal_value_frame(&first_socket);
+  assert(initial.kind() == linuxcnc::v1::FRAME_KIND_REPLACEMENT);
+  assert(initial.revision() == created.revision());
+
+  linuxcnc::v1::UpdateHalValueSubscriptionRequest update_request;
+  update_request.set_subscription_id(created.subscription_id());
+  update_request.set_expected_revision(created.revision());
+  update_request.set_sample_period_ms(100);
+  auto* update_item = update_request.add_items();
+  update_item->set_kind(linuxcnc::v1::HAL_ITEM_KIND_PIN);
+  update_item->set_name(pin_name);
+  grpc::ClientContext update_context;
+  linuxcnc::v1::HalValueSubscription updated;
+  assert(hal->UpdateValueSubscription(&update_context, update_request, &updated)
+             .ok());
+  assert(updated.revision() == created.revision() + 1);
+  assert(updated.websocket_path() == created.websocket_path());
+  const auto replacement = read_hal_value_frame(&first_socket);
+  assert(replacement.kind() == linuxcnc::v1::FRAME_KIND_REPLACEMENT);
+  assert(replacement.revision() == updated.revision());
+
+  first_socket.close(websocket::close_code::normal);
+
+  asio::io_context second_io;
+  tcp::resolver second_resolver(second_io);
+  websocket::stream<beast::tcp_stream> second_socket(second_io);
+  beast::get_lowest_layer(second_socket).expires_after(std::chrono::seconds(5));
+  beast::get_lowest_layer(second_socket)
+      .connect(second_resolver.resolve(host, port));
+  // A normal close handshake completes only after the server has released the
+  // attachment, so the stable path can reconnect immediately.
+  second_socket.handshake(host, created.websocket_path());
+  const auto reconnected = read_hal_value_frame(&second_socket);
+  assert(reconnected.kind() == linuxcnc::v1::FRAME_KIND_REPLACEMENT);
+  assert(reconnected.revision() == updated.revision());
+  second_socket.close(websocket::close_code::normal);
+
+  linuxcnc::v1::DeleteHalValueSubscriptionRequest delete_request;
+  delete_request.set_subscription_id(created.subscription_id());
+  grpc::ClientContext delete_context;
+  google::protobuf::Empty empty;
+  assert(hal->DeleteValueSubscription(&delete_context, delete_request, &empty)
+             .ok());
+}
+
 GetStatusResponse get_status_with_retry(
     linuxcnc::v1::MachineService::Stub* machine) {
   const auto deadline =
@@ -935,6 +1014,9 @@ int main(int argc, char** argv) {
   assert(topology.sequence() != 0);
   assert(topology.has_topology());
   assert(topology.topology().pins_size() > 0);
+
+  verify_hal_value_subscription_lifecycle(hal.get(), telemetry_endpoint,
+                                          topology.topology().pins(0).name());
 
   grpc::ClientContext future_topology_context;
   future_topology_context.set_deadline(std::chrono::system_clock::now() +

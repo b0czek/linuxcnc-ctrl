@@ -784,7 +784,7 @@ class Session final : public std::enable_shared_from_this<Session> {
     if (position_) position_->subscription.reset();
     if (hal_) {
       hal_->subscription.reset();
-      hal_->telemetry->erase(hal_->id);
+      hal_->telemetry->detach(hal_->id);
       hal_->id.clear();
     }
     if (scope_) {
