@@ -296,7 +296,11 @@ if(LINUXCNC_GRPC_BUILD_WIRE)
     target_compile_features(linuxcnc-grpc-health-check PRIVATE cxx_std_20)
     target_link_libraries(linuxcnc-grpc-health-check PRIVATE linuxcnc-grpc-proto)
     target_compile_options(linuxcnc-grpc-health-check PRIVATE -Wall -Wextra -Wpedantic)
-    add_executable(linuxcnc-grpc-live-integration tests/grpc_live_integration.cc)
+    add_executable(linuxcnc-grpc-live-integration
+        tests/grpc_live_integration.cc
+        tests/grpc_live_hal.cc
+        tests/grpc_live_lifecycle.cc
+        tests/grpc_live_support.cc)
     target_compile_features(linuxcnc-grpc-live-integration PRIVATE cxx_std_20)
     target_compile_definitions(linuxcnc-grpc-live-integration PRIVATE BOOST_ERROR_CODE_HEADER_ONLY=1)
     target_include_directories(linuxcnc-grpc-live-integration PRIVATE ${Boost_INCLUDE_DIRS})
