@@ -353,10 +353,13 @@ struct NmlAdapter::Impl {
   }
 
   // Each channel has exactly one owner: the command worker owns command,
-  // while the service polling thread owns status and error. No channel mutexes
-  // are needed.
+  // while the service polling thread owns status, position status, and error.
+  // Full status and high-rate position polling need independent NML readers so
+  // that one reader cannot make a message appear old to the other. No channel
+  // mutexes are needed.
   OwnedChannel<RCS_CMD_CHANNEL> command_channel;
   OwnedChannel<RCS_STAT_CHANNEL> status_channel;
+  OwnedChannel<RCS_STAT_CHANNEL> position_status_channel;
   OwnedChannel<NML> error_channel;
   CommandCompletionTracker completions{command_completion_timeout};
 
@@ -562,15 +565,12 @@ NmlStatusPoll NmlAdapter::poll_status(NmlStatusSnapshot* snapshot) {
 NmlStatusPoll NmlAdapter::poll_position(NmlPositionSnapshot* snapshot) {
 #ifdef LINUXCNC_GRPC_HAS_NML
   if (!snapshot) return NmlStatusPoll::Disconnected;
-  auto* channel = impl_->status_channel.get(
+  auto* channel = impl_->position_status_channel.get(
       [this] { return impl_->make_status_channel(); });
-  if (!channel) {
-    impl_->completions.channel_failed();
-    return NmlStatusPoll::Disconnected;
-  }
+  if (!channel) return NmlStatusPoll::Disconnected;
   const auto type = channel->peek();
   if (type == -1) {
-    impl_->fail_status_channel();
+    impl_->position_status_channel.failed();
     return NmlStatusPoll::Disconnected;
   }
   if (type != EMC_STAT_TYPE)
@@ -578,7 +578,7 @@ NmlStatusPoll NmlAdapter::poll_position(NmlPositionSnapshot* snapshot) {
                                       : NmlStatusPoll::Stale;
   auto* status = static_cast<EMC_STAT*>(channel->get_address());
   if (!status) {
-    impl_->fail_status_channel();
+    impl_->position_status_channel.failed();
     return NmlStatusPoll::Disconnected;
   }
   const auto commanded = from_emc_pose(status->motion.traj.position);

@@ -673,7 +673,10 @@ class MachineServiceImpl final : public MachineService::CallbackService,
       }
       ++position_config_generation_;
       if (request.capacity() > 0) positions_->configure(request.capacity());
-      if (request.has_enabled() && !request.enabled()) positions_->clear();
+      if (request.has_enabled() && !request.enabled()) {
+        position_reader_available_ = false;
+        positions_->clear();
+      }
     }
     position_condition_.notify_all();
     return ::grpc::Status::OK;
@@ -1079,19 +1082,32 @@ class MachineServiceImpl final : public MachineService::CallbackService,
             // a poll that started before disable cannot repopulate the history
             // after disable cleared it.
             std::lock_guard lock(position_mutex_);
-            if (position_enabled_ && position_config_generation_ == generation)
+            if (position_enabled_ &&
+                position_config_generation_ == generation) {
+              position_reader_available_ = true;
               positions_->append(sample);
+            }
           }
           if (status_due) observe_status(std::move(snapshot), recovered);
         } else if (status_poll == NmlStatusPoll::Stale ||
                    status_poll == NmlStatusPoll::Disconnected) {
-          bool was_available = false;
-          {
-            std::lock_guard lock(status_mutex_);
-            was_available = status_available_;
+          if (status_due) {
+            bool was_available = false;
+            {
+              std::lock_guard lock(status_mutex_);
+              was_available = status_available_;
+            }
+            if (was_available) positions_->clear();
+            mark_status_unavailable();
+          } else {
+            // Position telemetry has its own NML reader. Its failure must not
+            // invalidate the authoritative full-status stream.
+            std::lock_guard lock(position_mutex_);
+            if (position_reader_available_) {
+              position_reader_available_ = false;
+              positions_->clear();
+            }
           }
-          if (was_available) positions_->clear();
-          mark_status_unavailable();
         }
         if (status_due) {
           do {
@@ -1213,6 +1229,7 @@ class MachineServiceImpl final : public MachineService::CallbackService,
   std::mutex position_mutex_;
   std::condition_variable position_condition_;
   bool position_enabled_ = true;
+  bool position_reader_available_ = false;
   std::uint64_t position_config_generation_ = 0;
   std::atomic<bool> stopping_;
   std::thread position_poller_;
