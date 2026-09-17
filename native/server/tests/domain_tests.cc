@@ -253,6 +253,26 @@ void daemon_config_test() {
   char* scope_arguments[] = {program, scope_samples};
   assert(parse_config(2, scope_arguments, &config, nullptr, &error));
   assert(config.scope_samples == 64000);
+  char component_budget[] = "--max-remote-components=12";
+  char item_budget[] = "--max-remote-hal-items=777";
+  char heartbeat_interval[] = "--component-heartbeat-interval-ms=250";
+  char heartbeat_timeout[] = "--component-heartbeat-timeout-ms=900";
+  char sampling_default[] = "--component-default-sampling-ms=15";
+  char sampling_min[] = "--component-min-sampling-ms=4";
+  char sampling_max[] = "--component-max-sampling-ms=250";
+  char* component_arguments[] = {
+      program,           component_budget, item_budget,  heartbeat_interval,
+      heartbeat_timeout, sampling_default, sampling_min, sampling_max};
+  assert(parse_config(8, component_arguments, &config, nullptr, &error));
+  assert(config.max_remote_components == 12);
+  assert(config.max_remote_hal_items == 777);
+  assert(config.component_heartbeat_interval == std::chrono::milliseconds(250));
+  assert(config.component_heartbeat_timeout == std::chrono::milliseconds(900));
+  assert(config.component_default_sampling_period ==
+         std::chrono::milliseconds(15));
+  assert(config.component_min_sampling_period == std::chrono::milliseconds(4));
+  assert(config.component_max_sampling_period ==
+         std::chrono::milliseconds(250));
   config.scope_samples = 999;
   assert(!validate_config(config, &error));
   config.scope_samples = 64000;

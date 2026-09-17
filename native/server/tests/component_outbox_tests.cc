@@ -7,15 +7,16 @@
 namespace {
 
 using linuxcnc::server::detail::ComponentOutbox;
-using linuxcnc::v1::ComponentSessionMessage;
 using linuxcnc::v1::HAL_ITEM_KIND_PARAM;
 using linuxcnc::v1::HAL_ITEM_KIND_PIN;
 using linuxcnc::v1::HAL_TYPE_S32;
+using linuxcnc::v1::HalComponentServerMessage;
 
-ComponentSessionMessage delta(
+HalComponentServerMessage delta(
     std::uint64_t sequence, std::string name, std::int32_t value,
     linuxcnc::v1::HalItemKind kind = HAL_ITEM_KIND_PIN) {
-  ComponentSessionMessage message;
+  HalComponentServerMessage message;
+  message.mutable_delta()->set_generation(7);
   message.mutable_delta()->set_sequence(sequence);
   auto* component_value = message.mutable_delta()->add_values();
   component_value->mutable_item()->set_kind(kind);
@@ -25,12 +26,10 @@ ComponentSessionMessage delta(
   return message;
 }
 
-ComponentSessionMessage acknowledgement(std::string name, std::int32_t value) {
-  ComponentSessionMessage message;
-  message.mutable_value()->mutable_item()->set_kind(HAL_ITEM_KIND_PIN);
-  message.mutable_value()->mutable_item()->set_name(std::move(name));
-  message.mutable_value()->mutable_value()->set_type(HAL_TYPE_S32);
-  message.mutable_value()->mutable_value()->set_s32(value);
+HalComponentServerMessage acknowledgement(std::string, std::int32_t value) {
+  HalComponentServerMessage message;
+  message.mutable_update_ack()->set_generation(7);
+  message.mutable_update_ack()->set_sequence(static_cast<std::uint64_t>(value));
   return message;
 }
 
@@ -68,9 +67,9 @@ void acknowledgements_are_never_coalesced_or_reordered() {
   auto after = outbox.pop_front();
   assert(before.message.has_delta());
   assert(!before.resume_read);
-  assert(response.message.has_value());
+  assert(response.message.has_update_ack());
   assert(response.resume_read);
-  assert(response.message.value().value().s32() == 2);
+  assert(response.message.update_ack().sequence() == 2);
   assert(after.message.has_delta());
   assert(after.message.delta().sequence() == 3);
   assert(after.message.delta().values_size() == 2);

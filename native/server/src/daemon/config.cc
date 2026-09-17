@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <limits>
 #include <sstream>
 
 namespace linuxcnc::server {
@@ -131,6 +132,11 @@ bool validate_config(const DaemonConfig& config, std::string* error) {
     return fail("workspace quota must not exceed total quota");
   if (config.command_queue_capacity == 0)
     return fail("command queue capacity must be non-zero");
+  if (config.max_remote_components == 0 || config.max_remote_hal_items == 0)
+    return fail("remote HAL component and item budgets must be non-zero");
+  if (config.max_remote_components >
+      std::numeric_limits<std::size_t>::max() - 65)
+    return fail("remote HAL component budget is too large");
   if (config.status_replay_capacity == 0 || config.gcode_batch_size == 0) {
     return fail("status replay and G-code batch capacities must be non-zero");
   }
@@ -145,7 +151,19 @@ bool validate_config(const DaemonConfig& config, std::string* error) {
       config.position_period <= std::chrono::milliseconds::zero() ||
       config.topology_period <= std::chrono::milliseconds::zero() ||
       config.scope_period <= std::chrono::milliseconds::zero() ||
-      config.scope_heartbeat <= std::chrono::milliseconds::zero()) {
+      config.scope_heartbeat <= std::chrono::milliseconds::zero() ||
+      config.component_heartbeat_interval <=
+          std::chrono::milliseconds::zero() ||
+      config.component_heartbeat_timeout <=
+          config.component_heartbeat_interval ||
+      config.component_min_sampling_period <=
+          std::chrono::milliseconds::zero() ||
+      config.component_max_sampling_period <
+          config.component_min_sampling_period ||
+      config.component_default_sampling_period <
+          config.component_min_sampling_period ||
+      config.component_default_sampling_period >
+          config.component_max_sampling_period) {
     return fail(
         "daemon periods, upload timeout, and workspace TTL must be positive");
   }
@@ -267,6 +285,16 @@ bool parse_config(int argc, char* argv[], DaemonConfig* config, bool* show_help,
         if (error) *error = "invalid --scope-samples";
         return false;
       }
+    } else if (option_value(argument, "--max-remote-components", &value)) {
+      if (!parse_size(value, &config->max_remote_components)) {
+        if (error) *error = "invalid --max-remote-components";
+        return false;
+      }
+    } else if (option_value(argument, "--max-remote-hal-items", &value)) {
+      if (!parse_size(value, &config->max_remote_hal_items)) {
+        if (error) *error = "invalid --max-remote-hal-items";
+        return false;
+      }
     } else if (option_value(argument, "--status-period-ms", &value)) {
       if (!parse_milliseconds(value, &config->status_period)) {
         if (error) *error = "invalid --status-period-ms";
@@ -297,6 +325,35 @@ bool parse_config(int argc, char* argv[], DaemonConfig* config, bool* show_help,
         if (error) *error = "invalid --scope-heartbeat-ms";
         return false;
       }
+    } else if (option_value(argument, "--component-heartbeat-interval-ms",
+                            &value)) {
+      if (!parse_milliseconds(value, &config->component_heartbeat_interval)) {
+        if (error) *error = "invalid --component-heartbeat-interval-ms";
+        return false;
+      }
+    } else if (option_value(argument, "--component-heartbeat-timeout-ms",
+                            &value)) {
+      if (!parse_milliseconds(value, &config->component_heartbeat_timeout)) {
+        if (error) *error = "invalid --component-heartbeat-timeout-ms";
+        return false;
+      }
+    } else if (option_value(argument, "--component-default-sampling-ms",
+                            &value)) {
+      if (!parse_milliseconds(value,
+                              &config->component_default_sampling_period)) {
+        if (error) *error = "invalid --component-default-sampling-ms";
+        return false;
+      }
+    } else if (option_value(argument, "--component-min-sampling-ms", &value)) {
+      if (!parse_milliseconds(value, &config->component_min_sampling_period)) {
+        if (error) *error = "invalid --component-min-sampling-ms";
+        return false;
+      }
+    } else if (option_value(argument, "--component-max-sampling-ms", &value)) {
+      if (!parse_milliseconds(value, &config->component_max_sampling_period)) {
+        if (error) *error = "invalid --component-max-sampling-ms";
+        return false;
+      }
     } else {
       if (error) *error = "unknown option: " + argument;
       return false;
@@ -323,6 +380,11 @@ std::string config_help() {
          "--position-period-ms=10\n"
          "  --topology-period-ms=2000 --scope-samples=32000\n"
          "  --scope-period-ms=20 --scope-heartbeat-ms=100\n"
+         "  --max-remote-components=64 --max-remote-hal-items=4096\n"
+         "  --component-heartbeat-interval-ms=1000 "
+         "--component-heartbeat-timeout-ms=3000\n"
+         "  --component-default-sampling-ms=20 "
+         "--component-min-sampling-ms=5 --component-max-sampling-ms=1000\n"
          "  --allow-plaintext-non-loopback\n";
 }
 

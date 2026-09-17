@@ -63,6 +63,9 @@ LINUXCNC_CONFIG_DIR=/absolute/path/to/machine docker compose up
 ```
 
 Run these commands from the `linuxcnc-ctrl` checkout.
+Compilation uses all processors available to the Docker builder by default. Set
+the `BUILD_JOBS` build argument to cap parallelism when memory is constrained;
+for example, `docker compose build --build-arg BUILD_JOBS=4`.
 
 ## Endpoints and image tags
 

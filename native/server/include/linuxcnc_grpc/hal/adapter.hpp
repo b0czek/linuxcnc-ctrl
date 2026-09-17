@@ -104,14 +104,12 @@ class HalAdapterError final : public std::runtime_error {
 };
 
 /**
- * Owns one client-created HAL component. hal_exit() removes all pins and
- * parameters even when the client stream disappears without an explicit
- * close message.
+ * Owns one server-retained remote HAL proxy. Its lifetime is independent of
+ * any individual RPC stream; hal_exit() runs only when the proxy is destroyed
+ * or the daemon shuts down.
  */
 class LinuxCncHalComponent final {
  public:
-  static constexpr std::size_t kMaxItems = 64;
-
   ~LinuxCncHalComponent();
   LinuxCncHalComponent(const LinuxCncHalComponent&) = delete;
   LinuxCncHalComponent& operator=(const LinuxCncHalComponent&) = delete;
@@ -146,9 +144,11 @@ class LinuxCncHalComponent final {
  */
 class LinuxCncHalAdapter final {
  public:
-  static constexpr std::size_t kMaxDynamicItems = 1024;
+  static constexpr std::size_t kDefaultMaxDynamicItems = 4096;
 
-  explicit LinuxCncHalAdapter(std::string component_name = "linuxcnc-grpc");
+  explicit LinuxCncHalAdapter(
+      std::string component_name = "linuxcnc-grpc",
+      std::size_t dynamic_item_capacity = kDefaultMaxDynamicItems);
   ~LinuxCncHalAdapter();
   LinuxCncHalAdapter(const LinuxCncHalAdapter&) = delete;
   LinuxCncHalAdapter& operator=(const LinuxCncHalAdapter&) = delete;

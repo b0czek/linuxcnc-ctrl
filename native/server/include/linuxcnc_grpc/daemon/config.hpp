@@ -33,6 +33,8 @@ struct DaemonConfig {
   std::size_t status_replay_capacity = 256;
   std::size_t gcode_batch_size = 128;
   std::size_t scope_samples = 32000;
+  std::size_t max_remote_components = 64;
+  std::size_t max_remote_hal_items = 4096;
   // Zero leaves completion waiting to the RPC deadline/cancellation.
   std::chrono::milliseconds command_completion_timeout{0};
   std::chrono::milliseconds status_period{50};
@@ -41,6 +43,11 @@ struct DaemonConfig {
   std::chrono::milliseconds topology_period{2000};
   std::chrono::milliseconds scope_period{20};
   std::chrono::milliseconds scope_heartbeat{100};
+  std::chrono::milliseconds component_heartbeat_interval{1000};
+  std::chrono::milliseconds component_heartbeat_timeout{3000};
+  std::chrono::milliseconds component_default_sampling_period{20};
+  std::chrono::milliseconds component_min_sampling_period{5};
+  std::chrono::milliseconds component_max_sampling_period{1000};
   bool tls = false;
   bool mtls = false;
   bool reflection = false;

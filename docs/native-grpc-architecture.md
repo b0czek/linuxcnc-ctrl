@@ -26,7 +26,12 @@ already accepted by LinuxCNC.
 `IniService` returns the parsed active configuration. `ProgramService` accepts
 bounded tar.zst uploads and publishes immutable workspaces after validation.
 `HalService` provides topology, exact-width scalar access, subscriptions,
-signals, metadata, and session-owned components. `ScopeService` exposes unary
+signals, metadata, and server-owned remote component proxies. A
+`RunComponent` stream attaches to exactly one proxy, but one transport
+connection may carry multiple independent streams. Proxies, values, pins,
+parameters, and HAL links survive arbitrary disconnects; attachment generation
+checks prevent queued work from a prior stream from mutating a reattached
+proxy. `ScopeService` exposes unary
 scope controls on the shared gRPC control plane and keeps shared-memory polling
 outside realtime code. Scope capture and roll data use only WebSocket telemetry.
 

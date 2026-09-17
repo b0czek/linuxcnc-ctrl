@@ -127,30 +127,111 @@ message GetHalWriterMetadataResponse { HalWriterMetadata metadata = 1; }
 
 message SetHalWriterReadyRequest { bool ready = 1; }
 
-message ComponentOpen { string name = 1; string prefix = 2; }
-
-message ComponentPin { string name = 1; HalType type = 2; HalPinDirection direction = 3; string prefix = 4; }
-
-message ComponentParameter { string name = 1; HalType type = 2; HalParamDirection direction = 3; string prefix = 4; }
-
-message ComponentReady { bool ready = 1; }
-
 message ComponentValue { HalItemRef item = 1; HalScalar value = 2; }
 
-message ComponentDelta { repeated ComponentValue values = 1; uint64 sequence = 2; }
+message HalComponentPin {
+  string name = 1;
+  HalType type = 2;
+  HalPinDirection direction = 3;
+  optional HalScalar disconnect_value = 4;
+}
 
-message ComponentClose {}
+message HalComponentParameter {
+  string name = 1;
+  HalType type = 2;
+  HalParamDirection direction = 3;
+  optional HalScalar disconnect_value = 4;
+}
 
-message ComponentSessionMessage {
+message HalComponentCreate {
+  string name = 1;
+  string prefix = 2;
+  repeated HalComponentPin pins = 3;
+  repeated HalComponentParameter parameters = 4;
+  uint32 sampling_period_ms = 5;
+}
+
+message HalComponentAttach {
+  string proxy_id = 1;
+  string name = 2;
+  bytes ownership_token = 3;
+}
+
+message HalComponentActivate {
+  uint64 generation = 1;
+  repeated ComponentValue values = 2;
+}
+
+message HalComponentUpdate {
+  uint64 generation = 1;
+  uint64 sequence = 2;
+  repeated ComponentValue values = 3;
+}
+
+message HalComponentHeartbeat { uint64 generation = 1; }
+
+enum HalComponentCloseMode {
+  HAL_COMPONENT_CLOSE_MODE_UNSPECIFIED = 0;
+  HAL_COMPONENT_CLOSE_MODE_DETACH = 1;
+  HAL_COMPONENT_CLOSE_MODE_DESTROY = 2;
+}
+
+message HalComponentClose {
+  uint64 generation = 1;
+  HalComponentCloseMode mode = 2;
+}
+
+message HalComponentClientMessage {
   oneof message {
-    ComponentOpen open = 1;
-    ComponentPin pin = 2;
-    ComponentParameter parameter = 3;
-    ComponentReady ready = 4;
-    ComponentValue value = 5;
-    ComponentDelta delta = 6;
-    ComponentClose close = 7;
-    HalWriterMetadata metadata = 8;
+    HalComponentCreate create = 1;
+    HalComponentAttach attach = 2;
+    HalComponentActivate activate = 3;
+    HalComponentUpdate update = 4;
+    HalComponentHeartbeat heartbeat = 5;
+    HalComponentClose close = 6;
+  }
+}
+
+message HalComponentAttached {
+  string proxy_id = 1;
+  string name = 2;
+  string prefix = 3;
+  uint64 generation = 4;
+  repeated ComponentValue retained_values = 5;
+  uint32 sampling_period_ms = 6;
+  uint32 heartbeat_interval_ms = 7;
+  uint32 heartbeat_timeout_ms = 8;
+  bytes ownership_token = 9;
+}
+
+message HalComponentActive { uint64 generation = 1; }
+
+message HalComponentUpdateAck {
+  uint64 generation = 1;
+  uint64 sequence = 2;
+}
+
+message HalComponentDelta {
+  uint64 generation = 1;
+  uint64 sequence = 2;
+  repeated ComponentValue values = 3;
+}
+
+message HalComponentHeartbeatAck { uint64 generation = 1; }
+
+message HalComponentClosed {
+  string proxy_id = 1;
+  HalComponentCloseMode mode = 2;
+}
+
+message HalComponentServerMessage {
+  oneof message {
+    HalComponentAttached attached = 1;
+    HalComponentActive active = 2;
+    HalComponentUpdateAck update_ack = 3;
+    HalComponentDelta delta = 4;
+    HalComponentHeartbeatAck heartbeat_ack = 5;
+    HalComponentClosed closed = 6;
   }
 }
 
@@ -166,5 +247,6 @@ service HalService {
   rpc SetMessageLevel(SetHalMessageLevelRequest) returns (google.protobuf.Empty);
   rpc GetWriterMetadata(GetHalWriterMetadataRequest) returns (GetHalWriterMetadataResponse);
   rpc SetWriterReady(SetHalWriterReadyRequest) returns (google.protobuf.Empty);
-  rpc ComponentSession(stream ComponentSessionMessage) returns (stream ComponentSessionMessage);
+  rpc RunComponent(stream HalComponentClientMessage)
+      returns (stream HalComponentServerMessage);
 }

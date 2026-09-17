@@ -11,15 +11,15 @@ namespace linuxcnc::server::detail {
 class ComponentOutbox {
  public:
   struct Entry {
-    linuxcnc::v1::ComponentSessionMessage message;
+    linuxcnc::v1::HalComponentServerMessage message;
     bool resume_read = false;
   };
 
-  void push_response(linuxcnc::v1::ComponentSessionMessage message) {
+  void push_response(linuxcnc::v1::HalComponentServerMessage message) {
     entries_.push_back({std::move(message), true});
   }
 
-  void push_delta(linuxcnc::v1::ComponentSessionMessage message) {
+  void push_delta(linuxcnc::v1::HalComponentServerMessage message) {
     if (!message.has_delta()) {
       entries_.push_back({std::move(message), false});
       return;
@@ -47,8 +47,8 @@ class ComponentOutbox {
            left.item().name() == right.item().name();
   }
 
-  static void merge_delta(const linuxcnc::v1::ComponentDelta& source,
-                          linuxcnc::v1::ComponentDelta* target) {
+  static void merge_delta(const linuxcnc::v1::HalComponentDelta& source,
+                          linuxcnc::v1::HalComponentDelta* target) {
     for (const auto& incoming : source.values()) {
       auto* values = target->mutable_values();
       const auto existing = std::find_if(
@@ -61,6 +61,7 @@ class ComponentOutbox {
       }
     }
     target->set_sequence(source.sequence());
+    target->set_generation(source.generation());
   }
 
   std::deque<Entry> entries_;

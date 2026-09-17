@@ -3,7 +3,7 @@
 FROM ubuntu:24.04 AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG BUILD_JOBS=2
+ARG BUILD_JOBS
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential \
@@ -37,6 +37,7 @@ RUN cd /src/linuxcnc \
     && rm -rf /var/lib/apt/lists/*
 
 RUN cd /src/linuxcnc/src \
+    && build_jobs="${BUILD_JOBS:-$(nproc)}" \
     && ./autogen.sh \
     && ./configure \
       --prefix=/opt/linuxcnc \
@@ -44,7 +45,7 @@ RUN cd /src/linuxcnc/src \
       --enable-headless \
       --disable-build-documentation \
       --disable-build-manpages \
-    && make -j"${BUILD_JOBS}" \
+    && make -j"${build_jobs}" \
     && make DESTDIR=/linuxcnc-root install
 
 WORKDIR /src/linuxcnc-ctrl
@@ -52,13 +53,14 @@ COPY CMakeLists.txt ./CMakeLists.txt
 COPY native ./native
 COPY proto ./proto
 
-RUN cmake -S . -B /build/native-release \
+RUN build_jobs="${BUILD_JOBS:-$(nproc)}" \
+    && cmake -S . -B /build/native-release \
       -DLINUXCNC_ROOT=/src/linuxcnc \
       -DLINUXCNC_GRPC_BUILD_WIRE=ON \
       -DLINUXCNC_GRPC_BUILD_TESTS=OFF \
       -DLINUXCNC_GRPC_ENABLE_NML=ON \
       -DCMAKE_BUILD_TYPE=MinSizeRel \
-    && cmake --build /build/native-release --parallel "${BUILD_JOBS}" \
+    && cmake --build /build/native-release --parallel "${build_jobs}" \
       --target linuxcnc-grpc-server linuxcnc-grpc-health-check \
     && cmake --install /build/native-release --prefix /usr/local --strip \
     && cmake -S . -B /build/native-test \
@@ -67,7 +69,7 @@ RUN cmake -S . -B /build/native-release \
       -DLINUXCNC_GRPC_BUILD_TESTS=ON \
       -DLINUXCNC_GRPC_ENABLE_NML=ON \
       -DCMAKE_BUILD_TYPE=Debug \
-    && cmake --build /build/native-test --parallel "${BUILD_JOBS}" \
+    && cmake --build /build/native-test --parallel "${build_jobs}" \
       --target linuxcnc-grpc-live-integration
 
 FROM ubuntu:24.04 AS runtime

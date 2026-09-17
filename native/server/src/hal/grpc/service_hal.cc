@@ -8,6 +8,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -21,7 +22,7 @@
 #include "grpc/server/deferred_write_finish.hpp"
 #include "grpc/server/service_factories.hpp"
 #include "grpc/server/unary_task_reactor.hpp"
-#include "hal/grpc/component_outbox.hpp"
+#include "hal/grpc/remote_component_rpc.hpp"
 #include "linuxcnc/v1/hal.grpc.pb.h"
 #include "linuxcnc_grpc/callback_runtime.hpp"
 #include "linuxcnc_grpc/daemon/config.hpp"
@@ -98,7 +99,6 @@ void encode_subscription(const HalTelemetryDescriptor& source,
 class HalServiceImpl final : public HalService::CallbackService,
                              public ManagedGrpcService {
   class TopologyReactor;
-  class ComponentReactor;
   struct TopologySnapshot {
     std::uint64_t sequence = 0;
     linuxcnc::v1::HalTopology topology;
@@ -111,11 +111,13 @@ class HalServiceImpl final : public HalService::CallbackService,
                  AdmissionCounter& component_admission,
                  AdmissionCounter& stream_admission,
                  std::shared_ptr<HalValueTelemetry> telemetry)
-      : worker_(worker),
-        component_admission_(component_admission),
+      : adapter_("linuxcnc-grpc", config.max_remote_hal_items),
+        worker_(worker),
         stream_admission_(stream_admission),
         telemetry_(std::move(telemetry)),
-        topology_period_(config.topology_period) {
+        topology_period_(config.topology_period),
+        remote_components_(adapter_, worker_, component_admission,
+                           stream_admission_, callbacks_, config) {
     refresh_topology_snapshot();
     timer_ = std::thread([this] { timer_loop(); });
   }
@@ -128,6 +130,18 @@ class HalServiceImpl final : public HalService::CallbackService,
     callbacks_.shutdown();
     timer_condition_.notify_all();
     if (timer_.joinable()) timer_.join();
+    auto completion = std::make_shared<std::promise<void>>();
+    auto completed = completion->get_future();
+    const auto destroy = [this, completion] {
+      remote_components_.shutdown_registry();
+      completion->set_value();
+    };
+    if (worker_.submit_cleanup(destroy)) {
+      completed.wait();
+    } else {
+      worker_.drain();
+      destroy();
+    }
   }
 
   ::grpc::ServerUnaryReactor* GetTopology(
@@ -401,9 +415,10 @@ class HalServiceImpl final : public HalService::CallbackService,
     return ::grpc::Status::OK;
   }
 
-  ::grpc::ServerBidiReactor<ComponentSessionMessage, ComponentSessionMessage>*
-  ComponentSession(::grpc::CallbackServerContext*) override {
-    return new ComponentReactor(*this);
+  ::grpc::ServerBidiReactor<HalComponentClientMessage,
+                            HalComponentServerMessage>*
+  RunComponent(::grpc::CallbackServerContext*) override {
+    return remote_components_.run();
   }
 
  private:
@@ -525,20 +540,6 @@ class HalServiceImpl final : public HalService::CallbackService,
     }
   }
 
-  struct ComponentState {
-    struct Item {
-      std::string suffix;
-      HalItemKind kind = HAL_ITEM_KIND_PIN;
-      std::string full_name;
-      std::optional<HalAdapterValue> previous;
-    };
-    std::unique_ptr<LinuxCncHalComponent> component;
-    std::vector<Item> items;
-    std::uint64_t sequence = 0;
-    bool ready = false;
-    std::atomic<bool> cleanup_started{false};
-  };
-
   class TopologyReactor final
       : public ::grpc::ServerWriteReactor<WatchHalTopologyEvent> {
    public:
@@ -653,344 +654,14 @@ class HalServiceImpl final : public HalService::CallbackService,
     ActiveCallbackRegistry::Registration registration_;
   };
 
-  class ComponentReactor final
-      : public ::grpc::ServerBidiReactor<ComponentSessionMessage,
-                                         ComponentSessionMessage> {
-   public:
-    explicit ComponentReactor(HalServiceImpl& service)
-        : service_(service),
-          admitted_(service_.component_admission_.acquire()),
-          stream_admitted_(service_.stream_admission_.acquire()),
-          state_(std::make_shared<ComponentState>()),
-          gate_(std::make_shared<LifetimeGate<ComponentReactor>>(this)) {
-      const std::weak_ptr<LifetimeGate<ComponentReactor>> weak = gate_;
-      registration_ = service_.callbacks_.register_callback([weak] {
-        if (auto gate = weak.lock())
-          gate->invoke([](ComponentReactor& reactor) { reactor.shutdown(); });
-      });
-      if (!registration_) {
-        shutdown();
-        return;
-      }
-      if (!admitted_ || !stream_admitted_) {
-        request_finish({::grpc::StatusCode::RESOURCE_EXHAUSTED,
-                        "component or stream admission limit reached"});
-        return;
-      }
-      service_.register_component(state_, gate_);
-      StartRead(&request_);
-    }
-    void OnReadDone(bool ok) override {
-      gate_->invoke([ok](ComponentReactor& reactor) { reactor.read_done(ok); });
-    }
-    void OnWriteDone(bool ok) override {
-      gate_->invoke([ok](ComponentReactor& reactor) {
-        reactor.write_finish_.complete_write(ok);
-        if (reactor.finish_if_ready() || !ok) return;
-        if (reactor.active_response_) reactor.resume_read_when_idle_ = true;
-        if (!reactor.outbox_.empty()) {
-          reactor.start_write(reactor.outbox_.pop_front());
-        } else if (reactor.resume_read_when_idle_) {
-          reactor.resume_read_when_idle_ = false;
-          reactor.StartRead(&reactor.request_);
-        }
-      });
-    }
-    void OnCancel() override {
-      gate_->invoke([](ComponentReactor& reactor) {
-        reactor.request_finish(
-            {::grpc::StatusCode::CANCELLED, "component session cancelled"});
-      });
-    }
-    void OnDone() override {
-      gate_->detach();
-      registration_.reset();
-      request_cleanup();
-      if (stream_admitted_) service_.stream_admission_.release();
-      delete this;
-    }
-    void shutdown() {
-      request_cleanup();
-      request_finish({::grpc::StatusCode::UNAVAILABLE, "server shutting down"});
-    }
-    void offer_delta(ComponentSessionMessage message) {
-      if (write_finish_.termination_requested()) return;
-      if (write_finish_.write_in_flight()) {
-        outbox_.push_delta(std::move(message));
-        return;
-      }
-      start_write({std::move(message), false});
-    }
-
-   private:
-    void offer_response(ComponentSessionMessage message) {
-      if (write_finish_.termination_requested()) return;
-      if (write_finish_.write_in_flight()) {
-        outbox_.push_response(std::move(message));
-        return;
-      }
-      start_write({std::move(message), true});
-    }
-    void start_write(ComponentOutbox::Entry entry) {
-      response_ = std::move(entry.message);
-      active_response_ = entry.resume_read;
-      if (!write_finish_.try_start_write()) return;
-      StartWrite(&response_);
-    }
-    void read_done(bool ok) {
-      if (write_finish_.termination_requested()) return;
-      if (!ok) {
-        request_finish(::grpc::Status::OK);
-        return;
-      }
-      auto request = request_;
-      request_.Clear();
-      const auto state = state_;
-      const std::weak_ptr<LifetimeGate<ComponentReactor>> weak = gate_;
-      if (!service_.worker_.submit([service = &service_, state, weak,
-                                    request = std::move(request)]() mutable {
-            ::grpc::Status status;
-            std::optional<ComponentSessionMessage> response;
-            bool close = false;
-            try {
-              service->consume_component(*state, request, &response, &close);
-            } catch (const HalAdapterError& error) {
-              status = hal_error(error);
-            }
-            if (auto gate = weak.lock())
-              gate->invoke([&](ComponentReactor& reactor) {
-                if (!status.ok()) {
-                  reactor.request_finish(status);
-                  return;
-                }
-                if (close) {
-                  reactor.request_finish(::grpc::Status::OK);
-                  return;
-                }
-                if (response) {
-                  reactor.offer_response(std::move(*response));
-                } else if (!reactor.write_finish_.termination_requested()) {
-                  reactor.StartRead(&reactor.request_);
-                }
-              });
-          })) {
-        request_finish({::grpc::StatusCode::RESOURCE_EXHAUSTED,
-                        "HAL runtime queue is full"});
-      }
-    }
-    void request_cleanup() {
-      if (!admitted_ || state_->cleanup_started.exchange(true)) return;
-      const auto state = state_;
-      auto* admission = &service_.component_admission_;
-      if (!service_.worker_.submit_cleanup([state, admission] {
-            state->component.reset();
-            admission->release();
-          })) {
-        // The reserve is sized for every admitted component. Failure here is
-        // a shutdown invariant violation, so perform the idempotent cleanup
-        // synchronously instead of leaking the native HAL component.
-        state->component.reset();
-        admission->release();
-      }
-    }
-    void request_finish(::grpc::Status status) {
-      request_cleanup();
-      outbox_ = {};
-      resume_read_when_idle_ = false;
-      write_finish_.request_finish(std::move(status));
-      finish_if_ready();
-    }
-    bool finish_if_ready() {
-      auto status = write_finish_.take_finish_status();
-      if (!status) return false;
-      gate_->finish([status = std::move(*status)](ComponentReactor& reactor) {
-        reactor.request_cleanup();
-        reactor.Finish(status);
-      });
-      return true;
-    }
-    HalServiceImpl& service_;
-    bool admitted_ = false, stream_admitted_ = false;
-    bool active_response_ = false;
-    bool resume_read_when_idle_ = false;
-    ComponentSessionMessage request_, response_;
-    ComponentOutbox outbox_;
-    DeferredWriteFinish write_finish_;
-    std::shared_ptr<ComponentState> state_;
-    std::shared_ptr<LifetimeGate<ComponentReactor>> gate_;
-    ActiveCallbackRegistry::Registration registration_;
-  };
-
-  void register_component(
-      const std::shared_ptr<ComponentState>& state,
-      const std::shared_ptr<LifetimeGate<ComponentReactor>>& gate) {
-    std::lock_guard lock(components_mutex_);
-    components_.push_back({state, gate});
-  }
-
-  void consume_component(ComponentState& state,
-                         const ComponentSessionMessage& request,
-                         std::optional<ComponentSessionMessage>* response,
-                         bool* close) {
-    switch (request.message_case()) {
-      case ComponentSessionMessage::kOpen: {
-        if (state.component) {
-          throw HalAdapterError("component is already open", -EBUSY);
-        }
-        state.component = adapter_.open_component(request.open().name(),
-                                                  request.open().prefix());
-        ComponentSessionMessage message;
-        message.mutable_metadata()->set_writer_id(state.component->name());
-        message.mutable_metadata()->set_ready(false);
-        *response = std::move(message);
-        return;
-      }
-      case ComponentSessionMessage::kPin: {
-        if (!state.component) {
-          throw HalAdapterError("open a component before creating pins",
-                                -EINVAL);
-        }
-        const auto type = decode_hal_type(request.pin().type());
-        if (!type) throw HalAdapterError("invalid component pin type", -EINVAL);
-        HalAdapterPinDirection direction;
-        switch (request.pin().direction()) {
-          case HAL_PIN_DIRECTION_IN:
-            direction = HalAdapterPinDirection::In;
-            break;
-          case HAL_PIN_DIRECTION_OUT:
-            direction = HalAdapterPinDirection::Out;
-            break;
-          case HAL_PIN_DIRECTION_IO:
-            direction = HalAdapterPinDirection::Io;
-            break;
-          default:
-            throw HalAdapterError("invalid component pin direction", -EINVAL);
-        }
-        if (!state.component->add_pin(request.pin().name(), *type, direction))
-          throw HalAdapterError("component pin was rejected", -EINVAL);
-        state.items.push_back(
-            {request.pin().name(), HAL_ITEM_KIND_PIN,
-             state.component->prefix() + "." + request.pin().name(),
-             std::nullopt});
-        return;
-      }
-      case ComponentSessionMessage::kParameter: {
-        if (!state.component) {
-          throw HalAdapterError("open a component before creating parameters",
-                                -EINVAL);
-        }
-        const auto type = decode_hal_type(request.parameter().type());
-        if (!type)
-          throw HalAdapterError("invalid component parameter type", -EINVAL);
-        HalAdapterParamDirection direction;
-        switch (request.parameter().direction()) {
-          case HAL_PARAM_DIRECTION_RO:
-            direction = HalAdapterParamDirection::ReadOnly;
-            break;
-          case HAL_PARAM_DIRECTION_RW:
-            direction = HalAdapterParamDirection::ReadWrite;
-            break;
-          default:
-            throw HalAdapterError("invalid component parameter direction",
-                                  -EINVAL);
-        }
-        if (!state.component->add_param(request.parameter().name(), *type,
-                                        direction))
-          throw HalAdapterError("component parameter was rejected", -EINVAL);
-        state.items.push_back(
-            {request.parameter().name(), HAL_ITEM_KIND_PARAM,
-             state.component->prefix() + "." + request.parameter().name(),
-             std::nullopt});
-        return;
-      }
-      case ComponentSessionMessage::kReady: {
-        if (!state.component) {
-          throw HalAdapterError("component is not open", -EINVAL);
-        }
-        if (request.ready().ready()) {
-          state.component->set_ready();
-        } else {
-          state.component->set_unready();
-        }
-        state.ready = request.ready().ready();
-        ComponentSessionMessage message;
-        message.mutable_metadata()->set_writer_id(state.component->name());
-        message.mutable_metadata()->set_ready(state.component->ready());
-        *response = std::move(message);
-        return;
-      }
-      case ComponentSessionMessage::kValue: {
-        if (!state.component) {
-          throw HalAdapterError("component is not open", -EINVAL);
-        }
-        auto value = decode_hal_scalar(request.value().value());
-        if (!value)
-          throw HalAdapterError("component value oneof is invalid", -EINVAL);
-        auto name = request.value().item().name();
-        const auto prefix = state.component->prefix() + ".";
-        if (name.rfind(prefix, 0) == 0) name.erase(0, prefix.size());
-        if (!state.component->write(name, *value))
-          throw HalAdapterError("component value was rejected", -EINVAL);
-        ComponentSessionMessage message;
-        *message.mutable_value() = request.value();
-        *response = std::move(message);
-        return;
-      }
-      case ComponentSessionMessage::kClose:
-        *close = true;
-        return;
-      default:
-        throw HalAdapterError(
-            "client sent an invalid component session message", -EINVAL);
-    }
-  }
-
-  void sample_components() {
-    std::vector<ComponentRegistration> registrations;
-    {
-      std::lock_guard lock(components_mutex_);
-      components_.erase(std::remove_if(components_.begin(), components_.end(),
-                                       [](const ComponentRegistration& item) {
-                                         return item.state.expired() ||
-                                                item.gate.expired();
-                                       }),
-                        components_.end());
-      registrations = components_;
-    }
-    for (const auto& registration : registrations) {
-      auto state = registration.state.lock();
-      if (!state || !state->component || !state->ready ||
-          state->cleanup_started.load())
-        continue;
-      ComponentSessionMessage message;
-      auto* delta = message.mutable_delta();
-      for (auto& item : state->items) {
-        const auto value = state->component->read(item.suffix);
-        if (!value || (item.previous && *item.previous == *value)) continue;
-        item.previous = value;
-        auto* encoded = delta->add_values();
-        encoded->mutable_item()->set_kind(item.kind);
-        encoded->mutable_item()->set_name(item.full_name);
-        encode_hal_scalar(*value, encoded->mutable_value());
-      }
-      if (delta->values_size() == 0) continue;
-      delta->set_sequence(++state->sequence);
-      if (auto gate = registration.gate.lock())
-        gate->invoke(
-            [message = std::move(message)](ComponentReactor& reactor) mutable {
-              reactor.offer_delta(std::move(message));
-            });
-    }
-  }
-
   void timer_loop() {
     auto next_topology = std::chrono::steady_clock::now();
     while (!stopping_.load()) {
       const auto now = std::chrono::steady_clock::now();
       const bool refresh_topology = now >= next_topology;
       if (refresh_topology) next_topology = now + topology_period_;
-      worker_.submit([this, refresh_topology] {
-        sample_components();
+      worker_.submit([this, refresh_topology, now] {
+        remote_components_.sample(now);
         sample_telemetry();
         if (!refresh_topology) return;
         try {
@@ -1003,6 +674,7 @@ class HalServiceImpl final : public HalService::CallbackService,
           last_published_topology_ = 0;
         }
       });
+      remote_components_.tick_streams(now);
       std::unique_lock lock(timer_mutex_);
       timer_condition_.wait_for(lock, std::chrono::milliseconds(50),
                                 [this] { return stopping_.load(); });
@@ -1045,18 +717,13 @@ class HalServiceImpl final : public HalService::CallbackService,
   }
 
   LinuxCncHalAdapter adapter_;
-  struct ComponentRegistration {
-    std::weak_ptr<ComponentState> state;
-    std::weak_ptr<LifetimeGate<ComponentReactor>> gate;
-  };
   BoundedExecutor& worker_;
-  AdmissionCounter& component_admission_;
   AdmissionCounter& stream_admission_;
   std::shared_ptr<HalValueTelemetry> telemetry_;
   const std::chrono::milliseconds topology_period_;
+  ActiveCallbackRegistry callbacks_;
+  RemoteComponentRpc remote_components_;
   SubscriptionHub<std::shared_ptr<const TopologySnapshot>> topology_wakes_;
-  std::mutex components_mutex_;
-  std::vector<ComponentRegistration> components_;
   std::mutex topology_mutex_;
   std::string topology_serialized_;
   std::shared_ptr<const TopologySnapshot> topology_snapshot_;
@@ -1064,7 +731,6 @@ class HalServiceImpl final : public HalService::CallbackService,
   std::uint64_t last_published_topology_ = 0;
   std::atomic<bool> writer_ready_{true};
   std::atomic<bool> stopping_{false};
-  ActiveCallbackRegistry callbacks_;
   std::mutex timer_mutex_;
   std::condition_variable timer_condition_;
   std::thread timer_;

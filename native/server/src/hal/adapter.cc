@@ -14,6 +14,7 @@
 // daemon.
 #include <cerrno>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <utility>
@@ -353,8 +354,6 @@ bool LinuxCncHalComponent::add_pin(const std::string& suffix,
   if (!impl_ || impl_->id <= 0 || impl_->ready || suffix.empty() ||
       impl_->items.find(suffix) != impl_->items.end())
     return false;
-  if (impl_->items.size() >= LinuxCncHalComponent::kMaxItems)
-    throw HalAdapterError("component dynamic item quota reached", -EBUSY);
   const auto full = full_name(impl_->prefix, suffix);
   if (full.empty()) return false;
   const auto slot = impl_->slab->acquire();
@@ -393,8 +392,6 @@ bool LinuxCncHalComponent::add_param(const std::string& suffix,
   if (!impl_ || impl_->id <= 0 || impl_->ready || suffix.empty() ||
       impl_->items.find(suffix) != impl_->items.end())
     return false;
-  if (impl_->items.size() >= LinuxCncHalComponent::kMaxItems)
-    throw HalAdapterError("component dynamic item quota reached", -EBUSY);
   const auto full = full_name(impl_->prefix, suffix);
   if (full.empty()) return false;
   const auto slot = impl_->slab->acquire();
@@ -472,10 +469,16 @@ bool LinuxCncHalComponent::write(const std::string& suffix,
   return write_value(item.type, data, value);
 }
 
-LinuxCncHalAdapter::LinuxCncHalAdapter(std::string component_name)
+LinuxCncHalAdapter::LinuxCncHalAdapter(std::string component_name,
+                                       std::size_t dynamic_item_capacity)
     : impl_(std::make_unique<Impl>()) {
   if (component_name.empty() || component_name.size() > HAL_NAME_LEN)
     throw HalAdapterError("invalid HAL component name", -EINVAL);
+  if (dynamic_item_capacity == 0 ||
+      dynamic_item_capacity >
+          static_cast<std::size_t>(std::numeric_limits<long>::max()) /
+              sizeof(hal_data_u))
+    throw HalAdapterError("invalid HAL dynamic item capacity", -EINVAL);
   impl_->component_name = std::move(component_name);
   impl_->component_id = hal_init(impl_->component_name.c_str());
   if (impl_->component_id <= 0)
@@ -488,7 +491,7 @@ LinuxCncHalAdapter::LinuxCncHalAdapter(std::string component_name)
         "hal_ready failed for '" + impl_->component_name + "'", result);
   }
   try {
-    impl_->slab = std::make_shared<HalAllocationSlab>(kMaxDynamicItems);
+    impl_->slab = std::make_shared<HalAllocationSlab>(dynamic_item_capacity);
   } catch (...) {
     hal_exit(impl_->component_id);
     impl_->component_id = 0;

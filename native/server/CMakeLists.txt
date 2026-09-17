@@ -280,6 +280,8 @@ if(LINUXCNC_GRPC_BUILD_WIRE)
         src/machine/grpc/service.cc
         src/machine/grpc/status_codec.cc
         src/program/grpc/service.cc
+        src/hal/grpc/remote_component_registry.cc
+        src/hal/grpc/remote_component_rpc.cc
         src/hal/grpc/service_hal.cc
         src/scope/grpc/service_controller.cc)
     target_sources(linuxcnc-grpc-server PRIVATE ${LINUXCNC_GRPC_SERVER_SOURCES})

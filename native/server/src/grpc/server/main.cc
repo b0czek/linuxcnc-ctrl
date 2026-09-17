@@ -4,6 +4,7 @@
 #include <grpcpp/resource_quota.h>
 #include <pthread.h>
 
+#include <algorithm>
 #include <csignal>
 #include <fstream>
 #include <iostream>
@@ -69,11 +70,13 @@ int run_grpc_server(const DaemonConfig& config) {
                         config.max_workspace_entries});
     BoundedExecutor blocking(4, 128, 8);
     BoundedExecutor parser_worker(1, 8);
-    BoundedExecutor hal_worker(1, 128, 16);
+    BoundedExecutor hal_worker(
+        1, std::max<std::size_t>(128, config.max_remote_components + 65),
+        config.max_remote_components + 1);
     BoundedExecutor scope_worker(1, 128, 8);
     AdmissionCounter stream_admission(128);
     AdmissionCounter upload_admission(1);
-    AdmissionCounter component_admission(16);
+    AdmissionCounter component_admission(config.max_remote_components);
     auto position_telemetry = std::make_shared<PositionTelemetry>(10000);
     auto hal_telemetry = std::make_shared<HalValueTelemetry>(128);
     auto scope_telemetry = std::make_shared<ScopeTelemetry>();

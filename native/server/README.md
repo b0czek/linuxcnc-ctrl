@@ -17,7 +17,7 @@ typed task, trajectory, joint/axis/spindle, I/O, and tool-table deltas. Live
 CTest validation launches an isolated pinned-LinuxCNC simulation and exercises
 real status, accepted/completed commands, sparse replay, MDI-backed packed
 position deltas, workspace upload and rs274 parsing, exact 64-bit HAL values,
-client-component cleanup, and exclusive scope ownership. The harness refuses
+retained remote HAL proxies, and exclusive scope ownership. The harness refuses
 to start when another LinuxCNC/HAL runtime exists and reclaims only the runtime
 and NML resources it created.
 
@@ -84,7 +84,13 @@ latest-state deltas rather than every sampled transition. Client WebSocket
 messages are forbidden on both telemetry routes.
 
 The HAL service uses the pinned LinuxCNC HAL runtime for topology, exact
-scalar reads/writes, signals, and session-owned components. The scope service
+scalar reads/writes, signals, and server-owned remote components. Each
+`RunComponent` stream creates or authenticates one retained proxy, activates it
+with a complete client-owned state, and then exchanges sequenced updates and
+sampled deltas. Transport loss, heartbeat timeout, and `DETACH` drive the
+managed `<prefix>.online` pin low and apply optional typed disconnect
+values without removing pins, parameters, or links. Only authenticated
+`DESTROY` or daemon shutdown removes the native component. The scope service
 loads `scope_rt` on first use when needed, attaches its sampling function to
 the configured thread, and keeps shared-memory polling off the realtime path.
 Each upload is one Zstandard-compressed tar archive and creates one immutable

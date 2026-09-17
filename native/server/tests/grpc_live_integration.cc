@@ -467,25 +467,29 @@ int probe_reacquire(const std::string& endpoint) {
   grpc::ClientContext component_context;
   component_context.set_deadline(std::chrono::system_clock::now() +
                                  std::chrono::seconds(5));
-  auto component = hal->ComponentSession(&component_context);
-  linuxcnc::v1::ComponentSessionMessage request;
-  request.mutable_open()->set_name("grpc-shutdown-owned");
-  request.mutable_open()->set_prefix("grpc-shutdown-owned");
+  auto component = hal->RunComponent(&component_context);
+  linuxcnc::v1::HalComponentClientMessage request;
+  auto* create = request.mutable_create();
+  create->set_name("grpc-shutdown-owned");
+  create->set_prefix("grpc-shutdown-owned");
+  auto* pin = create->add_pins();
+  pin->set_name("value");
+  pin->set_type(linuxcnc::v1::HAL_TYPE_FLOAT);
+  pin->set_direction(linuxcnc::v1::HAL_PIN_DIRECTION_OUT);
   assert(component->Write(request));
-  linuxcnc::v1::ComponentSessionMessage response;
-  assert(component->Read(&response) && response.has_metadata());
+  linuxcnc::v1::HalComponentServerMessage response;
+  assert(component->Read(&response) && response.has_attached());
+  const auto generation = response.attached().generation();
   request.Clear();
-  request.mutable_pin()->set_name("value");
-  request.mutable_pin()->set_type(linuxcnc::v1::HAL_TYPE_FLOAT);
-  request.mutable_pin()->set_direction(linuxcnc::v1::HAL_PIN_DIRECTION_OUT);
+  auto* activate = request.mutable_activate();
+  activate->set_generation(generation);
+  auto* value = activate->add_values();
+  value->mutable_item()->set_kind(linuxcnc::v1::HAL_ITEM_KIND_PIN);
+  value->mutable_item()->set_name("grpc-shutdown-owned.value");
+  value->mutable_value()->set_type(linuxcnc::v1::HAL_TYPE_FLOAT);
+  value->mutable_value()->set_float_value(0.0);
   assert(component->Write(request));
-  request.Clear();
-  request.mutable_ready()->set_ready(true);
-  assert(component->Write(request));
-  do {
-    assert(component->Read(&response));
-  } while (!response.has_metadata());
-  assert(response.metadata().ready());
+  assert(component->Read(&response) && response.has_active());
 
   grpc::ClientContext scope_context;
   scope_context.set_deadline(std::chrono::system_clock::now() +
@@ -496,14 +500,16 @@ int probe_reacquire(const std::string& endpoint) {
   grpc::ClientContext stop_context;
   assert(scope->Stop(&stop_context, {}, &scope_response).ok());
   request.Clear();
-  request.mutable_close();
+  request.mutable_close()->set_generation(generation);
+  request.mutable_close()->set_mode(
+      linuxcnc::v1::HAL_COMPONENT_CLOSE_MODE_DESTROY);
   assert(component->Write(request));
   component->WritesDone();
   while (component->Read(&response)) {
   }
   const auto component_status = component->Finish();
   if (!component_status.ok()) {
-    std::cerr << "ComponentSession reacquire failed with status "
+    std::cerr << "RunComponent reacquire failed with status "
               << component_status.error_code() << ": "
               << component_status.error_message() << "\n";
     return 1;
@@ -537,27 +543,31 @@ int hold_shutdown(const std::string& endpoint) {
   grpc::ClientContext component_context;
   component_context.set_deadline(std::chrono::system_clock::now() +
                                  std::chrono::seconds(15));
-  auto component = hal->ComponentSession(&component_context);
-  linuxcnc::v1::ComponentSessionMessage component_request;
-  component_request.mutable_open()->set_name("grpc-shutdown-owned");
-  component_request.mutable_open()->set_prefix("grpc-shutdown-owned");
+  auto component = hal->RunComponent(&component_context);
+  linuxcnc::v1::HalComponentClientMessage component_request;
+  auto* create = component_request.mutable_create();
+  create->set_name("grpc-shutdown-owned");
+  create->set_prefix("grpc-shutdown-owned");
+  auto* pin = create->add_pins();
+  pin->set_name("value");
+  pin->set_type(linuxcnc::v1::HAL_TYPE_FLOAT);
+  pin->set_direction(linuxcnc::v1::HAL_PIN_DIRECTION_OUT);
   assert(component->Write(component_request));
-  linuxcnc::v1::ComponentSessionMessage component_response;
+  linuxcnc::v1::HalComponentServerMessage component_response;
   assert(component->Read(&component_response) &&
-         component_response.has_metadata());
+         component_response.has_attached());
+  const auto generation = component_response.attached().generation();
   component_request.Clear();
-  component_request.mutable_pin()->set_name("value");
-  component_request.mutable_pin()->set_type(linuxcnc::v1::HAL_TYPE_FLOAT);
-  component_request.mutable_pin()->set_direction(
-      linuxcnc::v1::HAL_PIN_DIRECTION_OUT);
+  auto* activate = component_request.mutable_activate();
+  activate->set_generation(generation);
+  auto* value = activate->add_values();
+  value->mutable_item()->set_kind(linuxcnc::v1::HAL_ITEM_KIND_PIN);
+  value->mutable_item()->set_name("grpc-shutdown-owned.value");
+  value->mutable_value()->set_type(linuxcnc::v1::HAL_TYPE_FLOAT);
+  value->mutable_value()->set_float_value(0.0);
   assert(component->Write(component_request));
-  component_request.Clear();
-  component_request.mutable_ready()->set_ready(true);
-  assert(component->Write(component_request));
-  do {
-    assert(component->Read(&component_response));
-  } while (!component_response.has_metadata());
-  assert(component_response.metadata().ready());
+  assert(component->Read(&component_response) &&
+         component_response.has_active());
 
   // Start after the owned component is fully visible so the held watch has no
   // pending mutation to encode before the daemon-shutdown race begins.
@@ -594,7 +604,7 @@ int hold_shutdown(const std::string& endpoint) {
   component->WritesDone();
   while (component->Read(&component_response)) {
   }
-  require_shutdown_status(component->Finish(), "ComponentSession");
+  require_shutdown_status(component->Finish(), "RunComponent");
   std::cout << "LIVE_SHUTDOWN_TERMINATED\n" << std::flush;
   return 0;
 }
@@ -1238,72 +1248,125 @@ int main(int argc, char** argv) {
   assert(exact_read_response.values(0).value().s64() == signed_value);
   assert(exact_read_response.values(1).value().u64() == unsigned_value);
 
-  // A disconnected client-owned component must disappear with all its pins.
+  // A proxy is created atomically, activated with complete client-owned state,
+  // and destroyed only by authenticated explicit close.
   grpc::ClientContext component_context;
   component_context.set_deadline(std::chrono::system_clock::now() +
                                  std::chrono::seconds(5));
-  auto component = hal->ComponentSession(&component_context);
-  linuxcnc::v1::ComponentSessionMessage component_open;
-  component_open.mutable_open()->set_name("grpc-live-component");
-  component_open.mutable_open()->set_prefix("grpc-live-component");
+  auto component = hal->RunComponent(&component_context);
+  linuxcnc::v1::HalComponentClientMessage component_open;
+  auto* component_create = component_open.mutable_create();
+  component_create->set_name("grpc-live-component");
+  component_create->set_prefix("grpc-live-component");
+  auto* component_pin = component_create->add_pins();
+  component_pin->set_name("value");
+  component_pin->set_type(linuxcnc::v1::HAL_TYPE_S64);
+  component_pin->set_direction(linuxcnc::v1::HAL_PIN_DIRECTION_OUT);
+  auto* component_input = component_create->add_pins();
+  component_input->set_name("input");
+  component_input->set_type(linuxcnc::v1::HAL_TYPE_S32);
+  component_input->set_direction(linuxcnc::v1::HAL_PIN_DIRECTION_IN);
   assert(component->Write(component_open));
-  linuxcnc::v1::ComponentSessionMessage component_response;
+  linuxcnc::v1::HalComponentServerMessage component_response;
   assert(component->Read(&component_response));
-  assert(component_response.has_metadata());
-  assert(component_response.metadata().writer_id() == "grpc-live-component");
-  assert(!component_response.metadata().ready());
+  assert(component_response.has_attached());
+  assert(component_response.attached().name() == "grpc-live-component");
+  assert(component_response.attached().ownership_token().size() == 32);
+  bool initially_disconnected = false;
+  for (const auto& retained : component_response.attached().retained_values()) {
+    if (retained.item().name() == "grpc-live-component.online") {
+      assert(!retained.value().bit());
+      initially_disconnected = true;
+    }
+  }
+  assert(initially_disconnected);
+  const auto component_generation = component_response.attached().generation();
+  const auto component_proxy_id = component_response.attached().proxy_id();
 
-  linuxcnc::v1::ComponentSessionMessage component_pin;
-  component_pin.mutable_pin()->set_name("value");
-  component_pin.mutable_pin()->set_type(linuxcnc::v1::HAL_TYPE_S64);
-  component_pin.mutable_pin()->set_direction(
-      linuxcnc::v1::HAL_PIN_DIRECTION_OUT);
-  assert(component->Write(component_pin));
-  linuxcnc::v1::ComponentSessionMessage component_ready;
-  component_ready.mutable_ready()->set_ready(true);
+  linuxcnc::v1::HalComponentClientMessage component_ready;
+  auto* activation = component_ready.mutable_activate();
+  activation->set_generation(component_generation);
+  auto* initial = activation->add_values();
+  initial->mutable_item()->set_kind(linuxcnc::v1::HAL_ITEM_KIND_PIN);
+  initial->mutable_item()->set_name("grpc-live-component.value");
+  initial->mutable_value()->set_type(linuxcnc::v1::HAL_TYPE_S64);
+  initial->mutable_value()->set_s64(0);
   assert(component->Write(component_ready));
   assert(component->Read(&component_response));
-  assert(component_response.has_metadata());
-  assert(component_response.metadata().ready());
+  assert(component_response.has_active());
 
-  linuxcnc::v1::ComponentSessionMessage component_value;
-  component_value.mutable_value()->mutable_item()->set_kind(
-      linuxcnc::v1::HAL_ITEM_KIND_PIN);
-  component_value.mutable_value()->mutable_item()->set_name(
-      "grpc-live-component.value");
-  component_value.mutable_value()->mutable_value()->set_type(
-      linuxcnc::v1::HAL_TYPE_S64);
-  component_value.mutable_value()->mutable_value()->set_s64(signed_value);
+  linuxcnc::v1::HalReadRequest connected_read;
+  auto* connected_ref = connected_read.add_items();
+  connected_ref->set_kind(linuxcnc::v1::HAL_ITEM_KIND_PIN);
+  connected_ref->set_name("grpc-live-component.online");
+  linuxcnc::v1::HalReadResponse connected_response;
+  grpc::ClientContext connected_context;
+  assert(
+      hal->Read(&connected_context, connected_read, &connected_response).ok());
+  assert(connected_response.values_size() == 1);
+  assert(connected_response.values(0).value().bit());
+
+  linuxcnc::v1::HalComponentClientMessage component_heartbeat;
+  component_heartbeat.mutable_heartbeat()->set_generation(component_generation);
+  assert(component->Write(component_heartbeat));
+  assert(component->Read(&component_response));
+  assert(component_response.has_heartbeat_ack());
+  assert(component_response.heartbeat_ack().generation() ==
+         component_generation);
+
+  linuxcnc::v1::HalComponentClientMessage component_value;
+  auto* update = component_value.mutable_update();
+  update->set_generation(component_generation);
+  update->set_sequence(1);
+  auto* update_value = update->add_values();
+  update_value->mutable_item()->set_kind(linuxcnc::v1::HAL_ITEM_KIND_PIN);
+  update_value->mutable_item()->set_name("grpc-live-component.value");
+  update_value->mutable_value()->set_type(linuxcnc::v1::HAL_TYPE_S64);
+  update_value->mutable_value()->set_s64(signed_value);
   assert(component->Write(component_value));
   bool saw_component_acknowledgement = false;
-  bool saw_component_delta = false;
   while (component->Read(&component_response)) {
-    if (component_response.has_value()) {
-      assert(component_response.value().item().kind() ==
-             linuxcnc::v1::HAL_ITEM_KIND_PIN);
-      assert(component_response.value().item().name() ==
-             "grpc-live-component.value");
-      assert(component_response.value().value().type() ==
-             linuxcnc::v1::HAL_TYPE_S64);
-      assert(component_response.value().value().s64() == signed_value);
+    if (component_response.has_update_ack()) {
+      assert(component_response.update_ack().sequence() == 1);
       saw_component_acknowledgement = true;
     }
-    if (component_response.has_delta()) {
-      for (const auto& value : component_response.delta().values()) {
-        if (value.item().name() == "grpc-live-component.value") {
-          assert(value.value().s64() == signed_value);
-          saw_component_delta = true;
-        }
-      }
-    }
-    if (saw_component_acknowledgement && saw_component_delta) break;
+    if (saw_component_acknowledgement) break;
   }
   assert(saw_component_acknowledgement);
-  assert(saw_component_delta);
-  linuxcnc::v1::ComponentSessionMessage component_close;
-  component_close.mutable_close();
+
+  linuxcnc::v1::HalWrite input_write;
+  auto* input_update = input_write.add_writes();
+  input_update->mutable_item()->set_kind(linuxcnc::v1::HAL_ITEM_KIND_PIN);
+  input_update->mutable_item()->set_name("grpc-live-component.input");
+  input_update->mutable_value()->set_type(linuxcnc::v1::HAL_TYPE_S32);
+  input_update->mutable_value()->set_s32(55);
+  linuxcnc::v1::HalWriteResponse input_write_response;
+  grpc::ClientContext input_write_context;
+  assert(hal->Write(&input_write_context, input_write, &input_write_response)
+             .ok());
+  bool saw_input_delta = false;
+  while (component->Read(&component_response)) {
+    if (!component_response.has_delta()) continue;
+    assert(component_response.delta().generation() == component_generation);
+    for (const auto& value : component_response.delta().values()) {
+      if (value.item().name() == "grpc-live-component.input") {
+        assert(value.value().s32() == 55);
+        saw_input_delta = true;
+      }
+    }
+    if (saw_input_delta) break;
+  }
+  assert(saw_input_delta);
+
+  linuxcnc::v1::HalComponentClientMessage component_close;
+  component_close.mutable_close()->set_generation(component_generation);
+  component_close.mutable_close()->set_mode(
+      linuxcnc::v1::HAL_COMPONENT_CLOSE_MODE_DESTROY);
   assert(component->Write(component_close));
   component->WritesDone();
+  assert(component->Read(&component_response));
+  assert(component_response.has_closed());
+  assert(component_response.closed().proxy_id() == component_proxy_id);
   const auto component_status = component->Finish();
   assert(component_status.ok());
 
@@ -1317,36 +1380,171 @@ int main(int argc, char** argv) {
   }
   for (const auto& item : cleanup_topology.topology().pins()) {
     assert(item.name() != "grpc-live-component.value");
+    assert(item.name() != "grpc-live-component.input");
+    assert(item.name() != "grpc-live-component.online");
   }
 
-  // Cancellation, rather than an explicit Close message, owns the same HAL
-  // cleanup path.
+  // Transport loss detaches but retains the proxy and its HAL objects.
   grpc::ClientContext abrupt_context;
   abrupt_context.set_deadline(std::chrono::system_clock::now() +
                               std::chrono::seconds(5));
-  auto abrupt = hal->ComponentSession(&abrupt_context);
-  linuxcnc::v1::ComponentSessionMessage abrupt_open;
-  abrupt_open.mutable_open()->set_name("grpc-live-abrupt");
-  abrupt_open.mutable_open()->set_prefix("grpc-live-abrupt");
+  auto abrupt = hal->RunComponent(&abrupt_context);
+  linuxcnc::v1::HalComponentClientMessage abrupt_open;
+  auto* abrupt_create = abrupt_open.mutable_create();
+  abrupt_create->set_name("grpc-live-abrupt");
+  abrupt_create->set_prefix("grpc-live-abrupt");
+  auto* abrupt_pin = abrupt_create->add_pins();
+  abrupt_pin->set_name("safe");
+  abrupt_pin->set_type(linuxcnc::v1::HAL_TYPE_S32);
+  abrupt_pin->set_direction(linuxcnc::v1::HAL_PIN_DIRECTION_OUT);
+  abrupt_pin->mutable_disconnect_value()->set_type(linuxcnc::v1::HAL_TYPE_S32);
+  abrupt_pin->mutable_disconnect_value()->set_s32(42);
   assert(abrupt->Write(abrupt_open));
   assert(abrupt->Read(&component_response));
+  const auto abrupt_id = component_response.attached().proxy_id();
+  const auto abrupt_token = component_response.attached().ownership_token();
+  const auto abrupt_generation = component_response.attached().generation();
+
+  linuxcnc::v1::HalComponentClientMessage abrupt_activate;
+  abrupt_activate.mutable_activate()->set_generation(abrupt_generation);
+  auto* abrupt_initial = abrupt_activate.mutable_activate()->add_values();
+  abrupt_initial->mutable_item()->set_kind(linuxcnc::v1::HAL_ITEM_KIND_PIN);
+  abrupt_initial->mutable_item()->set_name("grpc-live-abrupt.safe");
+  abrupt_initial->mutable_value()->set_type(linuxcnc::v1::HAL_TYPE_S32);
+  abrupt_initial->mutable_value()->set_s32(7);
+  assert(abrupt->Write(abrupt_activate));
+  assert(abrupt->Read(&component_response));
+  assert(component_response.has_active());
+
+  grpc::ClientContext invalid_attach_context;
+  auto invalid_attach = hal->RunComponent(&invalid_attach_context);
+  linuxcnc::v1::HalComponentClientMessage invalid_attach_request;
+  invalid_attach_request.mutable_attach()->set_proxy_id(abrupt_id);
+  invalid_attach_request.mutable_attach()->set_name("grpc-live-abrupt");
+  invalid_attach_request.mutable_attach()->set_ownership_token(
+      std::string(32, 'x'));
+  assert(invalid_attach->Write(invalid_attach_request));
+  invalid_attach->WritesDone();
+  assert(!invalid_attach->Read(&component_response));
+  assert(invalid_attach->Finish().error_code() ==
+         grpc::StatusCode::UNAUTHENTICATED);
+
+  grpc::ClientContext concurrent_attach_context;
+  auto concurrent_attach = hal->RunComponent(&concurrent_attach_context);
+  linuxcnc::v1::HalComponentClientMessage concurrent_attach_request;
+  concurrent_attach_request.mutable_attach()->set_proxy_id(abrupt_id);
+  concurrent_attach_request.mutable_attach()->set_name("grpc-live-abrupt");
+  concurrent_attach_request.mutable_attach()->set_ownership_token(abrupt_token);
+  assert(concurrent_attach->Write(concurrent_attach_request));
+  concurrent_attach->WritesDone();
+  assert(!concurrent_attach->Read(&component_response));
+  assert(concurrent_attach->Finish().error_code() ==
+         grpc::StatusCode::ALREADY_EXISTS);
+
   abrupt_context.TryCancel();
   abrupt->WritesDone();
   const auto abrupt_status = abrupt->Finish();
   assert(abrupt_status.error_code() == grpc::StatusCode::CANCELLED);
-  bool abrupt_removed = false;
-  for (int attempt = 0; attempt < 20 && !abrupt_removed; ++attempt) {
+  bool abrupt_retained = false;
+  for (int attempt = 0; attempt < 20 && !abrupt_retained; ++attempt) {
     grpc::ClientContext context;
     linuxcnc::v1::GetHalTopologyResponse current;
     assert(hal->GetTopology(&context, {}, &current).ok());
-    abrupt_removed = true;
     for (const auto& item : current.topology().components()) {
-      if (item.name() == "grpc-live-abrupt") abrupt_removed = false;
+      if (item.name() == "grpc-live-abrupt") abrupt_retained = true;
     }
-    if (!abrupt_removed)
+    if (!abrupt_retained)
       std::this_thread::sleep_for(std::chrono::milliseconds(25));
   }
-  assert(abrupt_removed);
+  assert(abrupt_retained);
+
+  grpc::ClientContext reattach_context;
+  auto reattach = hal->RunComponent(&reattach_context);
+  linuxcnc::v1::HalComponentClientMessage attach;
+  attach.mutable_attach()->set_proxy_id(abrupt_id);
+  attach.mutable_attach()->set_name("grpc-live-abrupt");
+  attach.mutable_attach()->set_ownership_token(abrupt_token);
+  assert(reattach->Write(attach));
+  assert(reattach->Read(&component_response));
+  assert(component_response.has_attached());
+  assert(component_response.attached().generation() > abrupt_generation);
+  bool saw_safe_value = false;
+  bool saw_disconnected = false;
+  for (const auto& retained : component_response.attached().retained_values()) {
+    if (retained.item().name() == "grpc-live-abrupt.safe") {
+      assert(retained.value().s32() == 42);
+      saw_safe_value = true;
+    } else if (retained.item().name() == "grpc-live-abrupt.online") {
+      assert(!retained.value().bit());
+      saw_disconnected = true;
+    }
+  }
+  assert(saw_safe_value);
+  assert(saw_disconnected);
+  linuxcnc::v1::HalComponentClientMessage detach_abrupt;
+  detach_abrupt.mutable_close()->set_generation(
+      component_response.attached().generation());
+  detach_abrupt.mutable_close()->set_mode(
+      linuxcnc::v1::HAL_COMPONENT_CLOSE_MODE_DETACH);
+  assert(reattach->Write(detach_abrupt));
+  reattach->WritesDone();
+  assert(reattach->Read(&component_response));
+  assert(component_response.has_closed());
+  assert(reattach->Finish().ok());
+
+  grpc::ClientContext destroy_context;
+  auto destroy = hal->RunComponent(&destroy_context);
+  linuxcnc::v1::HalComponentClientMessage final_attach;
+  final_attach.mutable_attach()->set_proxy_id(abrupt_id);
+  final_attach.mutable_attach()->set_name("grpc-live-abrupt");
+  final_attach.mutable_attach()->set_ownership_token(abrupt_token);
+  assert(destroy->Write(final_attach));
+  assert(destroy->Read(&component_response));
+  assert(component_response.has_attached());
+  linuxcnc::v1::HalComponentClientMessage destroy_abrupt;
+  destroy_abrupt.mutable_close()->set_generation(
+      component_response.attached().generation());
+  destroy_abrupt.mutable_close()->set_mode(
+      linuxcnc::v1::HAL_COMPONENT_CLOSE_MODE_DESTROY);
+  assert(destroy->Write(destroy_abrupt));
+  destroy->WritesDone();
+  assert(destroy->Read(&component_response));
+  assert(component_response.has_closed());
+  assert(destroy->Finish().ok());
+
+  grpc::ClientContext timeout_context;
+  timeout_context.set_deadline(std::chrono::system_clock::now() +
+                               std::chrono::seconds(6));
+  auto timeout_component = hal->RunComponent(&timeout_context);
+  linuxcnc::v1::HalComponentClientMessage timeout_create;
+  timeout_create.mutable_create()->set_name("grpc-live-timeout");
+  timeout_create.mutable_create()->set_prefix("grpc-live-timeout");
+  assert(timeout_component->Write(timeout_create));
+  assert(timeout_component->Read(&component_response));
+  const auto timeout_id = component_response.attached().proxy_id();
+  const auto timeout_token = component_response.attached().ownership_token();
+  while (timeout_component->Read(&component_response)) {
+  }
+  assert(timeout_component->Finish().error_code() ==
+         grpc::StatusCode::DEADLINE_EXCEEDED);
+
+  grpc::ClientContext timeout_destroy_context;
+  auto timeout_destroy = hal->RunComponent(&timeout_destroy_context);
+  linuxcnc::v1::HalComponentClientMessage timeout_attach;
+  timeout_attach.mutable_attach()->set_proxy_id(timeout_id);
+  timeout_attach.mutable_attach()->set_name("grpc-live-timeout");
+  timeout_attach.mutable_attach()->set_ownership_token(timeout_token);
+  assert(timeout_destroy->Write(timeout_attach));
+  assert(timeout_destroy->Read(&component_response));
+  linuxcnc::v1::HalComponentClientMessage timeout_close;
+  timeout_close.mutable_close()->set_generation(
+      component_response.attached().generation());
+  timeout_close.mutable_close()->set_mode(
+      linuxcnc::v1::HAL_COMPONENT_CLOSE_MODE_DESTROY);
+  assert(timeout_destroy->Write(timeout_close));
+  timeout_destroy->WritesDone();
+  assert(timeout_destroy->Read(&component_response));
+  assert(timeout_destroy->Finish().ok());
 
   // Scope controls use the shared gRPC control plane while capture data uses
   // the shared WebSocket telemetry listener.
