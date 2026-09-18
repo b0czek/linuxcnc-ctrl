@@ -226,6 +226,7 @@ message JointStat {
   bool min_hard_limit = 20;
   bool max_hard_limit = 21;
   bool override_limits = 22;
+  bool available = 23;
 }
 
 message AxisStat {
@@ -248,6 +249,7 @@ message SpindleStat {
   int32 orient_fault = 11;
   bool spindle_override_enabled = 12;
   bool homed = 13;
+  bool available = 14;
 }
 
 message TrajectoryStat {
@@ -507,6 +509,8 @@ message ExecuteCommandRequest {
     MessageCommand send_operator_text = 50;
     MessageCommand send_operator_display = 51;
     SetRapidRate set_rapid_rate = 52;
+    SetJointAvailability set_joint_availability = 53;
+    SetSpindleAvailability set_spindle_availability = 54;
   }
 }
 
@@ -548,6 +552,16 @@ message SetSpindleOverrideEnable {
 }
 
 message JointIndex { int32 joint_index = 1; }
+
+message SetJointAvailability {
+  int32 joint_index = 1;
+  bool available = 2;
+}
+
+message SetSpindleAvailability {
+  int32 spindle_index = 1;
+  bool available = 2;
+}
 
 message JogStop { int32 axis_or_joint_index = 1; bool is_joint_jog = 2; }
 

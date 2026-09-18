@@ -75,6 +75,7 @@ NmlJointStatus from_joint(const EMC_JOINT_STAT& source) {
   result.min_hard_limit = source.minHardLimit;
   result.max_hard_limit = source.maxHardLimit;
   result.override_limits = source.overrideLimits;
+  result.available = source.available;
   return result;
 }
 
@@ -97,6 +98,7 @@ NmlSpindleStatus from_spindle(const EMC_SPINDLE_STAT& source) {
   result.orient_fault = source.orient_fault;
   result.spindle_override_enabled = source.spindle_override_enabled;
   result.homed = source.homed;
+  result.available = source.available;
   return result;
 }
 
@@ -821,6 +823,20 @@ CommandSubmission NmlAdapter::submit(
             case NmlCommandKind::SetAdaptiveFeedEnable: {
               auto value = std::make_unique<EMC_MOTION_ADAPTIVE>();
               value->status = command.boolean ? 1 : 0;
+              message = std::move(value);
+              break;
+            }
+            case NmlCommandKind::SetJointAvailability: {
+              auto value = std::make_unique<EMC_JOINT_SET_AVAILABILITY>();
+              value->joint = command.integer;
+              value->available = command.boolean ? 1 : 0;
+              message = std::move(value);
+              break;
+            }
+            case NmlCommandKind::SetSpindleAvailability: {
+              auto value = std::make_unique<EMC_SPINDLE_SET_AVAILABILITY>();
+              value->spindle = command.integer;
+              value->available = command.boolean ? 1 : 0;
               message = std::move(value);
               break;
             }

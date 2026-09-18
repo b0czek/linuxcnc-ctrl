@@ -25,6 +25,7 @@ NmlStatusSnapshot status_sample() {
   sample.motion_stat.traj.actual_position.values[0] = 12.5;
   sample.motion_stat.joints.resize(2);
   sample.motion_stat.joints[0].homed = true;
+  sample.motion_stat.joints[0].available = false;
   sample.motion_stat.joints[1].homed = true;
   sample.motion_stat.axes.resize(2);
   sample.motion_stat.axes[0].velocity = 2.5;
@@ -53,6 +54,7 @@ void snapshot_encoding_is_stable() {
   assert(encoded.message.task().file() == "program.ngc");
   assert(encoded.message.motion().traj().actual_position().values(0) == 12.5);
   assert(encoded.message.motion().joint(0).homed());
+  assert(!encoded.message.motion().joint(0).available());
   assert(encoded.message.io().tool().tool_in_spindle() == 7);
   assert(encoded.message.tool_table(0).diameter() == 4.0);
 

@@ -77,6 +77,8 @@ enum class NmlCommandKind {
   SendOperatorText,
   SendOperatorDisplay,
   SetRapidRate,
+  SetJointAvailability,
+  SetSpindleAvailability,
 };
 
 struct NmlPose {
@@ -163,6 +165,7 @@ struct NmlJointStatus {
   bool min_hard_limit = false;
   bool max_hard_limit = false;
   bool override_limits = false;
+  bool available = true;
 };
 
 struct NmlAxisStatus {
@@ -185,6 +188,7 @@ struct NmlSpindleStatus {
   std::int32_t orient_fault = 0;
   bool spindle_override_enabled = false;
   bool homed = false;
+  bool available = true;
 };
 
 struct NmlTrajectoryStatus {

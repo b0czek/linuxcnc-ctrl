@@ -171,6 +171,7 @@ void fill_status(const NmlStatusSnapshot& source, LinuxCNCStat* target) {
     value->set_min_hard_limit(joint.min_hard_limit);
     value->set_max_hard_limit(joint.max_hard_limit);
     value->set_override_limits(joint.override_limits);
+    value->set_available(joint.available);
   }
   for (const auto& axis : motion_source.axes) {
     auto* value = motion->add_axis();
@@ -193,6 +194,7 @@ void fill_status(const NmlStatusSnapshot& source, LinuxCNCStat* target) {
     value->set_orient_fault(spindle.orient_fault);
     value->set_spindle_override_enabled(spindle.spindle_override_enabled);
     value->set_homed(spindle.homed);
+    value->set_available(spindle.available);
   }
   for (const auto value : motion_source.digital_input)
     motion->add_digital_input(value);
