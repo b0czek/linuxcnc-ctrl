@@ -23,17 +23,17 @@ Subject: [PATCH] availability-mcodes
  tests/availability-mcodes-regressions/README  |   9 ++
  .../checkresult                               |   5 +
  .../availability-mcodes-regressions/step.ngc  |   6 +
- .../test-ui.py                                |  73 +++++++++
+ .../test-ui.py                                |  74 ++++++++++
  .../test.ini.in                               |   9 ++
  tests/availability-mcodes-regressions/test.sh |   6 +
  tests/availability-mcodes/.gitignore          |   2 +
- tests/availability-mcodes/README              |   8 +
+ tests/availability-mcodes/README              |   9 ++
  tests/availability-mcodes/checkresult         |   4 +
  tests/availability-mcodes/core_sim.hal        |   1 +
  tests/availability-mcodes/homing.ngc          |   4 +
  tests/availability-mcodes/no-force.ini.in     |   6 +
  tests/availability-mcodes/ordered.ngc         |   6 +
- tests/availability-mcodes/test-ui.py          | 147 ++++++++++++++++++
+ tests/availability-mcodes/test-ui.py          | 137 ++++++++++++++++++
  tests/availability-mcodes/test.ini            |   1 +
  tests/availability-mcodes/test.sh             |   5 +
  tests/availability-mcodes/timeout.ngc         |   4 +
@@ -43,7 +43,7 @@ Subject: [PATCH] availability-mcodes
  .../interp/availability-mcodes/bad-joint.ngc  |   2 +
  .../availability-mcodes/double-selector.ngc   |   2 +
  .../availability-mcodes/execute-status.cc     |  26 ++++
- .../availability-mcodes/execute-status.py     |  26 ++++
+ .../availability-mcodes/execute-status.py     |  30 ++++
  tests/interp/availability-mcodes/expected     |   0
  .../availability-mcodes/fractional-joint.ngc  |   2 +
  .../fractional-spindle.ngc                    |   2 +
@@ -69,7 +69,7 @@ Subject: [PATCH] availability-mcodes
  tests/interp/availability-mcodes/test.sh      |  80 ++++++++++
  .../availability-mcodes/valid-joint.ngc       |   3 +
  .../availability-mcodes/valid-spindle.ngc     |   3 +
- 65 files changed, 641 insertions(+), 7 deletions(-)
+ 65 files changed, 637 insertions(+), 7 deletions(-)
  create mode 100644 tests/availability-mcodes-regressions/.gitignore
  create mode 100644 tests/availability-mcodes-regressions/README
  create mode 100755 tests/availability-mcodes-regressions/checkresult
@@ -122,7 +122,7 @@ Subject: [PATCH] availability-mcodes
  create mode 100644 tests/interp/availability-mcodes/valid-spindle.ngc
 
 diff --git a/docs/src/gcode/m-code.adoc b/docs/src/gcode/m-code.adoc
-index 1cb15521ad..b0190939a2 100644
+index 1cb15521ad..0f3b65c8e4 100644
 --- a/docs/src/gcode/m-code.adoc
 +++ b/docs/src/gcode/m-code.adoc
 @@ -22,6 +22,7 @@
@@ -164,8 +164,8 @@ index 1cb15521ad..b0190939a2 100644
 +
 +The execution boundary is: finish preceding motion and IO, dispatch the runtime
 +API request, wait for its shared completion boundary or failure, then continue.
-+Required volatile-joint homing, planner reconciliation, and task/interpreter and
-+canonical position synchronization are part of that runtime API completion for
++Held-position validation, homing whenever an acquired joint is unhomed, and normal
++task/interpreter synchronization are part of that runtime API completion for
 +both NML/Python callers and M54. ACK alone does not permit continuation.
 +Sequential M54/M55 blocks work in AUTO and MDI because each finishes before the
 +next is interpreted. External direct requests require an idle task and cannot
@@ -541,10 +541,10 @@ index 0000000000..a9bcd9e28d
 +M2
 diff --git a/tests/availability-mcodes-regressions/test-ui.py b/tests/availability-mcodes-regressions/test-ui.py
 new file mode 100755
-index 0000000000..063bfe84cf
+index 0000000000..1cf2f53b74
 --- /dev/null
 +++ b/tests/availability-mcodes-regressions/test-ui.py
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,74 @@
 +#!/usr/bin/env python3
 +import sys
 +from pathlib import Path
@@ -565,7 +565,8 @@ index 0000000000..063bfe84cf
 +    c.abort(); done()
 +    c.mdi('G94'); done()
 +    c.mdi('G0 X1'); done()
-+    assert abs(s.joint_position[0] - 1) < 1e-6, 'G94 did not allow unrelated motion'
++    wait(lambda: abs(s.joint_position[0] - 1) < 1e-6,
++         'G94 did not allow unrelated motion')
 +
 +elif case == 'step':
 +    release('joint.1')
@@ -655,12 +656,13 @@ index 0000000000..425d52b6e7
 +!/base.ini
 diff --git a/tests/availability-mcodes/README b/tests/availability-mcodes/README
 new file mode 100644
-index 0000000000..dda1aa339e
+index 0000000000..963dd37d0a
 --- /dev/null
 +++ b/tests/availability-mcodes/README
-@@ -0,0 +1,8 @@
-+AUTO M54/M55 barriers: prior motion drains, ACK wait, required homing wait, interpreter/canon resynchronization at changed feedback, release wait, failure prevents continuation.
-+Runs with interpolation rate 4 and releases the joint just moved, checking a fixed command and successful unrelated motion. Acquiring an unhomed nonvolatile joint stops AUTO under forced homing; a second run verifies NO_FORCE_HOMING. Manual homing remains supported.
+@@ -0,0 +1,9 @@
++AUTO M54/M55 barriers: prior motion drains, ACK wait, held-position validation,
++required homing wait, release wait, and failure prevents continuation.
++Runs with interpolation rate 4 and releases the joint just moved, checking a fixed command and successful unrelated motion. Configuring an availability-controlled joint disables Home All; any unhomed controlled joint is homed individually inside M54 before the program may continue. A second run confirms this with forced homing disabled, then covers direct nonvolatile reacquisition.
 +Abort in AUTO during ACK wait and moving acquisition homing terminates the program. Late ACK never enables the joint or executes the following block; a new program can reacquire and home.
 +
 +INI fixtures are generated by test.sh from the shared FIXTURE.BASE and local
@@ -721,10 +723,10 @@ index 0000000000..a18005598f
 +M2
 diff --git a/tests/availability-mcodes/test-ui.py b/tests/availability-mcodes/test-ui.py
 new file mode 100755
-index 0000000000..a64246453d
+index 0000000000..b181668e9f
 --- /dev/null
 +++ b/tests/availability-mcodes/test-ui.py
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,137 @@
 +#!/usr/bin/env python3
 +import os
 +import time
@@ -748,50 +750,40 @@ index 0000000000..a64246453d
 +wait(lambda: s.task_state == linuxcnc.STATE_ESTOP, 'startup')
 +c.state(linuxcnc.STATE_ESTOP_RESET); done()
 +c.state(linuxcnc.STATE_ON); done()
-+c.home(-1); done()
++c.home(0); done()
 +wait(lambda: s.homed[0], 'home X')
 +c.mode(linuxcnc.MODE_AUTO); done()
-+# Acquiring a nonvolatile unhomed joint must recheck AUTO eligibility.
-+run('unhomed.ngc')
-+wait(lambda: hal.get_value('joint.1.availability-request'), 'unhomed request')
-+pin('joint.1.availability-ack',1)
 +if os.environ.get('AVAILABILITY_NO_FORCE'):
++    # Forced-homing policy does not bypass acquisition homing. The unhomed
++    # controlled joint is referenced individually; Home All is unavailable.
++    run('unhomed.ngc')
++    wait(lambda: hal.get_value('joint.1.availability-request'), 'unhomed request')
++    pin('joint.1.availability-ack',1)
 +    done(); idle()
 +    assert abs(s.joint_position[1]-10)<.001
-+    # Direct acquisition must synchronize canon without a mode change or M54.
++    # Once homed, direct acquisition validates and preserves the held position.
 +    c.mode(linuxcnc.MODE_MDI); done()
 +    c.set_joint_availability(1, False)
 +    wait(lambda: not hal.get_value('joint.1.availability-request'), 'direct release')
 +    pin('joint.1.availability-ack', 0); done()
-+    pin('mux2.0.in1', 15); pin('mux2.0.sel', 1)
 +    c.set_joint_availability(1, True)
 +    wait(lambda: hal.get_value('joint.1.availability-request'), 'direct acquire')
 +    assert c.wait_complete(.05) == -1, 'completed before ACK'
 +    pin('joint.1.availability-ack', 1); done()
-+    pin('mux2.0.sel', 0)
 +    c.mdi('G91 G0 Y1'); done(); s.poll()
-+    assert abs(s.joint_position[1]-16)<.001, 'direct acquisition left stale canon'
++    assert abs(s.joint_position[1]-11)<.001, 'direct acquisition changed held position'
 +    print('availability without forced homing ok')
 +    raise SystemExit(0)
-+wait(lambda: s.interp_state == linuxcnc.INTERP_IDLE, 'forced homing abort')
-+assert abs(s.joint_position[1])<1e-9, 'AUTO moved newly acquired unhomed joint'
-+c.abort(); done()
 +c.mode(linuxcnc.MODE_MANUAL); done()
 +c.teleop_enable(0); done()
-+# Manual acquisition followed by ordinary homing remains supported.
-+if not s.joint[1]['available']:
-+    pin('joint.1.availability-ack',0)
-+    c.set_joint_availability(1,False); done()
-+    c.set_joint_availability(1,True)
-+    wait(lambda: hal.get_value('joint.1.availability-request'), 'manual request')
-+    pin('joint.1.availability-ack',1); done()
-+c.home(1); done()
-+wait(lambda: s.homed[1], 'home Y manually')
++# Controlled joints are acquired individually; Home All is unavailable.
++c.set_joint_availability(1,True)
++wait(lambda: hal.get_value('joint.1.availability-request'), 'manual request')
++pin('joint.1.availability-ack',1); done()
 +c.set_joint_availability(1,False)
 +wait(lambda: not hal.get_value('joint.1.availability-request'), 'manual release')
 +pin('joint.1.availability-ack',0); done()
 +c.mode(linuxcnc.MODE_AUTO); done()
-+pin('mux2.0.in1',5); pin('mux2.0.sel',1)
 +run('ordered.ngc')
 +wait(lambda: hal.get_value('joint.1.availability-request'), 'M54 request')
 +assert abs(s.joint_position[0]-1)<.001, 'prior move not finished'
@@ -806,27 +798,26 @@ index 0000000000..a64246453d
 +assert s.interp_state != linuxcnc.INTERP_IDLE, 'Stop aborted program'
 +pin('joint.1.availability-ack',1)
 +wait(lambda: s.joint[1]['available'], 'M54 completion')
-+pin('mux2.0.sel',0)
 +wait(lambda: s.stop_state == linuxcnc.STOP_STOPPED, 'Stop at acquisition boundary')
 +assert abs(s.joint_position[0]-1)<.001
 +c.auto(linuxcnc.AUTO_RESUME)
 +wait(lambda: not hal.get_value('joint.1.availability-request'), 'M55 request')
 +assert abs(s.joint_position[0]-2)<.001
-+assert abs(s.joint_position[1]-6)<.001, 'stale canon/planner position'
++assert abs(s.joint_position[1]-1)<.001, 'held position changed across M54/M55'
 +held = hal.get_value('joint.1.pos-cmd')
 +time.sleep(.05); s.poll()
 +assert hal.get_value('joint.1.pos-cmd') == held, 'command moved after release'
 +assert abs(s.joint_position[0]-2)<.001, 'continued before release ACK'
 +pin('joint.1.availability-ack',0)
 +done(); idle()
-+assert abs(s.joint_position[0]-3)<.001 and abs(s.joint_position[1]-6)<.001
++assert abs(s.joint_position[0]-3)<.001 and abs(s.joint_position[1]-1)<.001
 +# The same programmed barrier works from MDI, without idle-only admission.
 +c.mode(linuxcnc.MODE_MDI); done()
 +c.mdi('M54 P1')
 +wait(lambda: hal.get_value('joint.1.availability-request'), 'MDI M54')
 +pin('joint.1.availability-ack', 1); done()
 +c.mdi('G91 G0 Y1'); done(); s.poll()
-+assert abs(s.joint_position[1]-7)<.001
++assert abs(s.joint_position[1]-2)<.001
 +c.mdi('M55 P1')
 +wait(lambda: not hal.get_value('joint.1.availability-request'), 'MDI M55')
 +pin('joint.1.availability-ack', 0); done()
@@ -855,7 +846,8 @@ index 0000000000..a64246453d
 +        c.set_joint_availability(n, False); done()
 +    c.state(linuxcnc.STATE_ON); done()
 +    c.mode(linuxcnc.MODE_MANUAL); done()
-+    c.home(-1); done()
++    c.home(0); done()
++    wait(lambda: s.homed[0], 'rehome X after abort cleanup')
 +    c.mode(linuxcnc.MODE_AUTO); done()
 +# The next fresh program can acquire and home successfully.
 +run('homing.ngc')
@@ -979,10 +971,10 @@ index 0000000000..554485e05a
 +}
 diff --git a/tests/interp/availability-mcodes/execute-status.py b/tests/interp/availability-mcodes/execute-status.py
 new file mode 100644
-index 0000000000..510677b7fd
+index 0000000000..145e48201c
 --- /dev/null
 +++ b/tests/interp/availability-mcodes/execute-status.py
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,30 @@
 +#!/usr/bin/env python3
 +"""Check actual execute return codes using the production interpreter/canon."""
 +import os
@@ -995,6 +987,10 @@ index 0000000000..510677b7fd
 +    objects = root / 'src/objects/emc'
 +    command = [os.environ.get('CXX', 'c++'), 'execute-status.cc',
 +               '-I' + str(root / 'include'),
++               '-I' + str(root / 'src'),
++               '-I' + str(root / 'src/emc'),
++               '-I' + str(root / 'src/emc/nml_intf'),
++               '-I' + str(root / 'src/emc/rs274ngc'),
 +               str(objects / 'sai/saicanon.o'),
 +               str(objects / 'sai/dummyemcstat.o'),
 +               str(objects / 'task/taskclass.o'),

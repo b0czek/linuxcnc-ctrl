@@ -4,95 +4,66 @@ Date: Thu, 17 Sep 2026 18:00:42 +0200
 Subject: [PATCH] runtime-joint-and-spindle-availability
 
 ---
- docs/src/config/ini-config.adoc               |  34 +
+ docs/src/config/ini-config.adoc               |  31 +
  docs/src/config/python-interface.adoc         |  26 +
  docs/src/man/man9/motion.9.adoc               |  26 +
- src/emc/ini/inijoint.cc                       |  43 +-
+ src/emc/ini/inijoint.cc                       |  36 +-
  src/emc/ini/inispindle.cc                     |  29 +
- src/emc/ini/linuxcnc_check_ini.py             |   8 +-
+ src/emc/ini/linuxcnc_check_ini.py             |   7 +-
  src/emc/motion/axis.c                         |   2 +-
- src/emc/motion/command.c                      | 384 +++++++++++-
- src/emc/motion/control.c                      | 590 ++++++++++++++++--
- src/emc/motion/homing.c                       |  38 +-
+ src/emc/motion/command.c                      | 370 +++++++++++-
+ src/emc/motion/control.c                      | 561 ++++++++++++++++--
  src/emc/motion/mot_priv.h                     |  21 +
  src/emc/motion/motion.c                       |  16 +
- src/emc/motion/motion.h                       |  62 ++
+ src/emc/motion/motion.h                       |  61 +-
  src/emc/nml_intf/emc.cc                       |  29 +
- src/emc/nml_intf/emc.hh                       |  12 +
+ src/emc/nml_intf/emc.hh                       |  11 +
  src/emc/nml_intf/emc_nml.hh                   |  29 +
  src/emc/nml_intf/emcops.cc                    |  10 +-
  src/emc/task/emctask.cc                       |   1 +
- src/emc/task/emctaskmain.cc                   | 206 +++++-
+ src/emc/task/emctaskmain.cc                   | 206 ++++++-
  src/emc/task/task.hh                          |   1 +
- src/emc/task/taskintf.cc                      |  96 ++-
+ src/emc/task/taskintf.cc                      |  94 ++-
  src/emc/usr_intf/axis/extensions/emcmodule.cc |  24 +
- src/hal/components/homecomp.comp              |  20 +
- tests/homemod-compatibility/README            |   5 +
- tests/homemod-compatibility/expected          |   0
- tests/homemod-compatibility/test.py           |  41 ++
- tests/homemod-compatibility/test.sh           |   3 +
- .../motion-acquisition-reconciliation/README  |  17 +
- .../expected                                  |   0
- .../motion-acquisition-reconciliation/home.c  | 119 ++++
- .../motion.c                                  | 157 +++++
- .../motion-acquisition-reconciliation/test.py |  61 ++
- .../motion-acquisition-reconciliation/test.sh |   3 +
- tests/motion-target-preparation/README        |  11 +-
- .../availability-cases.h                      |  59 ++
+ tests/motion-target-preparation/README        |   6 +-
+ .../availability-cases.h                      |  21 +
  .../availability-fixture.h                    |   5 +
- tests/motion-target-preparation/test.py       |  84 +++
+ tests/motion-target-preparation/test.py       |  57 ++
  .../.gitignore                                |   2 +
- tests/runtime-availability-regressions/README |  19 +
- .../runtime-availability-regressions/base.ini |  99 +++
+ tests/runtime-availability-regressions/README |  20 +
+ .../runtime-availability-regressions/base.ini |  94 +++
  .../checkresult                               |   5 +
  .../runtime-availability-regressions/core.hal |  17 +
  .../dwell.ngc                                 |   4 +
  .../extra.hal                                 |  17 +
- .../extra.ini.in                              |  15 +
+ .../extra.ini.in                              |  16 +
  .../fault.ini.in                              |  13 +
- .../fixture.py                                |  76 +++
- .../joghome.ini.in                            |   7 +
- .../mixed.ini.in                              |  10 +
+ .../fixture.py                                |  75 +++
+ .../joghome.ini.in                            |   6 +
  .../record_abort.ngc                          |   6 +
+ .../sequence.ini.in                           |   6 +
  .../runtime-availability-regressions/tail.hal |  23 +
- .../tail.ini.in                               |   5 +
- .../test-ui.py                                | 204 ++++++
+ .../tail.ini.in                               |   7 +
+ .../test-ui.py                                | 170 ++++++
  .../test.ini.in                               |   3 +
- .../runtime-availability-regressions/test.sh  |  26 +
+ .../runtime-availability-regressions/test.sh  |  34 ++
  .../runtime-availability-regressions/tool.tbl |   1 +
- .../runtime-availability-regressions/xxy.hal  |  17 +
- .../xxy.ini.in                                |  12 +
  .../runtime-availability-regressions/xzc.hal  |  12 +
  .../xzc.ini.in                                |  17 +
  tests/runtime-availability/.gitignore         |   2 +
  tests/runtime-availability/README             |   8 +
- tests/runtime-availability/base.ini           | 102 +++
- tests/runtime-availability/checkresult        |   6 +
- tests/runtime-availability/core_sim.hal       |  15 +
- .../runtime-availability/home-all-gap.ini.in  |  12 +
- .../runtime-availability/home-all-sync.ini.in |  12 +
- tests/runtime-availability/home-all.py        |  39 ++
- .../home-no-rehome.ini.in                     |  23 +
- tests/runtime-availability/home-no-rehome.py  |  21 +
- tests/runtime-availability/initial-ui.py      |  62 ++
- tests/runtime-availability/initial.ini.in     |  15 +
- tests/runtime-availability/make-fixtures.py   |  34 +
+ tests/runtime-availability/base.ini           |  99 ++++
+ tests/runtime-availability/checkresult        |   4 +
+ tests/runtime-availability/core_sim.hal       |  17 +
+ tests/runtime-availability/initial-ui.py      |  58 ++
+ tests/runtime-availability/initial.ini.in     |   9 +
+ tests/runtime-availability/make-fixtures.py   |  34 ++
  tests/runtime-availability/paused.ngc         |   3 +
- tests/runtime-availability/test-ui.py         | 266 ++++++++
+ tests/runtime-availability/test-ui.py         | 303 ++++++++++
  tests/runtime-availability/test.ini.in        |   3 +
- tests/runtime-availability/test.sh            |   8 +
+ tests/runtime-availability/test.sh            |   5 +
  tests/runtime-availability/tool.tbl           |   0
- 78 files changed, 3445 insertions(+), 68 deletions(-)
- create mode 100644 tests/homemod-compatibility/README
- create mode 100644 tests/homemod-compatibility/expected
- create mode 100644 tests/homemod-compatibility/test.py
- create mode 100755 tests/homemod-compatibility/test.sh
- create mode 100644 tests/motion-acquisition-reconciliation/README
- create mode 100644 tests/motion-acquisition-reconciliation/expected
- create mode 100644 tests/motion-acquisition-reconciliation/home.c
- create mode 100644 tests/motion-acquisition-reconciliation/motion.c
- create mode 100644 tests/motion-acquisition-reconciliation/test.py
- create mode 100755 tests/motion-acquisition-reconciliation/test.sh
+ 59 files changed, 2702 insertions(+), 71 deletions(-)
  create mode 100644 tests/motion-target-preparation/availability-cases.h
  create mode 100644 tests/motion-target-preparation/availability-fixture.h
  create mode 100644 tests/runtime-availability-regressions/.gitignore
@@ -106,16 +77,14 @@ Subject: [PATCH] runtime-joint-and-spindle-availability
  create mode 100644 tests/runtime-availability-regressions/fault.ini.in
  create mode 100644 tests/runtime-availability-regressions/fixture.py
  create mode 100644 tests/runtime-availability-regressions/joghome.ini.in
- create mode 100644 tests/runtime-availability-regressions/mixed.ini.in
  create mode 100644 tests/runtime-availability-regressions/record_abort.ngc
+ create mode 100644 tests/runtime-availability-regressions/sequence.ini.in
  create mode 100644 tests/runtime-availability-regressions/tail.hal
  create mode 100644 tests/runtime-availability-regressions/tail.ini.in
  create mode 100755 tests/runtime-availability-regressions/test-ui.py
  create mode 100644 tests/runtime-availability-regressions/test.ini.in
  create mode 100755 tests/runtime-availability-regressions/test.sh
  create mode 100644 tests/runtime-availability-regressions/tool.tbl
- create mode 100644 tests/runtime-availability-regressions/xxy.hal
- create mode 100644 tests/runtime-availability-regressions/xxy.ini.in
  create mode 100644 tests/runtime-availability-regressions/xzc.hal
  create mode 100644 tests/runtime-availability-regressions/xzc.ini.in
  create mode 100644 tests/runtime-availability/.gitignore
@@ -123,11 +92,6 @@ Subject: [PATCH] runtime-joint-and-spindle-availability
  create mode 100644 tests/runtime-availability/base.ini
  create mode 100755 tests/runtime-availability/checkresult
  create mode 100644 tests/runtime-availability/core_sim.hal
- create mode 100644 tests/runtime-availability/home-all-gap.ini.in
- create mode 100644 tests/runtime-availability/home-all-sync.ini.in
- create mode 100755 tests/runtime-availability/home-all.py
- create mode 100644 tests/runtime-availability/home-no-rehome.ini.in
- create mode 100755 tests/runtime-availability/home-no-rehome.py
  create mode 100755 tests/runtime-availability/initial-ui.py
  create mode 100644 tests/runtime-availability/initial.ini.in
  create mode 100644 tests/runtime-availability/make-fixtures.py
@@ -138,23 +102,10 @@ Subject: [PATCH] runtime-joint-and-spindle-availability
  create mode 100644 tests/runtime-availability/tool.tbl
 
 diff --git a/docs/src/config/ini-config.adoc b/docs/src/config/ini-config.adoc
-index de598c529d..cfcd8c2215 100644
+index de598c529d..08e037c430 100644
 --- a/docs/src/config/ini-config.adoc
 +++ b/docs/src/config/ini-config.adoc
-@@ -684,6 +684,12 @@ For more information on the motion controller see the <<sec:motion,Motion>> sect
-   The HOMEMOD variable is optional.  If specified, use a specified (user-built) module instead of the default (homemod).
-   Module parameters (home_parms) may be included if supported by the named module.
-   The setting may be overridden from the command line using the -m option ($ linuxcnc -h).
-+  Runtime availability adds no mandatory homing-module function. Custom modules
-+  using availability must honor the released-joint Home-All snapshot in
-+  `emcmot_joint_t.flag` (`EMCMOT_JOINT_HOME_RELEASED_BIT`), preserve released
-+  references, and report completion even for successful `HOME_NO_REHOME`
-+  requests. See `src/hal/components/homecomp.comp` for the sequence and
-+  completion contract and an implementation based on the default homing module.
- 
- [[sub:ini:sec:task]]
- === [TASK] Section(((INI File,Sections,[TASK] Section)))
-@@ -1210,6 +1216,27 @@ These parameters are Homing related, for a better explanation read the <<cha:hom
+@@ -1210,6 +1210,30 @@ These parameters are Homing related, for a better explanation read the <<cha:hom
  * `VOLATILE_HOME = 0` - (bool)
    When enabled (set to `1`) this joint will be unhomed if the Machine Power is off or if E-Stop is on.
    This is useful if your machine has home switches and does not have position feedback such as a step and direction driven machine.
@@ -162,27 +113,30 @@ index de598c529d..cfcd8c2215 100644
 +  Enables acquisition and release of the joint through HAL `availability-request`
 +  and `availability-ack` pins. Extra joints (`num_extrajoints`) are unsupported.
 +  When disabled, the joint uses normal activation and rejects availability commands.
-+* `INITIAL_AVAILABILITY =` `0` | `1` - (bool)
-+  Required when `AVAILABILITY_CONTROL = 1`.
-+  Set to `1` to acquire the joint on Machine On, or `0` to leave it released.
-+  Machine On does not automatically home the joint.
++  A controlled joint always starts released and must be acquired after Machine On.
++  An availability-controlled joint must not define `HOME_SEQUENCE`. Configuring
++  any availability-controlled joint causes Home All to be rejected, and ordinary
++  individual home commands for controlled joints are also rejected.
 +* `AVAILABILITY_TIMEOUT = 5.0` - (real)
 +  Maximum wait for hardware acknowledgment, in seconds. Must be finite and greater than zero.
 +
-+Runtime acquisition adopts the joint's feedback position and synchronizes motion
-+before completing. With `VOLATILE_HOME = 1`, it also homes the joint; synchronized
-+`HOME_SEQUENCE` groups are unsupported for this mode. Kinematics must support
-+reconciling any position change while released. Other motion is allowed only if
-+it leaves unavailable joints at their held command positions. Released joints
-+are excluded from Home All and do not require homing to permit Run or MDI.
++Releasing a joint freezes its logical joint and Cartesian position while the raw
++HAL feedback pin remains live. Acquisition individually homes any unhomed joint
++and publishes it as available only after homing succeeds. If the joint is
++already homed, acquisition verifies physical feedback against the held position
++using the joint's minimum following-error tolerance; a mismatch faults without
++changing the held position. `VOLATILE_HOME = 1` only controls whether release
++invalidates that reference. Other motion is allowed only if it leaves
++unavailable joints at their held command positions. Released joints do not
++require homing to permit Run or MDI.
 +
 +NML/Python commands acquire and release resources while the task is idle.
 +Only one operation may be pending; use Abort to cancel it. Completion waits for
-+the hardware handshake, required homing, and position synchronization.
++the hardware handshake and either required homing or held-position validation.
  
  ==== Servos
  
-@@ -1450,6 +1477,13 @@ Control screens can limit these settings further.
+@@ -1450,6 +1474,13 @@ Control screens can limit these settings further.
  * `HOME_SEQUENCE = 0` - (int) FIXME: Spindle homing not yet working
    Controls where in the general homing sequence the spindle homing rotations occur.
    Set the `HOME_SEARCH_VELOCITY` to zero to avoid spindle rotation during the homing sequence.
@@ -197,7 +151,7 @@ index de598c529d..cfcd8c2215 100644
  [[sub:ini:sec:emcio]]
  === [EMCIO] Section(((INI File,Sections,[EMCIO] Section)))
 diff --git a/docs/src/config/python-interface.adoc b/docs/src/config/python-interface.adoc
-index 1a61affaff..a9916f3041 100644
+index 1a61affaff..c9270ce7fe 100644
 --- a/docs/src/config/python-interface.adoc
 +++ b/docs/src/config/python-interface.adoc
 @@ -446,6 +446,9 @@ print("Joint 1 homed: ", s.joint[1]["homed"])
@@ -240,7 +194,7 @@ index 1a61affaff..a9916f3041 100644
 +`availability_fault`. State values match the motion HAL pins: 0 disabled,
 +1 enabling, 2 homing, 3 available, 4 disabling, 5 fault. A nonzero fault code
 +reports a failed transition; see the motion HAL pin documentation. A command's
-+completion includes required homing, planner reconciliation, or release cleanup,
++completion includes nonvolatile position validation, required homing, or release cleanup,
 +not just a hardware ACK edge. Acquisition requires Machine On; release and fault
 +recovery are also permitted while off. These commands need no M-code interface.
 +
@@ -248,7 +202,7 @@ index 1a61affaff..a9916f3041 100644
    set spindle override enabled. Defaults to spindle 0.
  
 diff --git a/docs/src/man/man9/motion.9.adoc b/docs/src/man/man9/motion.9.adoc
-index 43859fcef1..1704d21c62 100644
+index 43859fcef1..5881e97529 100644
 --- a/docs/src/man/man9/motion.9.adoc
 +++ b/docs/src/man/man9/motion.9.adoc
 @@ -375,6 +375,20 @@ Note: Pins marked *(DEBUG)* serve as debugging aids and are subject to change or
@@ -268,7 +222,7 @@ index 43859fcef1..1704d21c62 100644
 +**joint.**_N_**.availability-fault-code** OUT S32::
 +  Fault code: 0 none, 1 stale acknowledgement, 2 acquire timeout, 3 release timeout,
 +  4 acknowledgement lost, 5 unexpected acknowledgement, 6 home failed,
-+  7 home aborted, 8 resynchronization failed, 9 transition aborted.
++  7 home aborted, 8 position/reference mismatch, 9 transition aborted.
  **joint.**_N_**.backlash-corr** OUT FLOAT *(DEBUG)*::
    Backlash or screw compensation raw value.
  **joint.**_N_**.backlash-filt** OUT FLOAT *(DEBUG)*::
@@ -292,7 +246,7 @@ index 43859fcef1..1704d21c62 100644
    Motion will pause until this pin is TRUE, under the following conditions:
    Before the first feed move after each spindle start or speed change;
 diff --git a/src/emc/ini/inijoint.cc b/src/emc/ini/inijoint.cc
-index 37dff22f62..51c5004383 100644
+index 37dff22f62..48c61d7852 100644
 --- a/src/emc/ini/inijoint.cc
 +++ b/src/emc/ini/inijoint.cc
 @@ -11,6 +11,7 @@
@@ -303,23 +257,23 @@ index 37dff22f62..51c5004383 100644
  #include <fmt/format.h>
  
  #include "nml_intf/emc.hh"
-@@ -142,6 +143,33 @@ static int loadJoint(int joint, const IniFile &ini)
-     int sequence = ini.findIntV("HOME_SEQUENCE", jointSection, 999);
+@@ -139,9 +140,26 @@ static int loadJoint(int joint, const IniFile &ini)
+ 
+     // Sequence defaults to an unrealizable and positive sequence so that
+     // joints with unspecified HOME_SEQUENCE= will not be homed in home-all
+-    int sequence = ini.findIntV("HOME_SEQUENCE", jointSection, 999);
++    auto configured_sequence = ini.findInt("HOME_SEQUENCE", jointSection);
++    int sequence = configured_sequence.value_or(999);
      old_inihal_data.joint_home_sequence[joint] = sequence;
  
 +    bool availability_control =
 +        ini.findBoolV("AVAILABILITY_CONTROL", jointSection, false);
-+    bool initial_availability = true;
-+    if (availability_control) {
-+        auto configured_initial =
-+            ini.findBool("INITIAL_AVAILABILITY", jointSection);
-+        if (!configured_initial) {
-+            rcs_print_error("%s: INITIAL_AVAILABILITY is required when "
-+                            "AVAILABILITY_CONTROL is enabled\n",
-+                            jointSection.c_str());
-+            return -1;
-+        }
-+        initial_availability = *configured_initial;
++    if (availability_control && configured_sequence) {
++        rcs_print_error("%s: HOME_SEQUENCE cannot be used with "
++                        "AVAILABILITY_CONTROL; the joint is referenced only "
++                        "during individual acquisition\n",
++                        jointSection.c_str());
++        return -1;
 +    }
 +    double availability_timeout =
 +        ini.findRealV("AVAILABILITY_TIMEOUT", jointSection, 5.0);
@@ -328,22 +282,24 @@ index 37dff22f62..51c5004383 100644
 +                        jointSection.c_str());
 +        return -1;
 +    }
-+    if (availability_control && volatile_home && sequence < 0) {
-+        rcs_print_error("%s: negative HOME_SEQUENCE is incompatible with "
-+                        "enable-time volatile homing\n", jointSection.c_str());
-+        return -1;
-+    }
-+
      if (0 != emcJointSetHomingParams(joint, home, offset,
                                       final_vel, search_vel, latch_vel,
                                       use_index,
-@@ -187,10 +215,21 @@ static int loadJoint(int joint, const IniFile &ini)
+@@ -149,7 +167,7 @@ static int loadJoint(int joint, const IniFile &ini)
+                                      ignore_limits,
+                                      is_shared,
+                                      sequence,
+-                                     volatile_home,
++                                     volatile_home && !availability_control,
+                                      locking_idxer,
+                                      abs_encoder)) {
+         print_dbg_config("emcJointSetHomingParams");
+@@ -187,10 +205,20 @@ static int loadJoint(int joint, const IniFile &ini)
          }
      }
  
 -    // Activate joint.
 +    if (0 != emcJointSetAvailabilityConfig(joint, availability_control,
-+                                            initial_availability,
 +                                            availability_timeout,
 +                                            volatile_home)) {
 +        rcs_print_error("%s: availability configuration rejected "
@@ -353,7 +309,7 @@ index 37dff22f62..51c5004383 100644
 +    }
 +
 +    // Activate uncontrolled joints. Controlled joints are activated only
-+    // after their acquisition handshake and command-state resynchronization.
++    // after their acquisition handshake and position validation or homing.
      // Doing this last should prevent the motion controller to flag errors
      // during configuration
 -    if (0 != emcJointActivate(joint)) {
@@ -415,23 +371,22 @@ index 7438ae02bc..ad815f8df0 100644
  }
  
 diff --git a/src/emc/ini/linuxcnc_check_ini.py b/src/emc/ini/linuxcnc_check_ini.py
-index d780715b90..a69dce8e3f 100755
+index d780715b90..eba42b648d 100755
 --- a/src/emc/ini/linuxcnc_check_ini.py
 +++ b/src/emc/ini/linuxcnc_check_ini.py
-@@ -251,8 +251,11 @@ def check_bools():
+@@ -251,8 +251,10 @@ def check_bools():
                   "HOME_INDEX_NO_ENCODER_RESET",
                   "HOME_IGNORE_LIMITS",
                   "HOME_IS_SHARED",
 -                 "VOLATILE_HOME"
 +                 "VOLATILE_HOME",
-+                 "AVAILABILITY_CONTROL",
-+                 "INITIAL_AVAILABILITY"
++                 "AVAILABILITY_CONTROL"
          ]
 +    BOOLSVARS = ["AVAILABILITY_CONTROL", "INITIAL_AVAILABILITY"]
      for s, v in BOOLVARS:
          check_bool(s, v)
      for asect in list(filter(lambda s: s.startswith("AXIS_"), ini.getsections())):
-@@ -261,6 +264,9 @@ def check_bools():
+@@ -261,6 +263,9 @@ def check_bools():
      for jsect in list(filter(lambda s: s.startswith("JOINT_"), ini.getsections())):
          for v in BOOLJVARS:
              check_bool(jsect, v)
@@ -455,10 +410,10 @@ index ba87f42442..1be690a25c 100644
          if (!motion_enable_flag)              { continue; }
          if ( *(axis_data->ajog_enable) == 0 ) { continue; }
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index c166af652b..dc48e40519 100644
+index c166af652b..3aff36c547 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
-@@ -80,6 +80,48 @@ extern int motion_num_spindles;
+@@ -80,6 +80,38 @@ extern int motion_num_spindles;
  
  static int rehomeAll;
  
@@ -481,16 +436,6 @@ index c166af652b..dc48e40519 100644
 +    return 0;
 +}
 +
-+int availability_home_is_synchronized(int joint)
-+{
-+    int seq = (get_home_sequence(joint) < 0 ? -get_home_sequence(joint) : get_home_sequence(joint));
-+    for (int n = 0; n < ALL_JOINTS; n++) {
-+        int member_seq = get_home_sequence(n);
-+        if (member_seq < 0 && -member_seq == seq) return 1;
-+    }
-+    return 0;
-+}
-+
 +STATIC int spindle_range_is_available(int first, int last)
 +{
 +    int spindle;
@@ -507,7 +452,7 @@ index c166af652b..dc48e40519 100644
  /* limits_ok() returns 1 if none of the hard limits are set,
     0 if any are set. Called on a linear and circular move. */
  STATIC int limits_ok(void)
-@@ -492,6 +534,40 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -492,6 +524,40 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
                    return;
              }
          }
@@ -548,7 +493,7 @@ index c166af652b..dc48e40519 100644
  	switch (emcmotCommand->command) {
  	case EMCMOT_ABORT:
  	    /* abort motion */
-@@ -503,6 +579,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -503,6 +569,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	       does yet), and if in free mode, it disables the free mode traj
  	       planners which stops joint motion */
  	    rtapi_print_msg(RTAPI_MSG_DBG, "ABORT");
@@ -556,7 +501,7 @@ index c166af652b..dc48e40519 100644
  	    /* check for coord or free space motion active */
  	    if (GET_MOTION_TELEOP_FLAG()) {
                  axis_jog_abort_all(0);
-@@ -525,6 +602,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -525,6 +592,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  		    }
  		}
  	    }
@@ -564,7 +509,7 @@ index c166af652b..dc48e40519 100644
              SET_MOTION_ERROR_FLAG(0);
  	    /* clear joint errors (regardless of mode) */
  	    for (joint_num = 0; joint_num < ALL_JOINTS; joint_num++) {
-@@ -551,6 +629,11 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -551,6 +619,11 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    /* abort one joint number or axis number */
  	    /* can happen at any time */
  	    rtapi_print_msg(RTAPI_MSG_DBG, "JOG_ABORT: %i", joint_num);
@@ -576,7 +521,7 @@ index c166af652b..dc48e40519 100644
  	    if (GET_MOTION_TELEOP_FLAG()) {
  	        /* tell teleop planner to stop */
  	        if ((emcmotCommand->axis >= 0) && (emcmotCommand->axis < EMCMOT_MAX_AXIS)) {
-@@ -585,6 +668,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -585,6 +658,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    break;
  
  	case EMCMOT_COORD:
@@ -587,7 +532,7 @@ index c166af652b..dc48e40519 100644
  	    /* change the mode to coordinated axis motion */
  	    /* can be done at any time */
  	    /* this code doesn't actually make the transition, it merely
-@@ -607,6 +694,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -607,6 +684,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    break;
  
  	case EMCMOT_TELEOP:
@@ -598,7 +543,26 @@ index c166af652b..dc48e40519 100644
  	    rtapi_print_msg(RTAPI_MSG_DBG, "TELEOP");
              switch_to_teleop_mode();
  	    break;
-@@ -795,6 +886,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -679,10 +760,17 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+ 	case EMCMOT_UPDATE_JOINT_HOMING_PARAMS:
+ 	    rtapi_print_msg(RTAPI_MSG_DBG, "UPDATE_JOINT_HOMING_PARAMS");
+ 	    rtapi_print_msg(RTAPI_MSG_DBG, " %d", joint_num);
+-	    emcmot_config_change();
+ 	    if (joint == 0) {
+ 		break;
+ 	    }
++	    if (emcmotStatus->joint_status[joint_num].availability.controlled &&
++	        emcmotCommand->home_sequence != 999) {
++		reportError(_("availability-controlled joint %d cannot define HOME_SEQUENCE"),
++		            joint_num);
++		emcmotStatus->commandStatus = EMCMOT_COMMAND_INVALID_PARAMS;
++		break;
++	    }
++	    emcmot_config_change();
+ 	    update_joint_homing_params(joint_num,
+ 	                               emcmotCommand->offset,
+ 	                               emcmotCommand->home,
+@@ -795,6 +883,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  		SET_JOINT_ERROR_FLAG(joint, 1);
  		break;
  	    }
@@ -613,7 +577,7 @@ index c166af652b..dc48e40519 100644
              // cannot jog if jog-inhibit is TRUE
              if (*(emcmot_hal_data->jog_inhibit)){
                      reportError(_("Cannot jog while jog-inhibit is active."));
-@@ -864,6 +963,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -864,6 +960,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  		SET_JOINT_ERROR_FLAG(joint, 1);
  		break;
  	    }
@@ -628,7 +592,7 @@ index c166af652b..dc48e40519 100644
              // cannot jog if jog-inhibit is TRUE
              if (*(emcmot_hal_data->jog_inhibit)){
                      reportError(_("Cannot jog while jog-inhibit is active."));
-@@ -944,6 +1051,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -944,6 +1048,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  		SET_JOINT_ERROR_FLAG(joint, 1);
  		break;
  	    }
@@ -643,7 +607,7 @@ index c166af652b..dc48e40519 100644
              // cannot jog if jog-inhibit is TRUE
              if (*(emcmot_hal_data->jog_inhibit)){
                      reportError(_("Cannot jog while jog-inhibit is active."));
-@@ -1007,6 +1122,17 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1007,6 +1119,17 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    break;
  
  	case EMCMOT_SET_SPINDLESYNC:
@@ -661,7 +625,7 @@ index c166af652b..dc48e40519 100644
  		tpSetSpindleSync(&emcmotInternal->coord_tp, emcmotCommand->spindle, emcmotCommand->spindlesync, emcmotCommand->flags);
  		break;
  
-@@ -1380,6 +1506,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1380,6 +1503,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	       controller cycle (it *will* be honored) */
  	    rtapi_print_msg(RTAPI_MSG_DBG, "DISABLE");
  	    emcmotInternal->enabling = 0;
@@ -669,7 +633,7 @@ index c166af652b..dc48e40519 100644
  	    if (emcmotConfig->kinType == KINEMATICS_INVERSE_ONLY) {
  		emcmotInternal->teleoperating = 0;
  		emcmotInternal->coordinating = 0;
-@@ -1392,10 +1519,16 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1392,10 +1516,16 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    /* set the emcmotInternal->enabling flag to defer enable until
  	       controller cycle */
  	    rtapi_print_msg(RTAPI_MSG_DBG, "ENABLE");
@@ -687,7 +651,7 @@ index c166af652b..dc48e40519 100644
  		if (emcmotConfig->kinType == KINEMATICS_INVERSE_ONLY) {
  		    emcmotInternal->teleoperating = 0;
  		    emcmotInternal->coordinating = 0;
-@@ -1412,6 +1545,13 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1412,6 +1542,13 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    if (joint == 0) {
  		break;
  	    }
@@ -701,7 +665,7 @@ index c166af652b..dc48e40519 100644
  	    SET_JOINT_ACTIVE_FLAG(joint, 1);
  	    break;
  
-@@ -1424,6 +1564,13 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1424,6 +1561,13 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    if (joint == 0) {
  		break;
  	    }
@@ -715,72 +679,68 @@ index c166af652b..dc48e40519 100644
  	    SET_JOINT_ACTIVE_FLAG(joint, 0);
  	    break;
  
-@@ -1452,6 +1599,64 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
- 	    if (!GET_MOTION_ENABLE_FLAG()) {
- 		break;
- 	    }
-+	    if (joint_num >= 0 &&
-+	        emcmotStatus->joint_status[joint_num].availability.controlled &&
-+	        emcmotStatus->joint_status[joint_num].availability.state !=
-+	            EMCMOT_AVAILABILITY_AVAILABLE) {
-+		reportError(_("cannot home unavailable joint %d"), joint_num);
-+		emcmotStatus->commandStatus = EMCMOT_COMMAND_INVALID_COMMAND;
-+		break;
-+	    }
+@@ -1435,6 +1579,25 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+ 	    rtapi_print_msg(RTAPI_MSG_DBG, "JOINT_HOME");
+ 	    rtapi_print_msg(RTAPI_MSG_DBG, " %d", joint_num);
+ 
 +	    if (joint_num == -1) {
++		int n;
 +		for (n = 0; n < ALL_JOINTS; n++) {
-+		    availability_status_t *availability =
-+			&emcmotStatus->joint_status[n].availability;
-+		    if (availability->controlled &&
-+			(availability->fault ||
-+                         (availability->state != EMCMOT_AVAILABILITY_AVAILABLE &&
-+                          availability->state != EMCMOT_AVAILABILITY_DISABLED))) {
-+			reportError(_("cannot home all while joint %d is unavailable"), n);
++		    if (emcmotStatus->joint_status[n].availability.controlled) {
++			reportError(_("cannot home all joints while joint %d is availability-controlled"),
++			            n);
 +			emcmotStatus->commandStatus = EMCMOT_COMMAND_INVALID_COMMAND;
 +			break;
 +		    }
 +		}
 +		if (n < ALL_JOINTS) break;
 +	    }
-+
-+            /* A synchronized group must never be homed with a missing member,
-+             * including when a negative sequence is requested individually. */
-+            for (n = 0; n < ALL_JOINTS; n++) {
-+                int seq = get_home_sequence(n);
-+                if (seq >= 0 || (joint_num >= 0 &&
-+                    (get_home_sequence(joint_num) != seq &&
-+                     get_home_sequence(joint_num) != -seq))) continue;
-+                int member, active = 0, inactive = 0;
-+                for (member = 0; member < ALL_JOINTS; member++) {
-+                    if (get_home_sequence(member) != seq &&
-+                        get_home_sequence(member) != -seq) continue;
-+                    if (GET_JOINT_ACTIVE_FLAG(&joints[member])) active = 1;
-+                    else inactive = 1;
-+                }
-+                if (active && inactive) break;
-+            }
-+            if (n < ALL_JOINTS) {
-+                reportError(_("cannot home partially available synchronized group"));
++	    if (joint_num >= 0 &&
++	        emcmotStatus->joint_status[joint_num].availability.controlled) {
++		reportError(_("availability-controlled joint %d is homed only during acquisition"),
++		            joint_num);
++		emcmotStatus->commandStatus = EMCMOT_COMMAND_INVALID_COMMAND;
++		break;
++	    }
+ 	    if (emcmotStatus->motion_state != EMCMOT_MOTION_FREE) {
+ 		/* can't home unless in free mode */
+ 		reportError(_("must be in joint mode to home"));
+@@ -1452,7 +1615,6 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+ 	    if (!GET_MOTION_ENABLE_FLAG()) {
+ 		break;
+ 	    }
+-
+ 	    // Negative joint_num specifies homeall
+ 	    do_home_joint(joint_num);
+ 	    break;
+@@ -1468,6 +1630,26 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+                 return;
+             }
+ 
++            if (joint_num >= 0 && joint_num < ALL_JOINTS &&
++                emcmotStatus->joint_status[joint_num].availability.controlled) {
++                reportError(_("availability-controlled joint %d can only be unhomed by release"),
++                            joint_num);
 +                emcmotStatus->commandStatus = EMCMOT_COMMAND_INVALID_COMMAND;
 +                break;
 +            }
-+
 +            if (joint_num == -1) {
++                int n;
 +                for (n = 0; n < ALL_JOINTS; n++) {
-+                    const availability_status_t *a =
-+                        &emcmotStatus->joint_status[n].availability;
-+                    joints[n].flag &= ~EMCMOT_JOINT_HOME_RELEASED_BIT;
-+                    if (a->controlled &&
-+                        a->state == EMCMOT_AVAILABILITY_DISABLED &&
-+                        !a->target_available && a->phase == AVAIL_PHASE_IDLE &&
-+                        a->fault == EMCMOT_AVAILABILITY_FAULT_NONE)
-+                        joints[n].flag |= EMCMOT_JOINT_HOME_RELEASED_BIT;
++                    if (emcmotStatus->joint_status[n].availability.controlled) {
++                        reportError(_("cannot unhome all joints while joint %d is availability-controlled"),
++                                    n);
++                        emcmotStatus->commandStatus = EMCMOT_COMMAND_INVALID_COMMAND;
++                        break;
++                    }
 +                }
++                if (n < ALL_JOINTS) break;
 +            }
- 
- 	    // Negative joint_num specifies homeall
- 	    do_home_joint(joint_num);
-@@ -1486,6 +1691,157 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
++
+             // For configs that require homing and have joints configured as VOLATILE_HOME
+             // 'get_allhomed()' will change from TRUE to FALSE. If that happens we need to
+             // switch motion mode to 'free'.
+@@ -1486,6 +1668,162 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  
              break;
  
@@ -798,9 +758,17 @@ index c166af652b..dc48e40519 100644
 +            emcmotStatus->commandStatus = EMCMOT_COMMAND_INVALID_PARAMS;
 +            break;
 +        }
++        if (emcmotCommand->availability_control &&
++            get_home_sequence(joint_num) != 999) {
++            rtapi_print_msg(RTAPI_MSG_ERR,
++                "availability-controlled joint %d cannot define HOME_SEQUENCE\n",
++                joint_num);
++            emcmotStatus->commandStatus = EMCMOT_COMMAND_INVALID_PARAMS;
++            break;
++        }
 +        availability = &emcmotStatus->joint_status[joint_num].availability;
 +        availability->controlled = !!emcmotCommand->availability_control;
-+        availability->initial_available = !!emcmotCommand->initial_availability;
++        availability->initial_available = 0;
 +        availability->volatile_home = !!emcmotCommand->volatile_home;
 +        availability->timeout = emcmotCommand->availability_timeout;
 +        availability->fault = EMCMOT_AVAILABILITY_FAULT_NONE;
@@ -866,13 +834,7 @@ index c166af652b..dc48e40519 100644
 +            emcmotStatus->commandStatus = EMCMOT_COMMAND_INVALID_COMMAND;
 +            break;
 +        }
-+        if (emcmotCommand->available && availability->volatile_home &&
-+            availability_home_is_synchronized(joint_num)) {
-+            reportError(_("cannot acquire volatile joint %d in a synchronized home group"), joint_num);
-+            emcmotStatus->commandStatus = EMCMOT_COMMAND_INVALID_COMMAND;
-+            break;
-+        }
-+        if (emcmotCommand->available && availability->volatile_home &&
++        if (emcmotCommand->available && !get_homed(joint_num) &&
 +            *(emcmot_hal_data->homing_inhibit)) {
 +            reportError(_("Homing denied by motion.homing-inhibit joint=%d\n"),
 +                        joint_num);
@@ -886,7 +848,10 @@ index c166af652b..dc48e40519 100644
 +            }
 +            availability_begin(availability, 1);
 +        } else {
-+            availability_release_joint(joint_num, EMCMOT_AVAILABILITY_FAULT_NONE);
++            if (availability->state == EMCMOT_AVAILABILITY_AVAILABLE)
++                availability_begin_joint_release(joint_num);
++            else
++                availability_release_joint(joint_num, EMCMOT_AVAILABILITY_FAULT_NONE);
 +        }
 +        break;
 +    }
@@ -938,7 +903,7 @@ index c166af652b..dc48e40519 100644
  	case EMCMOT_CLEAR_PROBE_FLAGS:
  	    rtapi_print_msg(RTAPI_MSG_DBG, "CLEAR_PROBE_FLAGS");
  	    emcmotStatus->probing = 0;
-@@ -1673,8 +2029,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1673,8 +2011,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -952,7 +917,7 @@ index c166af652b..dc48e40519 100644
  	        if (*(emcmot_hal_data->spindle[n].spindle_orient))
  	    	rtapi_print_msg(RTAPI_MSG_DBG, "SPINDLE_ORIENT cancelled by SPINDLE_ON\n");
  	        if (*(emcmot_hal_data->spindle[n].spindle_locked))
-@@ -1761,8 +2121,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1761,8 +2103,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -966,7 +931,7 @@ index c166af652b..dc48e40519 100644
  	        if (n > emcmotConfig->numSpindles){
                  rtapi_print_msg(RTAPI_MSG_ERR, "spindle number <%d> too high in M19",n);
                  break;
-@@ -1812,6 +2176,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1812,6 +2158,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -977,7 +942,7 @@ index c166af652b..dc48e40519 100644
          for (n = s0; n<=s1; n++){
  	        if (emcmotStatus->spindle_status[n].speed > 0) {
  		    emcmotStatus->spindle_status[n].speed += emcmotStatus->spindle_status[n].increment;
-@@ -1836,6 +2204,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1836,6 +2186,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -988,7 +953,7 @@ index c166af652b..dc48e40519 100644
          for (n = s0; n<=s1; n++){
              if (emcmotStatus->spindle_status[n].speed > emcmotStatus->spindle_status[n].increment) {
                  emcmotStatus->spindle_status[n].speed -= emcmotStatus->spindle_status[n].increment;
-@@ -1882,8 +2254,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1882,8 +2236,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -1003,7 +968,7 @@ index c166af652b..dc48e40519 100644
          }
  	    break;
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index 57ca7b99b8..b439da29e1 100644
+index a8deb2ee56..f5a9f7e20a 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
 @@ -46,6 +46,9 @@ static int    switchkins_type = 0;
@@ -1056,12 +1021,10 @@ index 57ca7b99b8..b439da29e1 100644
          switch_to_teleop_mode();
      }
  
-@@ -440,7 +453,38 @@ static void process_inputs(void)
+@@ -440,8 +453,29 @@ static void process_inputs(void)
  	joint_data = &(emcmot_hal_data->joint[joint_num]);
  	/* point to joint data */
  	joint = &joints[joint_num];
-+	availability_status_t *availability =
-+	    &emcmotStatus->joint_status[joint_num].availability;
 +	/* Interlocks must be current before availability can activate a joint. */
 +	/* read limit switches */
 +	if (*(joint_data->pos_lim_sw)) {
@@ -1083,19 +1046,13 @@ index 57ca7b99b8..b439da29e1 100644
 +	    SET_JOINT_FAULT_FLAG(joint, 0);
 +	}
  	if (!GET_JOINT_ACTIVE_FLAG(joint)) {
-+	    /* A nonvolatile released joint remains observable, but its command
-+	       state and output remain frozen.  Feedback is unusable while the
-+	       hardware mode transition itself is uncertain. */
-+	    if (availability->controlled && !availability->volatile_home &&
-+	        availability->state == EMCMOT_AVAILABILITY_DISABLED) {
-+		joint->motor_pos_fb = *(joint_data->motor_pos_fb);
-+		joint->pos_fb = joint->motor_pos_fb -
-+		    (joint->backlash_filt + joint->motor_offset);
-+	    }
- 	    /* if joint is not active, skip it */
+-	    /* if joint is not active, skip it */
++	    /* Keep released motion state frozen. The raw HAL feedback pin remains
++	       live for hardware diagnostics and acquisition validation. */
  	    continue;
  	}
-@@ -489,25 +533,7 @@ static void process_inputs(void)
+ 	/* copy data from HAL to joint structure */
+@@ -489,25 +523,7 @@ static void process_inputs(void)
  	    SET_JOINT_FERROR_FLAG(joint, 0);
  	}
  
@@ -1122,7 +1079,7 @@ index 57ca7b99b8..b439da29e1 100644
      }
  
      // a fault was signalled during a spindle-orient in progress
-@@ -551,6 +577,420 @@ static void process_inputs(void)
+@@ -551,6 +567,418 @@ static void process_inputs(void)
      }
  }
  
@@ -1160,6 +1117,19 @@ index 57ca7b99b8..b439da29e1 100644
 +    a->transition_started = etime();
 +    *emcmot_hal_data->joint[n].availability_request = 0;
 +    motion_cancel_joint(n);
++}
++
++void availability_begin_joint_release(int n)
++{
++    availability_status_t *a = &emcmotStatus->joint_status[n].availability;
++    /* Release admission has already completed planning. Capture its logical
++     * endpoint while the servo-side settled check drains the final sample. */
++    a->held_position = joints[n].coarse_pos;
++    a->target_available = 0;
++    a->phase = AVAIL_PHASE_WAIT_SETTLED;
++    a->fault = EMCMOT_AVAILABILITY_FAULT_NONE;
++    a->state = EMCMOT_AVAILABILITY_DISABLING;
++    a->transition_started = etime();
 +}
 +
 +void availability_release_spindle(int n, availability_fault_t fault)
@@ -1238,97 +1208,66 @@ index 57ca7b99b8..b439da29e1 100644
 +    availability_motion_fault();
 +}
 +
-+/* Feedback remains live while released, but cannot redefine the logical pose
-+ * used to seed coordinated motion on the next Machine On. */
-+static void sync_disabled_cartesian_command(void)
++static bool validate_joint_position(int n)
 +{
-+    double positions[EMCMOT_MAX_JOINTS] = {0};
-+    int mixed = 0;
-+    for (int n = 0; n < NO_OF_KINS_JOINTS; n++) {
-+        const availability_status_t *a = &emcmotStatus->joint_status[n].availability;
-+        int held = a->controlled && a->state != EMCMOT_AVAILABILITY_AVAILABLE;
-+        positions[n] = held ? joints[n].pos_cmd : joints[n].pos_fb;
-+        mixed |= held;
-+    }
-+    if (!mixed) {
-+        emcmotStatus->carte_pos_cmd = emcmotStatus->carte_pos_fb;
-+        return;
-+    }
-+    EmcPose pose = emcmotStatus->carte_pos_cmd;
-+    KINEMATICS_FORWARD_FLAGS forward_flags = fflags;
-+    KINEMATICS_INVERSE_FLAGS inverse_flags = iflags;
-+    if (emcmotConfig->kinType == KINEMATICS_INVERSE_ONLY ||
-+        kinematicsForward(positions, &pose, &forward_flags, &inverse_flags) != 0 ||
-+        !isfinite(pose.tran.x) || !isfinite(pose.tran.y) ||
-+        !isfinite(pose.tran.z) || !isfinite(pose.a) || !isfinite(pose.b) ||
-+        !isfinite(pose.c) || !isfinite(pose.u) || !isfinite(pose.v) ||
-+        !isfinite(pose.w)) {
-+        emcmotStatus->carte_pos_cmd_ok = 0;
-+        return;
-+    }
-+    emcmotStatus->carte_pos_cmd = pose;
-+    emcmotStatus->carte_pos_cmd_ok = emcmotStatus->carte_pos_fb_ok;
-+    fflags = forward_flags;
-+    iflags = inverse_flags;
++    const availability_status_t *a = &emcmotStatus->joint_status[n].availability;
++    const emcmot_joint_t *joint = &joints[n];
++    double feedback = *emcmot_hal_data->joint[n].motor_pos_fb;
++    double expected = a->held_position + joint->backlash_filt + joint->motor_offset;
++    double tolerance = joint->min_ferror;
++    return isfinite(feedback) && isfinite(expected) && isfinite(tolerance) &&
++        tolerance >= 0.0 && fabs(feedback - expected) <= tolerance;
 +}
 +
-+static bool resync_joint_after_acquire(int n)
++static bool joint_interpolation_is_drained(int n)
 +{
-+    int j;
-+    double positions[EMCMOT_MAX_JOINTS] = {0};
-+    double targets[EMCMOT_MAX_JOINTS];
-+    KINEMATICS_FORWARD_FLAGS forward_flags = fflags;
-+    KINEMATICS_INVERSE_FLAGS inverse_flags = iflags;
-+    CUBIC_STRUCT cubics[EMCMOT_MAX_JOINTS];
-+    EmcPose pose = emcmotStatus->carte_pos_cmd;
++    const CUBIC_STRUCT *c = &joints[n].cubic;
++    return c->x0 == c->x3 && c->x1 == c->x3 && c->x2 == c->x3 &&
++        joints[n].coarse_pos == c->x3;
++}
++
++static bool joint_release_is_settled(int n)
++{
++    const emcmot_joint_t *joint = &joints[n];
++    return isfinite(joint->vel_cmd) && isfinite(joint->acc_cmd) &&
++        isfinite(joint->backlash_corr) && isfinite(joint->backlash_filt) &&
++        isfinite(joint->backlash_vel) &&
++        tpQueueDepth(&emcmotInternal->coord_tp) == 0 &&
++        GET_MOTION_INPOS_FLAG() && !joint->free_tp.active &&
++        joint_interpolation_is_drained(n) &&
++        !joint->kb_jjog_active && !joint->wheel_jjog_active &&
++        !axis_jog_is_active() && !get_homing_is_active() &&
++        !emcmotStatus->probing && !emcmotStatus->external_offsets_applied &&
++        fabs(joint->vel_cmd) <= 1e-12 && fabs(joint->acc_cmd) <= 1e-12 &&
++        fabs(joint->backlash_corr - joint->backlash_filt) <= 1e-12 &&
++        fabs(joint->backlash_vel) <= 1e-12;
++}
++
++/* The homing request owns this provisional joint-space synchronization. It
++ * gives the normal homing state machine a stationary start at the acquired
++ * hardware position; only successful homing makes the position valid. */
++static bool availability_start_homing(int n)
++{
 +    emcmot_joint_t *joint = &joints[n];
 +    double motor = *emcmot_hal_data->joint[n].motor_pos_fb;
 +    double position = motor - joint->backlash_filt - joint->motor_offset;
-+    if (IS_EXTRA_JOINT(n) || !isfinite(motor) || !isfinite(position) ||
-+        tpQueueDepth(&emcmotInternal->coord_tp) != 0) return false;
-+    for (j = 0; j < ALL_JOINTS; j++) {
-+        positions[j] = j == n ? position : joints[j].pos_cmd;
-+        cubics[j] = joints[j].cubic;
-+        if (motion_seed_cubic(&cubics[j], positions[j]) != 0) return false;
-+    }
-+    if (n < NO_OF_KINS_JOINTS) {
-+        if (emcmotConfig->kinType == KINEMATICS_INVERSE_ONLY ||
-+            kinematicsForward(positions, &pose, &forward_flags, &inverse_flags) != 0 ||
-+            !isfinite(pose.tran.x) || !isfinite(pose.tran.y) ||
-+            !isfinite(pose.tran.z) || !isfinite(pose.a) ||
-+            !isfinite(pose.b) || !isfinite(pose.c) || !isfinite(pose.u) ||
-+            !isfinite(pose.v) || !isfinite(pose.w)) return false;
-+        /* Validate the physical branch identified by FK. A finite
-+         * FK pose alone need not represent all joints of a redundant mapping. */
-+        for (j = 0; j < EMCMOT_MAX_JOINTS; j++) targets[j] = positions[j];
-+        if (kinematicsInverse(&pose, targets, &inverse_flags, &forward_flags) != 0)
-+            return false;
-+        for (j = 0; j < NO_OF_KINS_JOINTS; j++) {
-+            if (!isfinite(targets[j]) || fabs(targets[j] - positions[j]) > 1e-9)
-+                return false;
-+        }
-+        if (tpSetPos(&emcmotInternal->coord_tp, &pose) != 0) return false;
-+        iflags = inverse_flags;
-+        fflags = forward_flags;
-+        emcmotStatus->carte_pos_cmd = pose;
-+        emcmotStatus->carte_pos_cmd_ok = 1;
-+        axis_jog_abort_all(1);
-+        axis_sync_teleop_tp_to_carte_pos(0, pcmd_p);
-+    }
++    if (!isfinite(motor) || !isfinite(position)) return false;
++    do_home_joint(n);
 +    joint->motor_pos_fb = motor;
-+    joint->pos_fb = position;
-+    motion_reset_joint_command(joint, position);
-+    /* Only valid feedback adoption reconciles derived following error.
-+     * Release/cancellation must not hide it or any physical interlock. */
-+    joint->ferror = 0;
++    joint->pos_fb = joint->pos_cmd = joint->coarse_pos = position;
++    joint->free_tp.curr_pos = joint->free_tp.pos_cmd =
++        joint->free_tp.last_pos_cmd = position;
++    joint->free_tp.curr_vel = joint->free_tp.curr_acc =
++        joint->free_tp.curr_jerk = 0.0;
++    joint->free_tp.enable = joint->free_tp.active = 0;
++    joint->vel_cmd = joint->acc_cmd = joint->jerk_cmd = 0.0;
++    joint->ferror = 0.0;
 +    SET_JOINT_FERROR_FLAG(joint, 0);
-+    joint->old_jjog_counts = *emcmot_hal_data->joint[n].jjog_counts;
-+    for (j = 0; j < ALL_JOINTS; j++) joints[j].cubic = cubics[j];
-+    emcmotStatus->joint_status[n].availability.held_position = position;
++    SET_JOINT_ACTIVE_FLAG(joint, 1);
++    SET_JOINT_ENABLE_FLAG(joint, GET_MOTION_ENABLE_FLAG());
 +    return true;
 +}
 +
-+/* Publish a joint whose position has already been validated and reconciled. */
 +static void availability_complete_joint(int n)
 +{
 +    availability_status_t *a = &emcmotStatus->joint_status[n].availability;
@@ -1340,26 +1279,9 @@ index 57ca7b99b8..b439da29e1 100644
 +    if (restore == EMCMOT_MOTION_TELEOP) switch_to_teleop_mode();
 +}
 +
-+/* Homing changed the reference after the ACK-time adoption. Reconcile again
-+ * before publishing availability; non-homing acquisition needs only the first. */
 +static void availability_finish_homing(int n)
 +{
-+    if (!resync_joint_after_acquire(n)) {
-+        set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_RESYNC_FAILED);
-+        return;
-+    }
 +    availability_complete_joint(n);
-+}
-+
-+/* Discard a released joint's motion history without changing its phase.
-+ * COORD clocks every joint from joint 0, including unavailable joints. */
-+static void hold_joint_cubic(CUBIC_STRUCT *cubic, double position)
-+{
-+    double interpolation_time = cubic->interpolationTime;
-+    int need_next_point = cubic->needNextPoint;
-+    motion_seed_cubic(cubic, position);
-+    cubic->interpolationTime = interpolation_time;
-+    cubic->needNextPoint = need_next_point;
 +}
 +
 +static void process_availability(void)
@@ -1386,18 +1308,20 @@ index 57ca7b99b8..b439da29e1 100644
 +                break;
 +            }
 +            if (ack) {
-+                if (!resync_joint_after_acquire(n)) {
-+                    set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_RESYNC_FAILED);
-+                    break;
-+                }
-+                SET_JOINT_ACTIVE_FLAG(&joints[n], 1);
-+                SET_JOINT_ENABLE_FLAG(&joints[n], GET_MOTION_ENABLE_FLAG());
-+                if (a->volatile_home && a->phase == AVAIL_PHASE_RUNTIME_ACK) {
++                if (!get_homed(n) && a->phase == AVAIL_PHASE_RUNTIME_ACK) {
 +                    a->return_motion_state = emcmotStatus->motion_state;
 +                    emcmotInternal->coordinating = emcmotInternal->teleoperating = 0;
 +                    a->state = EMCMOT_AVAILABILITY_HOMING;
 +                    a->phase = AVAIL_PHASE_WAIT_FREE;
-+                } else availability_complete_joint(n);
++                } else {
++                    if (!validate_joint_position(n)) {
++                        set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_POSITION_MISMATCH);
++                        break;
++                    }
++                    SET_JOINT_ACTIVE_FLAG(&joints[n], 1);
++                    SET_JOINT_ENABLE_FLAG(&joints[n], GET_MOTION_ENABLE_FLAG());
++                    availability_complete_joint(n);
++                }
 +            } else if (now - a->transition_started >= a->timeout)
 +                set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_ACQUIRE_TIMEOUT);
 +            break;
@@ -1406,12 +1330,14 @@ index 57ca7b99b8..b439da29e1 100644
 +                set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_ACK_LOST);
 +            } else if (a->phase == AVAIL_PHASE_WAIT_FREE) {
 +                if (emcmotStatus->motion_state != EMCMOT_MOTION_FREE) break;
-+                if (*emcmot_hal_data->homing_inhibit ||
-+                    availability_home_is_synchronized(n)) {
++                if (*emcmot_hal_data->homing_inhibit) {
 +                    set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_HOME_ABORTED);
 +                    break;
 +                }
-+                do_home_joint(n);
++                if (!availability_start_homing(n)) {
++                    set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_HOME_FAILED);
++                    break;
++                }
 +                a->phase = AVAIL_PHASE_WAIT_HOME_START;
 +                a->transition_started = now;
 +            } else if (a->phase == AVAIL_PHASE_WAIT_HOME_START) {
@@ -1425,16 +1351,44 @@ index 57ca7b99b8..b439da29e1 100644
 +            }
 +            break;
 +        case EMCMOT_AVAILABILITY_AVAILABLE:
-+            if (!ack) set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_ACK_LOST);
++            if (!get_homed(n))
++                set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_HOME_FAILED);
++            else if (!ack)
++                set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_ACK_LOST);
 +            break;
 +        case EMCMOT_AVAILABILITY_DISABLING:
++            if (a->phase == AVAIL_PHASE_WAIT_SETTLED) {
++                if (!ack) {
++                    set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_ACK_LOST);
++                    break;
++                }
++                if (!joint_release_is_settled(n)) {
++                    if (now - a->transition_started >= a->timeout)
++                        set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_TRANSITION_ABORTED);
++                    break;
++                }
++                /* Cubic points and commanded derivatives are drained. Finish
++                 * the final sampled position at the commanded endpoint. */
++                a->held_position = joints[n].coarse_pos;
++                joints[n].pos_cmd = a->held_position;
++                availability_release_joint(n, EMCMOT_AVAILABILITY_FAULT_NONE);
++            }
 +            /* Leave the joint active until the homing engine consumes abort. */
 +            if (a->phase == AVAIL_PHASE_CANCEL_HOME) {
 +                if (!get_home_is_idle(n)) break;
-+                /* Homing has consumed cancellation; discard its motion history
-+                 * without enabling the planner or amplifier. */
-+                motion_reset_joint_command(&joints[n], a->held_position);
-+                hold_joint_cubic(&joints[n].cubic, a->held_position);
++                /* Cancellation may stop acquisition homing at a new
++                 * unreferenced location. Keep that result internal while the
++                 * joint remains unavailable. Volatile joints freeze the
++                 * final commanded homing location before invalidating it. */
++                if (a->volatile_home && GET_JOINT_ACTIVE_FLAG(&joints[n]))
++                    a->held_position = joints[n].pos_cmd;
++                joints[n].pos_fb = a->held_position;
++                joints[n].motor_pos_fb = a->held_position +
++                    joints[n].backlash_filt + joints[n].motor_offset;
++                joints[n].vel_cmd = joints[n].acc_cmd = joints[n].jerk_cmd = 0.0;
++                joints[n].free_tp.curr_vel = joints[n].free_tp.curr_acc =
++                    joints[n].free_tp.curr_jerk = 0.0;
++                joints[n].free_tp.enable = joints[n].free_tp.active = 0;
 +                SET_JOINT_INPOS_FLAG(&joints[n], 1);
 +                if (a->volatile_home && GET_JOINT_ACTIVE_FLAG(&joints[n]))
 +                    set_unhomed(n, emcmotStatus->motion_state);
@@ -1459,6 +1413,8 @@ index 57ca7b99b8..b439da29e1 100644
 +        *hal->availability_request = a->controlled && a->target_available &&
 +            (a->state == EMCMOT_AVAILABILITY_ENABLING ||
 +             a->state == EMCMOT_AVAILABILITY_HOMING || a->state == EMCMOT_AVAILABILITY_AVAILABLE);
++        if (a->controlled && a->phase == AVAIL_PHASE_WAIT_SETTLED)
++            *hal->availability_request = 1;
 +        *hal->available = a->state == EMCMOT_AVAILABILITY_AVAILABLE;
 +        *hal->availability_state = a->state;
 +        *hal->availability_fault = !!a->fault;
@@ -1512,18 +1468,17 @@ index 57ca7b99b8..b439da29e1 100644
 +        *hal->availability_fault_code = a->fault;
 +    }
 +    if (emcmotInternal->availability_machine_on) {
-+        int total = ALL_JOINTS + emcmotConfig->numSpindles;
-+        for (n = 0; n < total; n++) {
-+            availability_status_t *a = n < ALL_JOINTS
-+                ? &emcmotStatus->joint_status[n].availability
-+                : &emcmotStatus->spindle_status[n - ALL_JOINTS].availability;
++        for (n = 0; n < ALL_JOINTS; n++) {
++            availability_status_t *a = &emcmotStatus->joint_status[n].availability;
 +            if (a->controlled && a->fault) { availability_cancel(1); return; }
 +        }
-+        while (emcmotInternal->availability_resource < total) {
++        for (n = 0; n < emcmotConfig->numSpindles; n++) {
++            availability_status_t *a = &emcmotStatus->spindle_status[n].availability;
++            if (a->controlled && a->fault) { availability_cancel(1); return; }
++        }
++        while (emcmotInternal->availability_resource < emcmotConfig->numSpindles) {
 +            n = emcmotInternal->availability_resource;
-+            availability_status_t *a = n < ALL_JOINTS
-+                ? &emcmotStatus->joint_status[n].availability
-+                : &emcmotStatus->spindle_status[n - ALL_JOINTS].availability;
++            availability_status_t *a = &emcmotStatus->spindle_status[n].availability;
 +            if (!a->controlled || !a->initial_available || a->state == EMCMOT_AVAILABILITY_AVAILABLE) {
 +                emcmotInternal->availability_resource++;
 +                continue;
@@ -1531,7 +1486,7 @@ index 57ca7b99b8..b439da29e1 100644
 +            if (a->state == EMCMOT_AVAILABILITY_DISABLED) availability_begin(a, 0);
 +            break;
 +        }
-+        if (emcmotInternal->availability_resource == total) {
++        if (emcmotInternal->availability_resource == emcmotConfig->numSpindles) {
 +            if (*emcmot_hal_data->enable) {
 +                emcmotInternal->availability_machine_on = 0;
 +                emcmotInternal->enabling = 1;
@@ -1543,7 +1498,7 @@ index 57ca7b99b8..b439da29e1 100644
  static void joint_jog_abort_all(bool immediate)
  {
      int jNum;
-@@ -613,7 +1053,7 @@ static void do_forward_kins(void)
+@@ -613,7 +1041,7 @@ static void do_forward_kins(void)
     at the traj rate */
  
      double joint_pos[EMCMOT_MAX_JOINTS] = {0,};
@@ -1552,7 +1507,7 @@ index 57ca7b99b8..b439da29e1 100644
      emcmot_joint_t *joint;
  
      /* copy joint position feedback to local array */
-@@ -795,7 +1235,9 @@ static void check_for_faults(void)
+@@ -795,7 +1223,9 @@ static void check_for_faults(void)
      }
      /* check for spindle ampfifier errors */
      for (spindle_num = 0; spindle_num < emcmotConfig->numSpindles; spindle_num++){
@@ -1563,7 +1518,7 @@ index 57ca7b99b8..b439da29e1 100644
              reportError(_("spindle %d amplifier fault"), spindle_num);
              emcmotInternal->enabling = 0;
          }
-@@ -867,6 +1309,7 @@ static void set_operating_mode(void)
+@@ -867,6 +1297,7 @@ static void set_operating_mode(void)
  
      /* check for disabling */
      if (!emcmotInternal->enabling && GET_MOTION_ENABLE_FLAG()) {
@@ -1571,7 +1526,7 @@ index 57ca7b99b8..b439da29e1 100644
  	/* clear out the motion emcmotInternal->coord_tp and interpolators */
  	tpClear(&emcmotInternal->coord_tp);
  	for (joint_num = 0; joint_num < ALL_JOINTS; joint_num++) {
-@@ -921,8 +1364,9 @@ static void set_operating_mode(void)
+@@ -921,8 +1352,9 @@ static void set_operating_mode(void)
              }
  	}
  	SET_MOTION_ENABLE_FLAG(1);
@@ -1583,7 +1538,7 @@ index 57ca7b99b8..b439da29e1 100644
      }
  
      /* check for entering teleop mode */
-@@ -950,7 +1394,7 @@ static void set_operating_mode(void)
+@@ -950,7 +1382,7 @@ static void set_operating_mode(void)
  	    /* Initialize things to do when starting teleop mode. */
  	    SET_MOTION_TELEOP_FLAG(1);
  	    SET_MOTION_COORD_FLAG(0);
@@ -1592,7 +1547,7 @@ index 57ca7b99b8..b439da29e1 100644
  
              kinematicsForward(positions, &emcmotStatus->carte_pos_cmd, &fflags, &iflags);
              // entering teleop (INPOS), remove ext offsets
-@@ -994,7 +1438,7 @@ static void set_operating_mode(void)
+@@ -994,7 +1426,7 @@ static void set_operating_mode(void)
  		emcmotStatus->overrideLimitMask = 0;
  		SET_MOTION_COORD_FLAG(1);
  		SET_MOTION_TELEOP_FLAG(0);
@@ -1601,7 +1556,7 @@ index 57ca7b99b8..b439da29e1 100644
  	    } else {
  		/* not in position-- don't honor mode change */
  		emcmotInternal->coordinating = 0;
-@@ -1014,7 +1458,7 @@ static void set_operating_mode(void)
+@@ -1014,7 +1446,7 @@ static void set_operating_mode(void)
  		}
  		SET_MOTION_COORD_FLAG(0);
  		SET_MOTION_TELEOP_FLAG(0);
@@ -1610,7 +1565,7 @@ index 57ca7b99b8..b439da29e1 100644
  	    } else {
  		/* not in position-- don't honor mode change */
  		emcmotInternal->coordinating = 1;
-@@ -1049,7 +1493,9 @@ static void handle_jjogwheels(void)
+@@ -1049,7 +1481,9 @@ static void handle_jjogwheels(void)
  	/* point to joint data */
  	joint_data = &(emcmot_hal_data->joint[joint_num]);
  	joint = &joints[joint_num];
@@ -1621,7 +1576,7 @@ index 57ca7b99b8..b439da29e1 100644
  	    /* if joint is not active, skip it */
  	    continue;
  	}
-@@ -1066,6 +1512,7 @@ static void handle_jjogwheels(void)
+@@ -1066,6 +1500,7 @@ static void handle_jjogwheels(void)
  	delta = new_jjog_counts - joint->old_jjog_counts;
  	/* save value for next time */
  	joint->old_jjog_counts = new_jjog_counts;
@@ -1629,7 +1584,7 @@ index 57ca7b99b8..b439da29e1 100644
  	/* initialization complete */
  	if ( first_pass ) {
  	    continue;
-@@ -1197,6 +1644,16 @@ static int prepare_joint_targets(const EmcPose *pose, double *positions,
+@@ -1197,6 +1632,16 @@ static int prepare_joint_targets(const EmcPose *pose, double *positions,
              reportError(_("kinematicsInverse gave non-finite joint location on joint %d"), n);
              return -1;
          }
@@ -1646,26 +1601,7 @@ index 57ca7b99b8..b439da29e1 100644
          cubics[n] = joints[n].cubic;
          if (cubicNeedNextPoint(&cubics[n]) &&
              cubicAddPoint(&cubics[n], positions[n]) != 0) {
-@@ -1245,6 +1702,18 @@ void motion_cancel_joint(int n)
-     do_cancel_homing(n);
- }
- 
-+static int joint_interpolation_done(void)
-+{
-+    int n;
-+    for (n = 0; n < NO_OF_KINS_JOINTS; n++) {
-+        const CUBIC_STRUCT *c = &joints[n].cubic;
-+        if (c->x0 != c->x3 || c->x1 != c->x3 || c->x2 != c->x3 ||
-+            joints[n].coarse_pos != c->x3)
-+            return 0;
-+    }
-+    return 1;
-+}
-+
- static void get_pos_cmds(long period)
- {
-     CUBIC_STRUCT staged_cubics[EMCMOT_MAX_JOINTS];
-@@ -1280,7 +1749,10 @@ static void get_pos_cmds(long period)
+@@ -1255,7 +1700,10 @@ static void get_pos_cmds(long period)
  	for (joint_num = 0; joint_num < ALL_JOINTS; joint_num++) {
  	    /* point to joint struct */
  	    joint = &joints[joint_num];
@@ -1677,7 +1613,7 @@ index 57ca7b99b8..b439da29e1 100644
  	        /* if joint is not active, skip it */
  	        continue;
              }
-@@ -1424,8 +1896,7 @@ static void get_pos_cmds(long period)
+@@ -1399,8 +1847,7 @@ static void get_pos_cmds(long period)
              result = prepare_joint_targets(&emcmotStatus->carte_pos_cmd,
                                             positions, staged_cubics);
              if (result != 0) {
@@ -1687,18 +1623,7 @@ index 57ca7b99b8..b439da29e1 100644
                  break;
              }
              for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
-@@ -1461,7 +1932,9 @@ static void get_pos_cmds(long period)
- 	/* report motion status */
- 	SET_MOTION_INPOS_FLAG(0);
- 	if (tpIsDone(&emcmotInternal->coord_tp)) {
--	    SET_MOTION_INPOS_FLAG(1);
-+            /* Queue completion precedes the interpolator tail. Keep task
-+             * fences closed until every cubic contains only its endpoint. */
-+            SET_MOTION_INPOS_FLAG(joint_interpolation_done());
- 	}
- 	break;
- 
-@@ -1486,8 +1959,7 @@ static void get_pos_cmds(long period)
+@@ -1461,8 +1908,7 @@ static void get_pos_cmds(long period)
          result = prepare_joint_targets(&emcmotStatus->carte_pos_cmd,
                                         positions, staged_cubics);
          if (result != 0) {
@@ -1708,24 +1633,21 @@ index 57ca7b99b8..b439da29e1 100644
              break;
          }
          for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
-@@ -1499,6 +1971,11 @@ static void get_pos_cmds(long period)
+@@ -1473,6 +1919,8 @@ static void get_pos_cmds(long period)
+                 &joint->vel_cmd, &joint->acc_cmd, &joint->jerk_cmd);
          }
  
++	SET_MOTION_INPOS_FLAG(!axis_jog_is_active());
++
  
-+        /* The axis planner can stop before the joint interpolators drain.
-+         * Keep release admission and mode changes fenced until both finish. */
-+        SET_MOTION_INPOS_FLAG(!axis_jog_is_active() && joint_interpolation_done());
-+
-+
  	/* END OF OUTPUT KINS */
  
- 	/* if overriding is true and the jog is complete, the limits should be re-enabled */
-@@ -1514,10 +1991,13 @@ static void get_pos_cmds(long period)
+@@ -1489,10 +1937,13 @@ static void get_pos_cmds(long period)
      case EMCMOT_MOTION_DISABLED:
  	/* set position commands to match feedbacks, this avoids
  	   disturbances and/or following errors when enabling */
 -	emcmotStatus->carte_pos_cmd = emcmotStatus->carte_pos_fb;
-+        sync_disabled_cartesian_command();
++        emcmotStatus->carte_pos_cmd = emcmotStatus->carte_pos_fb;
  	for (joint_num = 0; joint_num < ALL_JOINTS; joint_num++) {
  	    /* point to joint struct */
  	    joint = &joints[joint_num];
@@ -1735,7 +1657,7 @@ index 57ca7b99b8..b439da29e1 100644
  	    /* save old command */
  	    joint->pos_cmd = joint->pos_fb;
  	    /* set joint velocity and acceleration to zero */
-@@ -1905,8 +2385,6 @@ static void output_to_hal(void)
+@@ -1880,8 +2331,6 @@ static void output_to_hal(void)
      double inch_mult;
      emcmot_joint_t *joint;
      joint_hal_t *joint_data;
@@ -1744,7 +1666,7 @@ index 57ca7b99b8..b439da29e1 100644
  
      /* output machine info to HAL for scoping, etc */
      *(emcmot_hal_data->motion_enabled) = GET_MOTION_ENABLE_FLAG();
-@@ -1948,6 +2426,9 @@ static void output_to_hal(void)
+@@ -1923,6 +2372,9 @@ static void output_to_hal(void)
  
      for (spindle_num = 0; spindle_num < emcmotConfig->numSpindles; spindle_num++){
          double speed;
@@ -1754,7 +1676,7 @@ index 57ca7b99b8..b439da29e1 100644
  		if(emcmotStatus->spindle_status[spindle_num].css_factor) {
  			double denom = fabs(emcmotStatus->spindle_status[spindle_num].xoffset
  								- emcmotStatus->carte_pos_cmd.tran.x);
-@@ -1982,16 +2463,22 @@ static void output_to_hal(void)
+@@ -1957,16 +2409,22 @@ static void output_to_hal(void)
              }
          }
  
@@ -1782,7 +1704,7 @@ index 57ca7b99b8..b439da29e1 100644
          // What is this for? Docs don't say
          *(emcmot_hal_data->spindle[spindle_num].spindle_speed_cmd_rps) =
  				emcmotStatus->spindle_status[spindle_num].speed / 60.;
-@@ -2048,6 +2535,13 @@ static void output_to_hal(void)
+@@ -2023,6 +2481,13 @@ static void output_to_hal(void)
  
      /* two way handshaking for the spindle encoder */
      for (spindle_num = 0; spindle_num < emcmotConfig->numSpindles; spindle_num++){
@@ -1796,7 +1718,7 @@ index 57ca7b99b8..b439da29e1 100644
  		if(emcmotStatus->spindle_status[spindle_num].spindle_index_enable
  				&& !old_motion_index[spindle_num]) {
  			*emcmot_hal_data->spindle[spindle_num].spindle_index_enable = 1;
-@@ -2090,7 +2584,11 @@ static void output_to_hal(void)
+@@ -2065,7 +2530,11 @@ static void output_to_hal(void)
  	*(joint_data->motor_pos_cmd) = joint->motor_pos_cmd;
  	*(joint_data->joint_pos_cmd) = joint->pos_cmd;
  	*(joint_data->joint_pos_fb) = joint->pos_fb;
@@ -1809,127 +1731,8 @@ index 57ca7b99b8..b439da29e1 100644
  
  	*(joint_data->coarse_pos_cmd) = joint->coarse_pos;
  	*(joint_data->joint_vel_cmd) = joint->vel_cmd;
-diff --git a/src/emc/motion/homing.c b/src/emc/motion/homing.c
-index 13c5e6b513..b563d212cb 100644
---- a/src/emc/motion/homing.c
-+++ b/src/emc/motion/homing.c
-@@ -73,6 +73,8 @@ typedef enum {
- static home_sequence_state_t sequence_state;
- static int  current_sequence = 0;
- static bool homing_active;
-+static bool home_all_pending;
-+static bool home_all_failed;
- 
- /* internal states for homing */
- typedef enum {
-@@ -259,6 +261,8 @@ static int base_make_joint_home_pins(int id,int njoints)
- static void do_home_all(void)
- {
-     if (!get_homing_is_active() ) {
-+        home_all_pending = 1;
-+        home_all_failed = 0;
-         sequence_state = HOME_SEQUENCE_START;
-     }
- } // do_home_all()
-@@ -389,7 +393,8 @@ static void do_homing_sequence(void)
-             for (i=0; i < EMCMOT_MAX_JOINTS; i++) {
-                 H[i].joint_in_sequence = 1;
-                 // unspecified joints have an unrealizable H[i].home_sequence:
--                if (H[i].home_sequence >100) {
-+                if (H[i].home_sequence >100 || i >= all_joints ||
-+                    !GET_JOINT_ACTIVE_FLAG(&joints[i])) {
-                    // docs: 'If HOME_SEQUENCE is not specified then this joint
-                    //        will not be homed by the HOME ALL sequence'
-                    H[i].joint_in_sequence = 0;  // per docs
-@@ -423,6 +428,7 @@ static void do_homing_sequence(void)
-         for(i=0; i < all_joints; i++) {
-             if (!H[i].joint_in_sequence) continue;
-             if  ( H[i].home_state != HOME_IDLE && H[i].home_state != HOME_START) {
-+                home_all_failed = 1;
-                 /* a home is already in progress, abort the home-all */
-                 sequence_state = HOME_SEQUENCE_IDLE;
-                 return;
-@@ -433,6 +439,22 @@ static void do_homing_sequence(void)
-         /* Fallthrough */
- 
-     case HOME_SEQUENCE_START_JOINTS:
-+        /* Cross only configured steps removed entirely by deliberate release.
-+           A missing configuration step must still end Home All. */
-+        while (home_all_pending && current_sequence <= 100) {
-+            int configured = 0;
-+            int all_released = 1;
-+            for (i = 0; i < all_joints; i++) {
-+                if (ABS(H[i].home_sequence) != current_sequence) continue;
-+                configured = 1;
-+                if (H[i].joint_in_sequence || !(joints[i].flag & EMCMOT_JOINT_HOME_RELEASED_BIT)) {
-+                    all_released = 0;
-+                    break;
-+                }
-+            }
-+            if (!configured || !all_released) break;
-+            current_sequence++;
-+        }
-         seen = 0;
-         /* start all joints whose sequence number matches H[i].home_sequence */
-         for(i=0; i < all_joints; i++) {
-@@ -478,6 +500,7 @@ static void do_homing_sequence(void)
-         break;
- 
-     default:
-+        home_all_failed = 1;
-         /* should never get here */
-         rtapi_print_msg(RTAPI_MSG_ERR, _("unknown state '%d' during homing sequence"),
-                         sequence_state);
-@@ -512,6 +535,7 @@ static int base_homing_init(int id,
- 
-     servo_freq = 1/servo_period;
-     homing_active = 0;
-+    home_all_pending = home_all_failed = 0;
-     for (i=0; i < all_joints; i++) {
-         H[i].home_state      =  HOME_IDLE;
-         H[i].home_search_vel =  0;
-@@ -565,7 +589,7 @@ static void base_write_homing_out_pins(int njoints)
- 
- static void base_do_home_joint(int jno) {
-     if (jno == -1) {
--        H[0].homed = 0; // ensure at least one unhomed
-+        /* HOME_SEQUENCE_START clears only participating joints. */
-         do_home_all();
-     } else {
-         do_home_one_joint(jno); // apply rules if home_sequence negative
-@@ -573,6 +597,7 @@ static void base_do_home_joint(int jno) {
- }
- 
- static void base_do_cancel_homing(int jno) {
-+    if (home_all_pending) home_all_failed = 1;
-     if (H[jno].homing) {
-         H[jno].home_state = HOME_ABORT;
-     }else if(H[jno].joint_in_sequence){
-@@ -1375,6 +1400,7 @@ static int base_1joint_state_machine(int joint_num)
-             break;
- 
-         case HOME_ABORT:
-+            home_all_failed = 1;
-             for(int i = 0; i < all_joints; i++) {
-                 H[i].homing = 0;
-                 H[i].homed = 0;
-@@ -1421,6 +1447,14 @@ static bool base_do_homing(void)
-             homing_active = 0;
-         }
-     }
-+    /* Home All completion is a request result, including no-rehome success.
-+     * Do not mutate a joint's reference as a completion sentinel. Wait for the
-+     * sequence to finish and never report cancellation/failure as success. */
-+    if (home_all_pending) {
-+        if (sequence_state != HOME_SEQUENCE_IDLE) return 0;
-+        home_all_pending = 0;
-+        return !home_all_failed && get_allhomed();
-+    }
-     // return 1 if homing completed this period
-     if (!beginning_allhomed && get_allhomed()) {homing_active=0; return 1;}
-     return 0;
 diff --git a/src/emc/motion/mot_priv.h b/src/emc/motion/mot_priv.h
-index ad6dc0331e..42bbe874af 100644
+index 516fc57253..3af0429958 100644
 --- a/src/emc/motion/mot_priv.h
 +++ b/src/emc/motion/mot_priv.h
 @@ -70,6 +70,13 @@ typedef struct {
@@ -1960,16 +1763,16 @@ index ad6dc0331e..42bbe874af 100644
      hal_bit_t *unlock;          /* WPI: command that axis should unlock for rotation */
      hal_bit_t *is_unlocked;     /* RPI: axis is currently unlocked */
  
-@@ -351,4 +365,11 @@ int motion_seed_cubic(CUBIC_STRUCT *cubic, double position);
- void motion_reset_joint_command(emcmot_joint_t *joint, double position);
+@@ -349,4 +363,11 @@ int joint_is_lockable(int joint_num);
+ 
  void motion_cancel_joint(int joint_num);
  
 +void availability_begin(availability_status_t *a, int runtime);
++void availability_begin_joint_release(int n);
 +void availability_release_joint(int n, availability_fault_t fault);
 +void availability_release_spindle(int n, availability_fault_t fault);
 +void availability_cancel(int all);
 +int availability_transition_busy(void);
-+int availability_home_is_synchronized(int joint);
 +
  #endif /* MOT_PRIV_H */
 diff --git a/src/emc/motion/motion.c b/src/emc/motion/motion.c
@@ -2021,7 +1824,7 @@ index 7f81108901..87f1a06205 100644
  	joint->comp.entries = 0;
  	joint->comp.entry = &(joint->comp.array[0]);
 diff --git a/src/emc/motion/motion.h b/src/emc/motion/motion.h
-index dfc990f853..f2a3f2ecc9 100644
+index dfc990f853..fd934976e2 100644
 --- a/src/emc/motion/motion.h
 +++ b/src/emc/motion/motion.h
 @@ -183,6 +183,10 @@ extern "C" {
@@ -2046,17 +1849,15 @@ index dfc990f853..f2a3f2ecc9 100644
      } emcmot_command_t;
  
  /*! \todo FIXME - these packed bits might be replaced with chars
-@@ -357,6 +365,9 @@ Suggestion: Split this in to an Error and a Status flag register..
+@@ -357,7 +365,6 @@ Suggestion: Split this in to an Error and a Status flag register..
  #define EMCMOT_JOINT_MIN_HARD_LIMIT_BIT 0x0020
  #define EMCMOT_JOINT_FERROR_BIT         0x0040
  #define EMCMOT_JOINT_FAULT_BIT          0x0080
-+/* Motion-owned Home All snapshot: excluded by deliberate availability release.
-+   Use a spare flag bit to preserve the joint layout and homemod API. */
-+#define EMCMOT_JOINT_HOME_RELEASED_BIT  0x0100
- 
+-
  /*! \todo FIXME - the terms "teleop", "coord", and "free" are poorly
     documented.  This is my feeble attempt to understand exactly
-@@ -425,6 +436,52 @@ Suggestion: Split this in to an Error and a Status flag register..
+    what they mean.
+@@ -425,6 +432,53 @@ Suggestion: Split this in to an Error and a Status flag register..
  	EMCMOT_ORIENT_FAULTED,
      } orient_state_t;
  
@@ -2078,7 +1879,7 @@ index dfc990f853..f2a3f2ecc9 100644
 +        EMCMOT_AVAILABILITY_FAULT_ACK_UNEXPECTED = 5,
 +        EMCMOT_AVAILABILITY_FAULT_HOME_FAILED = 6,
 +        EMCMOT_AVAILABILITY_FAULT_HOME_ABORTED = 7,
-+        EMCMOT_AVAILABILITY_FAULT_RESYNC_FAILED = 8,
++        EMCMOT_AVAILABILITY_FAULT_POSITION_MISMATCH = 8,
 +        EMCMOT_AVAILABILITY_FAULT_TRANSITION_ABORTED = 9,
 +    } availability_fault_t;
 +
@@ -2089,6 +1890,7 @@ index dfc990f853..f2a3f2ecc9 100644
 +        AVAIL_PHASE_WAIT_FREE,
 +        AVAIL_PHASE_WAIT_HOME_START,
 +        AVAIL_PHASE_WAIT_HOME_FINISH,
++        AVAIL_PHASE_WAIT_SETTLED,
 +        AVAIL_PHASE_CANCEL_HOME,
 +    } availability_phase_t;
 +
@@ -2109,7 +1911,7 @@ index dfc990f853..f2a3f2ecc9 100644
  /* flags for enabling spindle scaling, feed scaling,
     adaptive feed, and feed hold */
  
-@@ -510,6 +567,7 @@ Suggestion: Split this in to an Error and a Status flag register..
+@@ -510,6 +564,7 @@ Suggestion: Split this in to an Error and a Status flag register..
  	EMCMOT_JOINT_FLAG flag;	/* see above for bit details */
      bool homed;
      bool homing;
@@ -2117,7 +1919,7 @@ index dfc990f853..f2a3f2ecc9 100644
  
  	double pos_cmd;		/* commanded joint position */
  	double pos_fb;		/* position feedback, comp removed */
-@@ -556,6 +614,7 @@ Suggestion: Split this in to an Error and a Status flag register..
+@@ -556,6 +611,7 @@ Suggestion: Split this in to an Error and a Status flag register..
  	double home_search_vel;
  	int home_sequence;
  	double increment;
@@ -2125,13 +1927,13 @@ index dfc990f853..f2a3f2ecc9 100644
      } spindle_status_t;
  
      typedef struct {
-@@ -763,6 +822,9 @@ typedef struct emcmot_internal_t {
+@@ -763,6 +819,9 @@ typedef struct emcmot_internal_t {
      int enabling;       /* starts up disabled */
      int coordinating;   /* starts up in free mode */
      int teleoperating;  /* starts up in free mode */
 +    int availability_motion_error; /* acknowledged by Abort or enable */
 +    int availability_machine_on; /* serialized initial acquisitions */
-+    int availability_resource;   /* joints first, then spindles */
++    int availability_resource;   /* serialized initial spindle acquisitions */
      int overriding;     /* non-zero means we've initiated an joint
                             move while overriding limits */
      TP_STRUCT coord_tp; /* coordinated mode planner */
@@ -2218,7 +2020,7 @@ index 7663c33f7e..c40c9dbe5e 100644
  
  /*
 diff --git a/src/emc/nml_intf/emc.hh b/src/emc/nml_intf/emc.hh
-index 0dca92c7e0..5ddb263172 100644
+index 0dca92c7e0..32ca6fbaa0 100644
 --- a/src/emc/nml_intf/emc.hh
 +++ b/src/emc/nml_intf/emc.hh
 @@ -74,6 +74,7 @@ struct PM_CARTESIAN;
@@ -2237,19 +2039,18 @@ index 0dca92c7e0..5ddb263172 100644
  
  #define EMC_SPINDLE_STAT_TYPE                        ((NMLTYPE) 1399)
  
-@@ -340,6 +342,11 @@ extern int emcJogAbs(int nr, double pos, double vel, int jjogmode);
+@@ -340,6 +342,10 @@ extern int emcJogAbs(int nr, double pos, double vel, int jjogmode);
  
  
  extern int emcJointUpdate(EMC_JOINT_STAT stat[], int numJoints);
 +extern bool emcJointAvailabilityControlled(int index);
 +extern int emcJointSetAvailabilityConfig(int joint, int controlled,
-+                                         int initial_available,
 +                                         double timeout, int volatile_home);
 +extern int emcJointSetAvailability(int joint, int available);
  
  extern int emcJointSetMaxJerk(int joint, double jerk);
  
-@@ -451,6 +458,11 @@ extern int emcSpindleBrakeRelease(int spindle);
+@@ -451,6 +457,11 @@ extern int emcSpindleBrakeRelease(int spindle);
  extern int emcSpindleBrakeEngage(int spindle);
  
  extern int emcSpindleUpdate(EMC_SPINDLE_STAT stat[], int num_spindles);
@@ -2363,7 +2164,7 @@ index e0fe4e3616..ac4a55781b 100644
  
      // clear out the pending command
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 59021c7dcb..366e662a81 100644
+index 59021c7dcb..1314163557 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -169,6 +169,60 @@ volatile int done;
@@ -2494,7 +2295,7 @@ index 59021c7dcb..366e662a81 100644
      }
  
 +    if (availability_pending.active) {
-+        // Do not interpret or admit motion across the reconciliation boundary.
++        // Do not interpret or admit motion across an availability transaction.
 +        // Cleanup and resumable program controls retain their normal semantics.
 +        switch (type) {
 +        case EMC_TASK_ABORT_TYPE:
@@ -2682,7 +2483,7 @@ index 79dbeb68bc..223886ebb2 100644
  int emcTaskSetState(EMC_TASK_STATE state);
  int emcTaskPlanInit();
 diff --git a/src/emc/task/taskintf.cc b/src/emc/task/taskintf.cc
-index d88c727d52..8ec4b9c67c 100644
+index d88c727d52..ca5c4dc3a2 100644
 --- a/src/emc/task/taskintf.cc
 +++ b/src/emc/task/taskintf.cc
 @@ -990,6 +990,10 @@ int emcJointUpdate(EMC_JOINT_STAT stat[], int numJoints)
@@ -2696,7 +2497,7 @@ index d88c727d52..8ec4b9c67c 100644
  	// for
  	// all
  
-@@ -1015,6 +1019,35 @@ int emcJointUpdate(EMC_JOINT_STAT stat[], int numJoints)
+@@ -1015,6 +1019,33 @@ int emcJointUpdate(EMC_JOINT_STAT stat[], int numJoints)
      return 0;
  }
  
@@ -2706,15 +2507,13 @@ index d88c727d52..8ec4b9c67c 100644
 +        emcmotStatus.joint_status[index].availability.controlled;
 +}
 +
-+int emcJointSetAvailabilityConfig(int joint, int controlled,
-+                                  int initial_available, double timeout,
++int emcJointSetAvailabilityConfig(int joint, int controlled, double timeout,
 +                                  int volatile_home)
 +{
 +    if (joint < 0 || joint >= EMCMOT_MAX_JOINTS || timeout <= 0.0) return -1;
 +    emcmotCommand.command = EMCMOT_SET_JOINT_AVAILABILITY_CONFIG;
 +    emcmotCommand.joint = joint;
 +    emcmotCommand.availability_control = controlled;
-+    emcmotCommand.initial_availability = initial_available;
 +    emcmotCommand.availability_timeout = timeout;
 +    emcmotCommand.volatile_home = volatile_home;
 +    return usrmotWriteEmcmotCommand(&emcmotCommand);
@@ -2732,7 +2531,7 @@ index d88c727d52..8ec4b9c67c 100644
  // EMC_TRAJ functions
  
  int emcTrajSetJoints(int joints)
-@@ -1839,9 +1872,11 @@ int emcMotionInit()
+@@ -1839,9 +1870,11 @@ int emcMotionInit()
  
  int emcMotionHalt()
  {
@@ -2745,7 +2544,7 @@ index d88c727d52..8ec4b9c67c 100644
      r1 = -1;
      for (t = 0; t < EMCMOT_MAX_JOINTS; t++) {
  	if (0 == emcJointHalt(t)) {
-@@ -1854,7 +1889,7 @@ int emcMotionHalt()
+@@ -1854,7 +1887,7 @@ int emcMotionHalt()
      r4 = emcPositionSave();
      r5 = ini_hal_exit();
  
@@ -2754,7 +2553,7 @@ index d88c727d52..8ec4b9c67c 100644
  }
  
  int emcMotionAbort()
-@@ -1864,6 +1899,8 @@ int emcMotionAbort()
+@@ -1864,6 +1897,8 @@ int emcMotionAbort()
      int r3 = 0;
      int t;
  
@@ -2763,7 +2562,7 @@ index d88c727d52..8ec4b9c67c 100644
      r1 = -1;
      for (t = 0; t < EMCMOT_MAX_JOINTS; t++) {
  	if (0 == emcJogAbort(t)) {
-@@ -1871,8 +1908,6 @@ int emcMotionAbort()
+@@ -1871,8 +1906,6 @@ int emcMotionAbort()
  	}
      }
  
@@ -2772,7 +2571,7 @@ index d88c727d52..8ec4b9c67c 100644
      return (r1 == 0 && r2 == 0 && r3 == 0) ? 0 : -1;
  }
  
-@@ -2057,10 +2092,42 @@ int emcSpindleUpdate(EMC_SPINDLE_STAT stat[], int num_spindles){
+@@ -2057,10 +2090,42 @@ int emcSpindleUpdate(EMC_SPINDLE_STAT stat[], int num_spindles){
  		stat[s].css_factor = emcmotStatus.spindle_status[s].css_factor;
  		stat[s].css_xoffset = emcmotStatus.spindle_status[s].xoffset;
  		stat[s].at_speed = emcmotStatus.spindle_status[s].at_speed;
@@ -2815,7 +2614,7 @@ index d88c727d52..8ec4b9c67c 100644
  int emcMotionUpdate(EMC_MOTION_STAT * stat)
  {
      int r1, r2, r3, r4;
-@@ -2133,6 +2200,18 @@ int emcMotionUpdate(EMC_MOTION_STAT * stat)
+@@ -2133,6 +2198,18 @@ int emcMotionUpdate(EMC_MOTION_STAT * stat)
  
      // FIXME-AJ: joints not axes
      for (joint = 0; joint < stat->traj.joints; joint++) {
@@ -2834,7 +2633,7 @@ index d88c727d52..8ec4b9c67c 100644
  	if (stat->joint[joint].status == RCS_STATUS::ERROR) {
  	    error = 1;
  	    break;
-@@ -2142,6 +2221,15 @@ int emcMotionUpdate(EMC_MOTION_STAT * stat)
+@@ -2142,6 +2219,15 @@ int emcMotionUpdate(EMC_MOTION_STAT * stat)
  	    break;
  	}
      }
@@ -2906,526 +2705,23 @@ index 03437fbce2..28ee76096f 100644
      {"jog", (PyCFunction)jog, METH_VARARGS,
          "jog(JOG_CONTINUOUS, joint_flag, index, speed)\n"
          "jog(JOG_INCREMENT, joint_flag, index, speed, increment)\n"
-diff --git a/src/hal/components/homecomp.comp b/src/hal/components/homecomp.comp
-index 79c4691787..b586e23012 100644
---- a/src/hal/components/homecomp.comp
-+++ b/src/hal/components/homecomp.comp
-@@ -25,6 +25,19 @@ See the source code file: `src/emc/motion/homing.c` for the baseline
- implementation that includes all functions for the default *homemod*
- module.
- 
-+Custom Home All must exclude inactive joints and preserve their homed state.
-+Motion snapshots deliberately released joints in
-+`emcmot_joint_t.flag & EMCMOT_JOINT_HOME_RELEASED_BIT` before Home All;
-+this uses the existing joint data API and adds no mandatory module symbol.
-+Skip a configured sequence step only when all its members were deliberately
-+released. A missing configured step still terminates the sequence; motion
-+rejects partially available synchronized groups. Report successful Home All
-+completion once even if every participating joint was already homed with
-+HOME_NO_REHOME. Cancellation and failure must not report completion.
-+The HOMING_BASE example inherits sequence selection from homing.c and handles
-+that completion result below. Independently implemented modules must provide
-+equivalent semantics when using runtime availability.
-+
- To avoid updates that overwrite homecomp.comp, best practice is
- to rename the file and its component name (example:
- *user_homecomp.comp*, *user_homecomp*).
-@@ -283,6 +296,13 @@ bool do_homing(void)
-             homing_active = 0;
-         }
-     }
-+    /* Match base_do_homing: completion belongs to the Home All request,
-+       including HOME_NO_REHOME, without changing a released reference. */
-+    if (home_all_pending) {
-+        if (sequence_state != HOME_SEQUENCE_IDLE) return 0;
-+        home_all_pending = 0;
-+        return !home_all_failed && get_allhomed();
-+    }
-     // return 1 if homing completed this period
-     if (!beginning_allhomed && get_allhomed()) {homing_active=0; return 1;}
-     return 0;
-diff --git a/tests/homemod-compatibility/README b/tests/homemod-compatibility/README
-new file mode 100644
-index 0000000000..1efed9223e
---- /dev/null
-+++ b/tests/homemod-compatibility/README
-@@ -0,0 +1,5 @@
-+Compile the independent homecomp skeleton without HOMING_BASE, then load it
-+with motmod. This guards against adding mandatory symbols to the homemod API.
-+Requires a built, writable RIP tree and runs under ordinary POSIX scheduling.
-+Both the standalone skeleton and HOMING_BASE custom implementation are compiled
-+and loaded. No additional availability symbol is required from the module.
-diff --git a/tests/homemod-compatibility/expected b/tests/homemod-compatibility/expected
-new file mode 100644
-index 0000000000..e69de29bb2
-diff --git a/tests/homemod-compatibility/test.py b/tests/homemod-compatibility/test.py
-new file mode 100644
-index 0000000000..b857bf81b9
---- /dev/null
-+++ b/tests/homemod-compatibility/test.py
-@@ -0,0 +1,41 @@
-+#!/usr/bin/env python3
-+"""Exercise the standalone homing API against the real motion module loader."""
-+import os
-+from pathlib import Path
-+import shutil
-+import subprocess
-+import tempfile
-+
-+root = Path(os.environ.get('LINUXCNC_TEST_ROOT', Path(__file__).resolve().parents[2]))
-+name = 'availability_legacy_home'
-+installed = root / 'rtlib' / (name + '.so')
-+assert not installed.exists(), f'Refusing to replace {installed}'
-+
-+def run(command, directory):
-+    result = subprocess.run(command, cwd=directory, capture_output=True, text=True)
-+    assert result.returncode == 0, result.stdout + result.stderr
-+
-+for use_base in (False, True):
-+  with tempfile.TemporaryDirectory() as directory:
-+    directory = Path(directory)
-+    source = (root / 'src/hal/components/homecomp.comp').read_text()
-+    source = source.replace('component homecomp', 'component ' + name, 1)
-+    # Test this checkout's API even when RIP include/ has installed headers.
-+    for header in ('motion.h', 'homing.h'):
-+        source = source.replace('#include "' + header + '"',
-+                                '#include "' + str(root/'src/emc/motion'/header) + '"')
-+    if use_base:
-+        source = source.replace('// #define HOMING_BASE /home/myname/linuxcnc-dev/src/emc/motion/homing.c',
-+                                '#define HOMING_BASE ' + str(root / 'src/emc/motion/homing.c'))
-+    (directory / (name + '.comp')).write_text(source)
-+    run(['halcompile', '--compile', name + '.comp'], directory)
-+    try:
-+        shutil.copyfile(directory / (name + '.so'), installed)
-+        (directory / 'load.hal').write_text(
-+            f'loadrt tpmod\nloadrt {name}\nloadrt trivkins\n'
-+            'loadrt motmod base_period_nsec=0 servo_period_nsec=1000000 num_joints=3\n'
-+            'addf motion-command-handler servo-thread\n'
-+            'addf motion-controller servo-thread\n')
-+        run(['halrun', '-f', 'load.hal'], directory)
-+    finally:
-+        installed.unlink(missing_ok=True)
-diff --git a/tests/homemod-compatibility/test.sh b/tests/homemod-compatibility/test.sh
-new file mode 100755
-index 0000000000..0cd44bb027
---- /dev/null
-+++ b/tests/homemod-compatibility/test.sh
-@@ -0,0 +1,3 @@
-+#!/bin/sh
-+set -eu
-+python3 test.py
-diff --git a/tests/motion-acquisition-reconciliation/README b/tests/motion-acquisition-reconciliation/README
-new file mode 100644
-index 0000000000..bae54aca14
---- /dev/null
-+++ b/tests/motion-acquisition-reconciliation/README
-@@ -0,0 +1,17 @@
-+Compiles the complete production control and homing translation units, the
-+isolated Enable handler branch, free planner, and cubic implementation with
-+deterministic kinematics and HAL fixtures. Requires a configured
-+source tree and C compiler; no real-time privileges or running controller.
-+
-+Covers interrupted backlash and screw-table correction in both directions,
-+motor-command continuity, fresh moves and reversals, stale following-error
-+flags, rejection before adoption, preservation of physical interlock flags,
-+redundant Enable while enabled/pending, and Home All success (including absolute
-+encoder/no-rehome), cancellation, failure, and released-reference preservation.
-+Also validates branch-changing FK/IK reconciliation and transactional branch
-+flags, disabled Cartesian commands with released C feedback, and the custom
-+homecomp Home-All implementation against the same sequence/completion cases.
-+
-+Run python3 test.py for the fixed behavior. Each of --mutation compensation,
-+--mutation ferror, --mutation enable, and --mutation home must fail at its
-+regression assertion. Mutations change temporary compiler input only.
-diff --git a/tests/motion-acquisition-reconciliation/expected b/tests/motion-acquisition-reconciliation/expected
-new file mode 100644
-index 0000000000..e69de29bb2
-diff --git a/tests/motion-acquisition-reconciliation/home.c b/tests/motion-acquisition-reconciliation/home.c
-new file mode 100644
-index 0000000000..720f34dd33
---- /dev/null
-+++ b/tests/motion-acquisition-reconciliation/home.c
-@@ -0,0 +1,119 @@
-+#include <assert.h>
-+#include <string.h>
-+#include "homing.c"
-+void rtapi_print_msg(msg_level_t level, const char *fmt, ...) {}
-+static emcmot_joint_t fixture[EMCMOT_MAX_JOINTS];
-+static void setup(void) {
-+    memset(H, 0, sizeof(H));
-+    memset(fixture, 0, sizeof(fixture));
-+    joints = fixture;
-+    all_joints = 2;
-+    extra_joints = 0;
-+    servo_freq = 1000;
-+    homing_active = 0;
-+    home_all_pending = home_all_failed = 0;
-+    sequence_state = HOME_SEQUENCE_IDLE;
-+    current_sequence = 0;
-+    for (int n = 0; n < 2; n++) {
-+        joints[n].flag |= EMCMOT_JOINT_ACTIVE_BIT;
-+        H[n].homed = 1;
-+        H[n].home_sequence = n;
-+        H[n].home_flags = HOME_ABSOLUTE_ENCODER | HOME_NO_REHOME | HOME_NO_FINAL_MOVE;
-+    }
-+}
-+static int finish(void) {
-+    int events = 0;
-+    for (int n = 0; n < 1000; n++) events += base_do_homing();
-+    assert(!homing_active && sequence_state == HOME_SEQUENCE_IDLE);
-+    return events;
-+}
-+int main(void) {
-+    setup();
-+    base_do_home_joint(-1);
-+    assert(H[0].homed);
-+    assert(finish() == 1);
-+    base_do_home_joint(-1);
-+    assert(finish() == 1);
-+    /* Released joint zero retains its reference while another joint homes. */
-+    setup();
-+    joints[0].flag &= ~EMCMOT_JOINT_ACTIVE_BIT;
-+    H[1].homed = 0;
-+    base_do_home_joint(-1);
-+    assert(finish() == 1);
-+    assert(H[0].homed && H[1].homed);
-+    /* Real configuration gaps stop Home All regardless of release markers. */
-+    for (int controlled = 0; controlled <= 1; controlled++) {
-+        setup();
-+        H[0].homed = H[1].homed = 0;
-+        H[1].home_sequence = 2;
-+        if (controlled) joints[1].flag |= EMCMOT_JOINT_HOME_RELEASED_BIT;
-+        base_do_home_joint(-1);
-+        assert(finish() == 0);
-+        assert(H[0].homed && !H[1].homed);
-+    }
-+    /* Missing zero retains upstream's special case: sequence one can start. */
-+    setup();
-+    H[0].home_sequence = H[1].home_sequence = 1;
-+    H[0].homed = H[1].homed = 0;
-+    base_do_home_joint(-1);
-+    assert(finish() == 1);
-+    /* Only deliberate release can remove a configured intermediate step. */
-+    for (int reason = 0; reason < 2; reason++) {
-+        setup();
-+        all_joints = 3;
-+        H[2] = H[1];
-+        H[2].home_sequence = 2;
-+        H[2].homed = 0;
-+        joints[2].flag |= EMCMOT_JOINT_ACTIVE_BIT;
-+        joints[1].flag &= ~EMCMOT_JOINT_ACTIVE_BIT;
-+        if (reason == 0) joints[1].flag |= EMCMOT_JOINT_HOME_RELEASED_BIT;
-+        base_do_home_joint(-1);
-+        assert(finish() == (reason == 0));
-+        assert(H[2].homed == (reason == 0));
-+    }
-+    /* A released step must not bridge a later real gap. */
-+    setup();
-+    H[0].home_sequence = 1;
-+    H[1].home_sequence = 3;
-+    H[1].homed = 0;
-+    joints[0].flag &= ~EMCMOT_JOINT_ACTIVE_BIT;
-+    joints[0].flag |= EMCMOT_JOINT_HOME_RELEASED_BIT;
-+    base_do_home_joint(-1);
-+    assert(finish() == 0 && !H[1].homed);
-+    /* Every configured member must be released; one inactive unmanaged
-+       member prevents skipping, even if the other member is released. */
-+    for (int all_released = 0; all_released <= 1; all_released++) {
-+        setup();
-+        all_joints = 3;
-+        H[0].home_sequence = H[1].home_sequence = 1;
-+        H[2] = H[1];
-+        H[2].home_sequence = 2;
-+        H[2].homed = 0;
-+        joints[0].flag &= ~EMCMOT_JOINT_ACTIVE_BIT;
-+        joints[1].flag &= ~EMCMOT_JOINT_ACTIVE_BIT;
-+        joints[2].flag |= EMCMOT_JOINT_ACTIVE_BIT;
-+        joints[0].flag |= EMCMOT_JOINT_HOME_RELEASED_BIT;
-+        if (all_released) joints[1].flag |= EMCMOT_JOINT_HOME_RELEASED_BIT;
-+        base_do_home_joint(-1);
-+        assert(finish() == all_released);
-+        assert(H[2].homed == all_released);
-+    }
-+    /* Cancellation between request and first servo cycle cannot succeed. */
-+    setup();
-+    base_do_home_joint(-1);
-+    base_do_cancel_homing(0);
-+    assert(finish() == 0);
-+    /* Cancellation during a no-rehome sequence cannot succeed either. */
-+    setup();
-+    base_do_home_joint(-1);
-+    assert(!base_do_homing());
-+    base_do_cancel_homing(0);
-+    assert(finish() == 0);
-+    /* A physical homing failure must not generate the success notification. */
-+    setup();
-+    H[0].home_flags |= HOME_IS_SHARED;
-+    H[0].home_sw = 1;
-+    base_do_home_joint(-1);
-+    assert(finish() == 0);
-+    return 0;
-+}
-diff --git a/tests/motion-acquisition-reconciliation/motion.c b/tests/motion-acquisition-reconciliation/motion.c
-new file mode 100644
-index 0000000000..608bdd48ee
---- /dev/null
-+++ b/tests/motion-acquisition-reconciliation/motion.c
-@@ -0,0 +1,157 @@
-+#include <assert.h>
-+#include <math.h>
-+#include <string.h>
-+#include "motion.h"
-+#include "mot_priv.h"
-+#include "../tp/tp.h"
-+#include "axis.h"
-+#include "control.c"
-+static struct emcmot_status_t status;
-+static struct emcmot_config_t config;
-+static struct emcmot_internal_t internal;
-+static emcmot_hal_data_t hal_data;
-+struct emcmot_status_t *emcmotStatus = &status;
-+struct emcmot_config_t *emcmotConfig = &config;
-+struct emcmot_internal_t *emcmotInternal = &internal;
-+emcmot_hal_data_t *emcmot_hal_data = &hal_data;
-+emcmot_joint_t joints[EMCMOT_MAX_JOINTS];
-+static bool invalid_kinematics;
-+static bool branching;
-+int tpQueueDepth(TP_STRUCT *tp) { return 0; }
-+int tpSetPos(TP_STRUCT *tp, EmcPose const *pose) { return 0; }
-+int kinematicsForward(const double *p, EmcPose *pose, const KINEMATICS_FORWARD_FLAGS *f, KINEMATICS_INVERSE_FLAGS *i) {
-+    pose->tran.x = branching ? fabs(p[0]) : p[0];
-+    pose->tran.z = p[2]; pose->c = p[1];
-+    if (branching) *i = p[0] < 0;
-+    return 0;
-+}
-+int kinematicsInverse(const EmcPose *pose, double *p, const KINEMATICS_INVERSE_FLAGS *i, KINEMATICS_FORWARD_FLAGS *f) {
-+    p[0] = (branching && *i ? -pose->tran.x : pose->tran.x) + invalid_kinematics;
-+    if (branching) *f = 42;
-+    return 0;
-+}
-+bool axis_jog_abort_all(bool immediate) { return 0; }
-+void axis_sync_teleop_tp_to_carte_pos(int factor, double *p[]) {}
-+void reportError(const char *fmt, ...) {}
-+void rtapi_print_msg(msg_level_t level, const char *fmt, ...) {}
-+/* ENABLE HANDLER */
-+static double motor_command(emcmot_joint_t *j) {
-+    return j->pos_cmd + j->backlash_filt + j->motor_offset;
-+}
-+static void step(emcmot_joint_t *j) {
-+    simple_tp_update_normal(&j->free_tp, servo_period);
-+    j->pos_cmd = j->free_tp.curr_pos;
-+    j->vel_cmd = j->free_tp.curr_vel;
-+    compute_screw_comp();
-+}
-+int main(void) {
-+    servo_period = .001;
-+    hal_float_t feedback = 0;
-+    hal_s32_t counts = 0;
-+    hal_bit_t enable = 1;
-+    hal_data.enable = &enable;
-+    hal_data.joint[0].motor_pos_fb = &feedback;
-+    hal_data.joint[0].jjog_counts = &counts;
-+    config.numJoints = 1;
-+    status.net_feed_scale = 1;
-+    emcmot_joint_t *j = &joints[0];
-+    SET_JOINT_ACTIVE_FLAG(j, 1);
-+    j->vel_limit = j->free_tp.max_vel = 50;
-+    j->acc_limit = j->free_tp.max_acc = 500;
-+    j->backlash = .4;
-+    j->motor_offset = 7;
-+    cubicInit(&j->cubic);
-+    cubicSetSegmentTime(&j->cubic, .004);
-+    cubicSetInterpolationRate(&j->cubic, 4);
-+    /* Both backlash and table-driven compensation share this filter. */
-+    emcmot_comp_entry_t entries[2] = {{0}};
-+    entries[0].nominal = -100;
-+    entries[0].fwd_trim = .2;
-+    entries[0].rev_trim = -.2;
-+    entries[1].nominal = 100;
-+    for (int table = 0; table < 2; table++) {
-+    j->comp.entries = table;
-+    j->comp.entry = entries;
-+    for (int direction = -1; direction <= 1; direction += 2) {
-+        simple_tp_set_pos(&j->free_tp, 0);
-+        j->backlash_filt = j->backlash_corr = j->backlash_vel = 0;
-+        j->free_tp.pos_cmd = direction * .001;
-+        j->free_tp.enable = 1;
-+        for (int n = 0; n < 5; n++) step(j);
-+        assert(j->free_tp.curr_vel == 0);
-+        assert(fabs(j->backlash_corr - j->backlash_filt) > .19);
-+        double before = motor_command(j), logical = j->pos_cmd;
-+        feedback = before;
-+        SET_JOINT_FERROR_FLAG(j, 1);
-+        SET_JOINT_FAULT_FLAG(j, 1);
-+        SET_JOINT_PHL_FLAG(j, 1);
-+        invalid_kinematics = 1;
-+        assert(!resync_joint_after_acquire(0));
-+        assert(GET_JOINT_FERROR_FLAG(j));
-+        invalid_kinematics = 0;
-+        assert(resync_joint_after_acquire(0));
-+        assert(!GET_JOINT_FERROR_FLAG(j));
-+        assert(GET_JOINT_FAULT_FLAG(j));
-+        assert(GET_JOINT_PHL_FLAG(j));
-+        assert(j->ferror == 0);
-+        for (int n = 0; n < 1000; n++) {
-+            step(j);
-+            assert(fabs(motor_command(j) - before) < 1e-12);
-+            assert(fabs(j->pos_cmd - logical) < 1e-12);
-+        }
-+        /* A deliberate move must resume compensation, then reverse it. */
-+        for (int reversal = 0; reversal < 2; reversal++) {
-+            int sign = reversal ? -direction : direction;
-+            j->free_tp.pos_cmd = j->pos_cmd + sign;
-+            j->free_tp.enable = 1;
-+            for (int n = 0; n < 2000; n++) step(j);
-+            assert(fabs(j->backlash_filt - sign * .2) < 1e-8);
-+            assert(fabs(j->pos_cmd - j->free_tp.pos_cmd) < TINY_DP(j->free_tp.max_acc, servo_period));
-+        }
-+    }
-+    }
-+    SET_MOTION_ENABLE_FLAG(1);
-+    internal.enabling = 1;
-+    internal.availability_resource = 2;
-+    enable_request();
-+    assert(internal.enabling && !internal.availability_machine_on);
-+    assert(internal.availability_resource == 2);
-+    SET_MOTION_ENABLE_FLAG(0);
-+    internal.enabling = 0;
-+    internal.availability_machine_on = 1;
-+    enable_request();
-+    assert(internal.availability_resource == 2);
-+    internal.availability_machine_on = 0;
-+    enable_request();
-+    assert(internal.availability_machine_on && internal.availability_resource == 0);
-+    internal.availability_machine_on = 0;
-+    internal.enabling = 1;
-+    internal.availability_resource = 2;
-+    enable_request();
-+    assert(internal.enabling && !internal.availability_machine_on);
-+    assert(internal.availability_resource == 2);
-+    /* FK identifies a changed physical branch, as with a SCARA elbow.
-+       Failed validation must not publish either staged branch flag. */
-+    branching = 1;
-+    iflags = 0; fflags = 7;
-+    feedback = -5 + j->backlash_filt + j->motor_offset;
-+    invalid_kinematics = 1;
-+    assert(!resync_joint_after_acquire(0));
-+    assert(iflags == 0 && fflags == 7);
-+    invalid_kinematics = 0;
-+    assert(resync_joint_after_acquire(0));
-+    assert(iflags == 1 && fflags == 42);
-+    assert(j->pos_cmd == -5);
-+    branching = 0;
-+    config.numJoints = 3;
-+    joints[0].pos_fb = 12; joints[2].pos_fb = 34;
-+    joints[1].pos_cmd = 0; joints[1].pos_fb = 180;
-+    status.joint_status[1].availability.controlled = 1;
-+    status.joint_status[1].availability.state = EMCMOT_AVAILABILITY_DISABLED;
-+    status.carte_pos_fb.c = 180;
-+    sync_disabled_cartesian_command();
-+    assert(status.carte_pos_cmd.c == 0);
-+    assert(status.carte_pos_cmd.tran.x == 12 && status.carte_pos_cmd.tran.z == 34);
-+    assert(joints[1].pos_fb == 180 && status.carte_pos_fb.c == 180);
-+    return 0;
-+}
-diff --git a/tests/motion-acquisition-reconciliation/test.py b/tests/motion-acquisition-reconciliation/test.py
-new file mode 100644
-index 0000000000..86df94bd91
---- /dev/null
-+++ b/tests/motion-acquisition-reconciliation/test.py
-@@ -0,0 +1,61 @@
-+#!/usr/bin/env python3
-+"""Compile production motion functions and the complete homing state machine."""
-+import argparse
-+import os
-+from pathlib import Path
-+import subprocess
-+import tempfile
-+root = Path(os.environ.get('LINUXCNC_TEST_ROOT', Path(__file__).resolve().parents[2]))
-+motion = root / 'src/emc/motion'
-+
-+parser = argparse.ArgumentParser(description=__doc__)
-+parser.add_argument('--mutation', choices=('compensation', 'ferror', 'enable', 'home'))
-+mutation = parser.parse_args().mutation
-+control = (motion/'control.c').read_text()
-+command = (motion/'command.c').read_text()
-+# Mutations affect only temporary compilation inputs, never the checkout.
-+if mutation == 'compensation':
-+    control = control.replace('    joint->backlash_corr = joint->backlash_filt;\n', '').replace(
-+        '    joint->backlash_vel = 0;\n', '')
-+elif mutation == 'ferror':
-+    control = control.replace('    SET_JOINT_FERROR_FLAG(joint, 0);\n', '')
-+elif mutation == 'enable':
-+    command = command.replace(
-+        '            if (GET_MOTION_ENABLE_FLAG() || emcmotInternal->enabling ||\n'
-+        '                emcmotInternal->availability_machine_on) break;\n', '')
-+enable = command[command.index('\tcase EMCMOT_ENABLE:'):command.index('\tcase EMCMOT_JOINT_ACTIVATE:')]
-+with tempfile.TemporaryDirectory() as tmp:
-+    tmp = Path(tmp)
-+    for name in ('motion', 'home', 'custom_home'):
-+        code = Path(__file__).with_name(('home' if name == 'custom_home' else name) + '.c').read_text()
-+        if name == 'motion':
-+            # Compile the production control unit. Only the small Enable branch
-+            # uses an isolated command fixture; lifecycle tests use HAL/NML.
-+            (tmp/'control.c').write_text(control)
-+            handler = 'static void enable_request(void) { switch (EMCMOT_ENABLE) {\n' + enable + '\n} }\n'
-+            code = code.replace('/* ENABLE HANDLER */', handler)
-+        elif name == 'custom_home':
-+            template = (root/'src/hal/components/homecomp.comp').read_text()
-+            start = template.index('bool do_homing(void)')
-+            end = template.index('\n}', start) + 2
-+            handler = template[start:end].replace('bool do_homing(void)', 'static bool custom_do_homing(void)')
-+            code = code.replace('static emcmot_joint_t fixture',
-+                'static struct { int is_custom_homing; } customH[EMCMOT_MAX_JOINTS];\n'
-+                'static int custom_1joint_state_machine(int n) { return base_1joint_state_machine(n); }\n'
-+                + handler + '\nstatic emcmot_joint_t fixture')
-+            code = code.replace('base_do_homing()', 'custom_do_homing()')
-+        elif mutation == 'home':
-+            homing = (motion/'homing.c').read_text()
-+            start = homing.index('    if (home_all_pending) {', homing.index('static bool base_do_homing'))
-+            end = homing.index('    // return 1 if homing completed this period', start)
-+            homing = homing[:start] + homing[end:]
-+            code = code.replace('#include "homing.c"', homing)
-+        path = tmp/(name + '.c')
-+        path.write_text(code)
-+        args = [os.environ.get('CC', 'cc'), '-std=gnu11', '-DRTAPI', '-DUSPACE',
-+                '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',
-+                '-I'+str(tmp), '-I'+str(motion), '-I'+str(root/'include'), '-I'+str(root/'src'),
-+                str(path), str(motion/'simple_tp.c'),
-+                str(root/'src/emc/kinematics/cubic.c'), '-lm', '-o', str(tmp/name)]
-+        subprocess.run(args, check=True)
-+        subprocess.run([str(tmp/name)], check=True)
-diff --git a/tests/motion-acquisition-reconciliation/test.sh b/tests/motion-acquisition-reconciliation/test.sh
-new file mode 100755
-index 0000000000..0cd44bb027
---- /dev/null
-+++ b/tests/motion-acquisition-reconciliation/test.sh
-@@ -0,0 +1,3 @@
-+#!/bin/sh
-+set -eu
-+python3 test.py
 diff --git a/tests/motion-target-preparation/README b/tests/motion-target-preparation/README
-index 4628ee375d..dd85c6dc54 100644
+index 99955caa22..7958c18d67 100644
 --- a/tests/motion-target-preparation/README
 +++ b/tests/motion-target-preparation/README
-@@ -1 +1,10 @@
--Compiles production target preparation, stationary-command reset, and cubic seeding with deterministic inverse-kinematics doubles and the real cubic implementation. Checks transactional preparation and retention of planner limits, applied compensation offsets, and feedback/following-error state. No runtime or realtime privileges are required.
-+Compiles the production target-preparation, stationary-command reset and cubic
-+helpers with deterministic inverse-kinematics doubles and the real cubic
-+implementation. No runtime or realtime privileges are required. Checks late
-+invalid targets, no partial commitment, retention of limits/offsets/feedback,
-+unavailable targets, terminal interpolation tails, and release of joint zero
-+at all four cubic phases followed by motion on joint one.
-+
-+Extraction is limited to these helpers and the isolated legacy activation
-+guard. TELEOP lifecycle coverage uses the real POSIX controller and servo-cycle
-+HAL latches in runtime-availability-regressions (tail).
+@@ -1 +1,5 @@
+-Compiles production target preparation with deterministic inverse-kinematics doubles and the real cubic implementation. Checks that inverse-kinematics and interpolation failures cannot partially update the joint command vector. No runtime or realtime privileges are required.
++Compiles production target preparation with deterministic inverse-kinematics
++doubles and the real cubic implementation. Checks that inverse-kinematics,
++interpolation, and unavailable-joint target failures cannot partially update
++the joint command vector. Also checks the isolated legacy activation guard.
++No runtime or realtime privileges are required.
 diff --git a/tests/motion-target-preparation/availability-cases.h b/tests/motion-target-preparation/availability-cases.h
 new file mode 100644
-index 0000000000..af7fb50536
+index 0000000000..00099d2dfa
 --- /dev/null
 +++ b/tests/motion-target-preparation/availability-cases.h
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,21 @@
 +static void test_availability(EmcPose *pose, double *positions, CUBIC_STRUCT *staged) {
 +    availability_status_t *a = &status.joint_status[2].availability;
 +    a->controlled = 1; a->held_position = 2;
@@ -3447,44 +2743,6 @@ index 0000000000..af7fb50536
 +        assert(a->held_position == 2);
 +    }
 +}
-+
-+/* Release the COORD clock joint at every phase, then move another joint. */
-+static void test_release_phase(EmcPose *pose, double *positions, CUBIC_STRUCT *staged) {
-+    for (int phase = 0; phase < 4; phase++) {
-+        memset(&status, 0, sizeof(status));
-+        for (int n = 0; n < 3; n++) {
-+            assert(motion_seed_cubic(&joints[n].cubic, 0) == 0);
-+            joints[n].coarse_pos = solution[n] = 0;
-+        }
-+        for (int cycle = 0; cycle <= phase; cycle++)
-+            for (int n = 0; n < 3; n++)
-+                cubicInterpolate(&joints[n].cubic, 0, 0, 0, 0);
-+        status.joint_status[0].availability.controlled = 1;
-+        hold_joint_cubic(&joints[0].cubic, 0);
-+        solution[1] = 10;
-+        double pos = 0;
-+        for (int cycle = 0; cycle < 40; cycle++) {
-+            for (int n = 1; n < 3; n++) {
-+                assert(joints[n].cubic.interpolationTime == joints[0].cubic.interpolationTime);
-+                assert(cubicNeedNextPoint(&joints[n].cubic) == cubicNeedNextPoint(&joints[0].cubic));
-+            }
-+            while (cubicNeedNextPoint(&joints[0].cubic)) {
-+                assert(prepare_joint_targets(pose, positions, staged) == 0);
-+                for (int n = 0; n < 3; n++) {
-+                    joints[n].coarse_pos = positions[n];
-+                    joints[n].cubic = staged[n];
-+                }
-+            }
-+            for (int n = 0; n < 3; n++) {
-+                double p = cubicInterpolate(&joints[n].cubic, 0, 0, 0, 0);
-+                if (n == 0) assert(p == 0);
-+                if (n == 1) pos = p;
-+            }
-+        }
-+        assert(pos == 10);
-+    }
-+    memset(&status, 0, sizeof(status));
-+}
 diff --git a/tests/motion-target-preparation/availability-fixture.h b/tests/motion-target-preparation/availability-fixture.h
 new file mode 100644
 index 0000000000..dd4b2be8dd
@@ -3497,51 +2755,10 @@ index 0000000000..dd4b2be8dd
 +static struct { EmcPose carte_pos_cmd; int overrideLimitMask; struct { availability_status_t availability; } joint_status[3]; } status;
 +#define emcmotStatus (&status)
 diff --git a/tests/motion-target-preparation/test.py b/tests/motion-target-preparation/test.py
-index a8deb9d521..2b41750b57 100644
+index 1fa2553aa3..8ac9a8043d 100644
 --- a/tests/motion-target-preparation/test.py
 +++ b/tests/motion-target-preparation/test.py
-@@ -103,6 +103,31 @@ int main(void) {
-     assert(cubicInterpolate(&cubic, 0, 0, 0, 0) == 7);
- #ifdef TEST_AVAILABILITY
-     test_availability(&pose, positions, staged);
-+    test_release_phase(&pose, positions, staged);
-+    for (int n=0; n<3; n++) {
-+        assert(motion_seed_cubic(&joints[n].cubic, 0) == 0);
-+        joints[n].coarse_pos = 0;
-+    }
-+    assert(joint_interpolation_done());
-+    int saw_tail = 0, settled = 0;
-+    double held = 0;
-+    for (int cycle=0; cycle<40; cycle++) {
-+        for (int n=0; n<3; n++) {
-+            CUBIC_STRUCT *c = &joints[n].cubic;
-+            joints[n].coarse_pos = n == 1 ? 10 : 0;
-+            if (cubicNeedNextPoint(c)) assert(cubicAddPoint(c, joints[n].coarse_pos) == 0);
-+            double pos = cubicInterpolate(c, 0, 0, 0, 0);
-+            if (n == 1) {
-+                if (settled) assert(pos == held);
-+                if (!joint_interpolation_done() && cycle > 4) saw_tail = 1;
-+                if (joint_interpolation_done() && cycle > 4) {
-+                    held = pos;
-+                    settled = 1;
-+                }
-+            }
-+        }
-+    }
-+    assert(saw_tail && settled && held == 10);
- #endif
- }
- """
-@@ -111,6 +136,8 @@ with tempfile.TemporaryDirectory() as tmp:
-     # Only the math header is shimmed; cubic.c is compiled unchanged.
-     (tmp/'rtapi_math.h').write_text('#include <math.h>\n')
-     text = preamble + '\n' + function('prepare_joint_targets') + '\n' + function('motion_seed_cubic')
-+    text += '\n' + function('joint_interpolation_done')
-+    text += '\n' + function('hold_joint_cubic')
-     text += '\n' + function('simple_tp_set_pos', (root/'src/emc/motion/simple_tp.c').read_text())
-     text += '\n' + function('motion_reset_joint_command')
-     extra = Path(__file__).with_name('availability-cases.h')
-@@ -120,3 +147,60 @@ with tempfile.TemporaryDirectory() as tmp:
+@@ -88,3 +88,60 @@ with tempfile.TemporaryDirectory() as tmp:
                      '-I'+str(root/'src/emc/kinematics'), '-I'+str(root/'src/emc/motion'), str(tmp/'test.c'),
                      str(root/'src/emc/kinematics/cubic.c'), '-lm', '-o', str(tmp/'test')], check=True)
      subprocess.run([str(tmp/'test')], check=True)
@@ -3612,10 +2829,10 @@ index 0000000000..425d52b6e7
 +!/base.ini
 diff --git a/tests/runtime-availability-regressions/README b/tests/runtime-availability-regressions/README
 new file mode 100644
-index 0000000000..8d026b85ae
+index 0000000000..e1bde102e6
 --- /dev/null
 +++ b/tests/runtime-availability-regressions/README
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,20 @@
 +Production-path availability regressions. Each case starts LinuxCNC with POSIX
 +simulation and uses its NML command/status channels and real HAL servo thread.
 +The amplifier and homing latches run after motion-controller every servo cycle.
@@ -3624,8 +2841,8 @@ index 0000000000..8d026b85ae
 +no external posthome command ownership/completion contract is supported.
 +The fault case records EMC_ABORT_MOTION_OR_IO_RCS_ERROR through the standard
 +ON_ABORT_COMMAND hook, distinguishing error handling from a machine-off abort
-+without polling transient status. The home0 case explicitly enters joint mode
-+and verifies that Home All actually homes another joint.
++without polling transient status. The sequence case verifies that an
++availability-controlled joint cannot define a Home All sequence.
 +
 +INI fixtures are generated by test.sh from the shared FIXTURE.BASE and local
 +*.ini.in overrides. Run python3 ../runtime-availability/make-fixtures.py before
@@ -3633,14 +2850,15 @@ index 0000000000..8d026b85ae
 +key. Generated INIs are ignored; edit the base or the case override instead.
 +Handoff regressions cover abort during a spindle index wait followed by release
 +and reacquisition (including a fresh encoder handshake), X/Z/C Machine Off/On
-+with released C feedback at 180 degrees, and JOG_STOP during acknowledgment and
-+volatile acquisition homing waits.
++while released C feedback moves externally, and JOG_STOP during acknowledgment
++and volatile acquisition homing waits. Released motion state remains frozen
++while the raw HAL feedback pin stays live.
 diff --git a/tests/runtime-availability-regressions/base.ini b/tests/runtime-availability-regressions/base.ini
 new file mode 100644
-index 0000000000..fb0408d386
+index 0000000000..71f455ae57
 --- /dev/null
 +++ b/tests/runtime-availability-regressions/base.ini
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,94 @@
 +[EMC]
 +VERSION = 1.1
 +DEBUG = 0
@@ -3658,7 +2876,7 @@ index 0000000000..fb0408d386
 +[HAL]
 +HALFILE = core.hal
 +[TRAJ]
-+NO_FORCE_HOMING = 0
++NO_FORCE_HOMING = 1
 +COORDINATES = XYZ
 +SPINDLES = 1
 +LINEAR_UNITS = mm
@@ -3689,6 +2907,36 @@ index 0000000000..fb0408d386
 +TYPE = LINEAR
 +HOME = 0
 +HOME_OFFSET = 0
++HOME_SEARCH_VEL = 0
++HOME_LATCH_VEL = 0
++MAX_VELOCITY = 50
++MAX_ACCELERATION = 500
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++FERROR = 1
++MIN_FERROR = 0.25
++AVAILABILITY_CONTROL = 1
++AVAILABILITY_TIMEOUT = 5
++VOLATILE_HOME = 0
++[JOINT_1]
++TYPE = LINEAR
++HOME = 0
++HOME_OFFSET = 0
++HOME_SEARCH_VEL = 0
++HOME_LATCH_VEL = 0
++MAX_VELOCITY = 50
++MAX_ACCELERATION = 500
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++FERROR = 1
++MIN_FERROR = 0.25
++AVAILABILITY_CONTROL = 1
++AVAILABILITY_TIMEOUT = 5
++VOLATILE_HOME = 0
++[JOINT_2]
++TYPE = LINEAR
++HOME = 0
++HOME_OFFSET = 0
 +HOME_SEQUENCE = 0
 +HOME_SEARCH_VEL = 0
 +HOME_LATCH_VEL = 0
@@ -3698,42 +2946,7 @@ index 0000000000..fb0408d386
 +MAX_LIMIT = 100
 +FERROR = 1
 +MIN_FERROR = 0.25
-+AVAILABILITY_CONTROL = 1
-+INITIAL_AVAILABILITY = 0
-+AVAILABILITY_TIMEOUT = 5
-+VOLATILE_HOME = 0
-+[JOINT_1]
-+TYPE = LINEAR
-+HOME = 0
-+HOME_OFFSET = 0
-+HOME_SEQUENCE = 1
-+HOME_SEARCH_VEL = 0
-+HOME_LATCH_VEL = 0
-+MAX_VELOCITY = 50
-+MAX_ACCELERATION = 500
-+MIN_LIMIT = -100
-+MAX_LIMIT = 100
-+FERROR = 1
-+MIN_FERROR = 0.25
-+AVAILABILITY_CONTROL = 1
-+INITIAL_AVAILABILITY = 0
-+AVAILABILITY_TIMEOUT = 5
-+VOLATILE_HOME = 0
-+[JOINT_2]
-+TYPE = LINEAR
-+HOME = 0
-+HOME_OFFSET = 0
-+HOME_SEQUENCE = 2
-+HOME_SEARCH_VEL = 0
-+HOME_LATCH_VEL = 0
-+MAX_VELOCITY = 50
-+MAX_ACCELERATION = 500
-+MIN_LIMIT = -100
-+MAX_LIMIT = 100
-+FERROR = 1
-+MIN_FERROR = 0.25
 +AVAILABILITY_CONTROL = 0
-+INITIAL_AVAILABILITY = 0
 +AVAILABILITY_TIMEOUT = 5
 +VOLATILE_HOME = 0
 +[SPINDLE_0]
@@ -3742,13 +2955,13 @@ index 0000000000..fb0408d386
 +AVAILABILITY_TIMEOUT = 5
 diff --git a/tests/runtime-availability-regressions/checkresult b/tests/runtime-availability-regressions/checkresult
 new file mode 100755
-index 0000000000..d9202ee919
+index 0000000000..153f94a5fc
 --- /dev/null
 +++ b/tests/runtime-availability-regressions/checkresult
 @@ -0,0 +1,5 @@
 +#!/bin/sh
 +set -eu
-+for scenario in ${AVAILABILITY_REGRESSION_CASES:-fault wheel tail amp consistency group home0 power index jogstop joghome extra}; do
++for scenario in ${AVAILABILITY_REGRESSION_CASES:-fault wheel tail amp power index jogstop joghome extra sequence}; do
 +    grep -q "^availability regression $scenario ok$" "$1"
 +done
 diff --git a/tests/runtime-availability-regressions/core.hal b/tests/runtime-availability-regressions/core.hal
@@ -3809,10 +3022,10 @@ index 0000000000..36c2c7ee86
 +net other-home-seen joint.2.homing => flipflop.1.set
 diff --git a/tests/runtime-availability-regressions/extra.ini.in b/tests/runtime-availability-regressions/extra.ini.in
 new file mode 100644
-index 0000000000..605c4ce330
+index 0000000000..5048be901a
 --- /dev/null
 +++ b/tests/runtime-availability-regressions/extra.ini.in
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,16 @@
 +# Case-specific overrides; unspecified values come from FIXTURE.BASE.
 +[FIXTURE]
 +BASE = base.ini
@@ -3827,6 +3040,7 @@ index 0000000000..605c4ce330
 +KINEMATICS = trivkins coordinates=XY kinstype=B
 +
 +[JOINT_2]
++HOME_SEQUENCE = @unset
 +AVAILABILITY_CONTROL = 1
 diff --git a/tests/runtime-availability-regressions/fault.ini.in b/tests/runtime-availability-regressions/fault.ini.in
 new file mode 100644
@@ -3849,10 +3063,10 @@ index 0000000000..b39d68b962
 +AVAILABILITY_CONTROL = 0
 diff --git a/tests/runtime-availability-regressions/fixture.py b/tests/runtime-availability-regressions/fixture.py
 new file mode 100644
-index 0000000000..a7de283423
+index 0000000000..ef0f630d93
 --- /dev/null
 +++ b/tests/runtime-availability-regressions/fixture.py
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,75 @@
 +#!/usr/bin/env python3
 +import os
 +import time
@@ -3913,51 +3127,33 @@ index 0000000000..a7de283423
 +if case == 'extra':
 +    raise AssertionError('unsupported extra-joint configuration reached UI')
 +c.state(linuxcnc.STATE_ESTOP_RESET); done()
-+c.state(linuxcnc.STATE_ON)
-+if case in ('group', 'joghome'):
-+    wait(lambda: hal.get_value('joint.1.availability-request'), 'initial acquisition')
-+    pin('joint.1.availability-ack', 1)
-+done()
++c.state(linuxcnc.STATE_ON); done()
 +c.teleop_enable(0); done()
 +if case != 'fault':
 +    acquire('joint.0')
-+if case not in ('group', 'fault', 'joghome'):
++if case not in ('fault', 'joghome'):
 +    acquire('joint.1')
-+c.home(-1)
 +if case == 'joghome':
-+    wait(lambda: hal.get_value('joint.1.index-enable'), 'initial homing index')
++    c.set_joint_availability(1, True)
++    wait(lambda: hal.get_value('joint.1.availability-request'), 'runtime acquisition')
++    pin('joint.1.availability-ack', 1)
++    wait(lambda: hal.get_value('joint.1.index-enable'), 'runtime homing index')
 +    pin('joint.1.index-enable', 0)
-+done()
-+wait(lambda: all(s.homed[:3]), 'home all')
++    done()
++c.home(2); done()
++wait(lambda: s.homed[2], 'home ordinary joint')
 diff --git a/tests/runtime-availability-regressions/joghome.ini.in b/tests/runtime-availability-regressions/joghome.ini.in
 new file mode 100644
-index 0000000000..d0be1d7e46
+index 0000000000..949adc122d
 --- /dev/null
 +++ b/tests/runtime-availability-regressions/joghome.ini.in
-@@ -0,0 +1,7 @@
+@@ -0,0 +1,6 @@
 +[FIXTURE]
 +BASE = base.ini
 +[JOINT_1]
-+INITIAL_AVAILABILITY = 1
 +VOLATILE_HOME = 1
 +HOME_USE_INDEX = YES
 +HOME_LATCH_VEL = 1
-diff --git a/tests/runtime-availability-regressions/mixed.ini.in b/tests/runtime-availability-regressions/mixed.ini.in
-new file mode 100644
-index 0000000000..69bb57c1fa
---- /dev/null
-+++ b/tests/runtime-availability-regressions/mixed.ini.in
-@@ -0,0 +1,10 @@
-+# Case-specific overrides; unspecified values come from FIXTURE.BASE.
-+[FIXTURE]
-+BASE = base.ini
-+
-+[JOINT_1]
-+INITIAL_AVAILABILITY = 1
-+VOLATILE_HOME = 1
-+
-+[JOINT_2]
-+HOME_SEQUENCE = -1
 diff --git a/tests/runtime-availability-regressions/record_abort.ngc b/tests/runtime-availability-regressions/record_abort.ngc
 new file mode 100644
 index 0000000000..5ca302ff7f
@@ -3970,6 +3166,18 @@ index 0000000000..5ca302ff7f
 +(LOGCLOSE)
 +o<record_abort> endsub
 +M2
+diff --git a/tests/runtime-availability-regressions/sequence.ini.in b/tests/runtime-availability-regressions/sequence.ini.in
+new file mode 100644
+index 0000000000..3786b1533f
+--- /dev/null
++++ b/tests/runtime-availability-regressions/sequence.ini.in
+@@ -0,0 +1,6 @@
++# Availability-controlled joints are referenced only by individual acquisition.
++[FIXTURE]
++BASE = base.ini
++
++[JOINT_1]
++HOME_SEQUENCE = 1
 diff --git a/tests/runtime-availability-regressions/tail.hal b/tests/runtime-availability-regressions/tail.hal
 new file mode 100644
 index 0000000000..c8a82609e1
@@ -4001,21 +3209,23 @@ index 0000000000..c8a82609e1
 +net premature-inpos and2.1.out => flipflop.3.set
 diff --git a/tests/runtime-availability-regressions/tail.ini.in b/tests/runtime-availability-regressions/tail.ini.in
 new file mode 100644
-index 0000000000..a415711c9b
+index 0000000000..cdf6f940c4
 --- /dev/null
 +++ b/tests/runtime-availability-regressions/tail.ini.in
-@@ -0,0 +1,5 @@
-+# TELEOP release: latch the real servo-cycle tail and any premature INPOS.
+@@ -0,0 +1,7 @@
++# TELEOP release: latch the real servo-cycle tail and upstream INPOS during it.
 +[FIXTURE]
 +BASE = base.ini
 +[HAL]
 +HALFILE = tail.hal
++[JOINT_1]
++BACKLASH = 0.4
 diff --git a/tests/runtime-availability-regressions/test-ui.py b/tests/runtime-availability-regressions/test-ui.py
 new file mode 100755
-index 0000000000..3284c509b7
+index 0000000000..c856d5569d
 --- /dev/null
 +++ b/tests/runtime-availability-regressions/test-ui.py
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,170 @@
 +#!/usr/bin/env python3
 +from fixture import *
 +from pathlib import Path
@@ -4023,7 +3233,11 @@ index 0000000000..3284c509b7
 +if case == 'power':
 +    release('joint.1')
 +    pin('mux2.0.in1', 180); pin('mux2.0.sel', 1)
-+    wait(lambda: abs(s.actual_position[5] - 180) < 1e-6, 'live released C feedback')
++    wait(lambda: abs(hal.get_value('joint.1.motor-pos-fb') - 180) < 1e-6,
++         'live released C HAL feedback')
++    settle()
++    assert abs(s.actual_position[5]) < 1e-9
++    assert abs(s.joint_position[1]) < 1e-9
 +    c.state(linuxcnc.STATE_OFF)
 +    wait(lambda: not hal.get_value('joint.0.availability-request'), 'Machine Off release')
 +    pin('joint.0.availability-ack', 0)
@@ -4036,7 +3250,7 @@ index 0000000000..3284c509b7
 +    c.mdi('G0 X2 Z3'); done()
 +    assert abs(s.position[0] - 2) < 1e-6 and abs(s.position[2] - 3) < 1e-6
 +    assert abs(s.position[5]) < 1e-9
-+    assert abs(s.actual_position[5] - 180) < 1e-6
++    assert abs(s.actual_position[5]) < 1e-9
 +
 +elif case == 'index':
 +    acquire('spindle.0')
@@ -4137,9 +3351,9 @@ index 0000000000..3284c509b7
 +
 +elif case == 'tail':
 +    c.teleop_enable(1); done()
-+    # Distinct short jogs exercise settling and release repeatedly. Cubic
-+    # phase preservation at all four phases is also checked by the helper test.
-+    for increment in (.01, .013, .017, .019):
++    # Release may begin after logical motion finishes, but it must keep the
++    # hardware request asserted until interpolation and compensation settle.
++    for increment in (.01, .019):
 +        before = hal.get_value('joint.1.pos-cmd')
 +        for latch in (2, 3): pin(f'flipflop.{latch}.reset', 1)
 +        settle()
@@ -4148,11 +3362,17 @@ index 0000000000..3284c509b7
 +        wait(lambda: abs(s.joint_position[1] - before - increment) < 1e-6
 +             and hal.get_value('motion.in-position'), 'TELEOP endpoint')
 +        # Task admission observes NML completion after the servo endpoint.
-+        done(); settle()
++        done()
 +        assert hal.get_value('flipflop.2.out'), 'TELEOP interpolation tail not exercised'
-+        assert not hal.get_value('flipflop.3.out'), 'INPOS preceded TELEOP interpolation completion'
++        assert hal.get_value('flipflop.3.out'), 'upstream INPOS did not precede interpolation completion'
 +        held = hal.get_value('joint.1.pos-cmd')
-+        release('joint.1')
++        c.set_joint_availability(1, False)
++        wait(lambda: not hal.get_value('joint.1.availability-request'), 'settled release')
++        settle(.02)
++        assert abs(hal.get_value('joint.1.backlash-vel')) < 1e-12
++        assert abs(hal.get_value('joint.1.backlash-corr') -
++                   hal.get_value('joint.1.backlash-filt')) < 1e-12
++        pin('joint.1.availability-ack', 0); done()
 +        x = s.joint_position[0]
 +        c.jog(linuxcnc.JOG_INCREMENT, 0, 0, 1, .01)
 +        wait(lambda: abs(s.joint_position[0] - x - .01) < 1e-6
@@ -4173,50 +3393,6 @@ index 0000000000..3284c509b7
 +    settle()
 +    assert not hal.get_value('flipflop.0.out'), 'amp-enable pulsed with amp-fault asserted'
 +
-+elif case == 'consistency':
-+    release('joint.1')
-+    pin('mux2.0.in1', 5); pin('mux2.0.sel', 1)
-+    pin('flipflop.0.reset', 1); settle()
-+    pin('flipflop.0.reset', 0)
-+    c.set_joint_availability(1, True)
-+    wait(lambda: hal.get_value('joint.1.availability-request'), 'XXY acquire')
-+    pin('joint.1.availability-ack', 1)
-+    wait(lambda: s.joint[1]['availability_fault'] != 0 or s.joint[1]['available'], 'XXY result')
-+    assert not s.joint[1]['available'], 'inconsistent XXY acquisition succeeded'
-+    assert s.joint[1]['availability_fault'] == 8
-+    assert not hal.get_value('flipflop.0.out'), 'inconsistent vector enabled amplifier'
-+    assert abs(hal.get_value('joint.1.pos-cmd')) < 1e-9
-+    c.mode(linuxcnc.MODE_MDI); c.wait_complete(1)
-+    c.mdi('G0 X0 Y0'); c.wait_complete(1)
-+    settle()
-+    assert abs(hal.get_value('joint.1.pos-cmd')) < 1e-9
-+
-+elif case == 'group':
-+    release('joint.1')
-+    pin('flipflop.1.reset', 1); settle()
-+    pin('flipflop.1.reset', 0)
-+    c.set_joint_availability(1, True)
-+    result = c.wait_complete(.2)
-+    if result != linuxcnc.RCS_ERROR:
-+        pin('joint.1.availability-ack', 1)
-+        settle(.3)
-+    assert not hal.get_value('flipflop.1.out'), 'acquisition homed another resource'
-+    assert result == linuxcnc.RCS_ERROR, 'effective synchronized group admitted'
-+    assert not hal.get_value('joint.1.availability-request')
-+
-+elif case == 'home0':
-+    release('joint.0')
-+    c.teleop_enable(0); done()
-+    c.unhome(2); done()
-+    assert not s.homed[2]
-+    c.home(-1); done()
-+    wait(lambda: s.homed[2], 'Home All homed the other joint')
-+    settle()
-+    assert s.homed[0], 'Home All discarded released joint zero reference'
-+    acquire('joint.0')
-+    assert s.homed[0]
-+    c.mode(linuxcnc.MODE_MDI); done()
-+    c.mdi('G0 X0 Y0 Z0'); done()
 +else:
 +    raise AssertionError('unknown scenario ' + case)
 +print(f'availability regression {case} ok')
@@ -4231,20 +3407,18 @@ index 0000000000..67dab70a3d
 +BASE = base.ini
 diff --git a/tests/runtime-availability-regressions/test.sh b/tests/runtime-availability-regressions/test.sh
 new file mode 100755
-index 0000000000..31c6168e10
+index 0000000000..ba9733568e
 --- /dev/null
 +++ b/tests/runtime-availability-regressions/test.sh
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,34 @@
 +#!/bin/sh
 +set -eu
 +python3 ../runtime-availability/make-fixtures.py
-+for scenario in ${AVAILABILITY_REGRESSION_CASES:-fault wheel tail amp consistency group home0 power index jogstop joghome extra}; do
++for scenario in ${AVAILABILITY_REGRESSION_CASES:-fault wheel tail amp power index jogstop joghome extra sequence}; do
 +    ini=test.ini
 +    case "$scenario" in
 +        fault) ini=fault.ini ;;
 +        tail) ini=tail.ini ;;
-+        consistency) ini=xxy.ini ;;
-+        group) ini=mixed.ini ;;
 +        power) ini=xzc.ini ;;
 +        joghome) ini=joghome.ini ;;
 +        extra)
@@ -4258,6 +3432,16 @@ index 0000000000..31c6168e10
 +            grep -q 'JOINT_2: availability configuration rejected' extra.log
 +            echo 'availability regression extra ok'
 +            continue ;;
++        sequence)
++            if linuxcnc -r sequence.ini >sequence.log 2>&1; then
++                cat sequence.log
++                echo 'availability HOME_SEQUENCE configuration unexpectedly accepted' >&2
++                exit 1
++            fi
++            cat sequence.log
++            grep -q 'JOINT_1: HOME_SEQUENCE cannot be used with AVAILABILITY_CONTROL' sequence.log
++            echo 'availability regression sequence ok'
++            continue ;;
 +    esac
 +    AVAILABILITY_REGRESSION_CASE=$scenario linuxcnc -r "$ini"
 +done
@@ -4268,47 +3452,6 @@ index 0000000000..a5800196af
 +++ b/tests/runtime-availability-regressions/tool.tbl
 @@ -0,0 +1 @@
 +T1 P1 Z0 ; test
-diff --git a/tests/runtime-availability-regressions/xxy.hal b/tests/runtime-availability-regressions/xxy.hal
-new file mode 100644
-index 0000000000..e0e6f2b61d
---- /dev/null
-+++ b/tests/runtime-availability-regressions/xxy.hal
-@@ -0,0 +1,17 @@
-+loadrt trivkins coordinates=XXY
-+loadrt motmod base_period_nsec=0 servo_period_nsec=1000000 traj_period_nsec=4000000 num_joints=3 num_spindles=1
-+loadrt mux2 count=1
-+addf mux2.0 servo-thread
-+addf motion-command-handler servo-thread
-+addf motion-controller servo-thread
-+net Xpos joint.0.motor-pos-cmd => joint.0.motor-pos-fb
-+net Ycmd joint.1.motor-pos-cmd => mux2.0.in0
-+net Yfb mux2.0.out => joint.1.motor-pos-fb
-+net Zpos joint.2.motor-pos-cmd => joint.2.motor-pos-fb
-+net estop-loop iocontrol.0.user-enable-out iocontrol.0.emc-enable-in
-+setp spindle.0.at-speed true
-+loadrt flipflop count=2
-+addf flipflop.0 servo-thread
-+addf flipflop.1 servo-thread
-+net amp-seen joint.1.amp-enable-out => flipflop.0.set
-+net other-home-seen joint.2.homing => flipflop.1.set
-diff --git a/tests/runtime-availability-regressions/xxy.ini.in b/tests/runtime-availability-regressions/xxy.ini.in
-new file mode 100644
-index 0000000000..bc09afe77b
---- /dev/null
-+++ b/tests/runtime-availability-regressions/xxy.ini.in
-@@ -0,0 +1,12 @@
-+# Case-specific overrides; unspecified values come from FIXTURE.BASE.
-+[FIXTURE]
-+BASE = base.ini
-+
-+[HAL]
-+HALFILE = xxy.hal
-+
-+[TRAJ]
-+COORDINATES = XY
-+
-+[KINS]
-+KINEMATICS = trivkins coordinates=XXY
 diff --git a/tests/runtime-availability-regressions/xzc.hal b/tests/runtime-availability-regressions/xzc.hal
 new file mode 100644
 index 0000000000..5c7ef3f3f2
@@ -4360,13 +3503,13 @@ index 0000000000..425d52b6e7
 +!/base.ini
 diff --git a/tests/runtime-availability/README b/tests/runtime-availability/README
 new file mode 100644
-index 0000000000..e3cfd28aae
+index 0000000000..bb83251315
 --- /dev/null
 +++ b/tests/runtime-availability/README
 @@ -0,0 +1,8 @@
-+Userspace POSIX simulation: actual target enforcement, released-joint MDI eligibility, late ACK cancellation, feedback reconciliation, homing abort cleanup.
-+Cancellation waits for actual homing velocity and checks stationary completion and reacquisition. Home All excludes released joints, crosses only configured steps whose joints are all deliberately released, and rejects transitions and partially available synchronized groups.
-+Direct admission rejects dwell/queued MDI and paused AUTO, overlaps (including no-ops and other resources), and interpretation/jogging before completion. Changed-feedback acquisition followed immediately by G91 verifies canonical synchronization without M54/M55 or a mode switch. Abort during ACK wait and moving homing cannot be revived by late ACK; later reacquisition succeeds.
++Userspace POSIX simulation: actual target enforcement, released-joint MDI eligibility, late ACK cancellation, held-position validation, and homing abort cleanup.
++Cancellation waits for actual homing velocity and checks stationary completion and reacquisition.
++Direct admission rejects dwell/queued MDI and paused AUTO, overlaps (including no-ops and other resources), and interpretation/jogging before completion. With forced homing enabled, Home All is rejected whenever any controlled joint is configured, first acquisition homes an unhomed nonvolatile joint, and controlled joints reject user HOME/UNHOME outside acquisition. Later nonvolatile acquisition preserves a matching held position and rejects changed or non-finite feedback without publishing availability. Volatile acquisition accepts arbitrary unavailable movement only through successful homing. Abort during ACK wait and moving homing cannot be revived by late ACK; later reacquisition succeeds.
 +
 +INI fixtures are generated by test.sh from the shared FIXTURE.BASE and local
 +*.ini.in overrides. Run python3 ../runtime-availability/make-fixtures.py before
@@ -4374,10 +3517,10 @@ index 0000000000..e3cfd28aae
 +key. Generated INIs are ignored; edit the base or the case override instead.
 diff --git a/tests/runtime-availability/base.ini b/tests/runtime-availability/base.ini
 new file mode 100644
-index 0000000000..e3b1713c9f
+index 0000000000..c8e0eab3d2
 --- /dev/null
 +++ b/tests/runtime-availability/base.ini
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,99 @@
 +[EMC]
 +VERSION = 1.1
 +DEBUG = 0x0
@@ -4457,7 +3600,6 @@ index 0000000000..e3b1713c9f
 +FERROR = 1
 +MIN_FERROR = 0.25
 +AVAILABILITY_CONTROL = 1
-+INITIAL_AVAILABILITY = 0
 +AVAILABILITY_TIMEOUT = 2
 +VOLATILE_HOME = 0
 +[JOINT_2]
@@ -4465,7 +3607,6 @@ index 0000000000..e3b1713c9f
 +HOME = 0
 +HOME_SEARCH_VEL = 1
 +HOME_LATCH_VEL = 0.1
-+HOME_SEQUENCE = 2
 +MAX_VELOCITY = 50
 +MAX_ACCELERATION = 500
 +MIN_LIMIT = -100
@@ -4473,7 +3614,6 @@ index 0000000000..e3b1713c9f
 +FERROR = 1
 +MIN_FERROR = 0.25
 +AVAILABILITY_CONTROL = 1
-+INITIAL_AVAILABILITY = 0
 +AVAILABILITY_TIMEOUT = 2
 +VOLATILE_HOME = 1
 +[SPINDLE_0]
@@ -4482,180 +3622,43 @@ index 0000000000..e3b1713c9f
 +AVAILABILITY_TIMEOUT = 2
 diff --git a/tests/runtime-availability/checkresult b/tests/runtime-availability/checkresult
 new file mode 100755
-index 0000000000..f8384ac063
+index 0000000000..12624ae5b8
 --- /dev/null
 +++ b/tests/runtime-availability/checkresult
-@@ -0,0 +1,6 @@
+@@ -0,0 +1,4 @@
 +#!/bin/sh
 +set -e
 +grep -q "^runtime availability scenarios ok$" "$1"
 +grep -q "^initial availability scenarios ok$" "$1"
-+test "$(grep -c "^availability Home All scenario ok$" "$1")" -eq 2
-+grep -q "^Home All no-rehome completion ok$" "$1"
 diff --git a/tests/runtime-availability/core_sim.hal b/tests/runtime-availability/core_sim.hal
 new file mode 100644
-index 0000000000..8651dd44dc
+index 0000000000..62edf534b6
 --- /dev/null
 +++ b/tests/runtime-availability/core_sim.hal
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,17 @@
 +loadrt trivkins coordinates=XYZ
 +loadrt motmod base_period_nsec=0 servo_period_nsec=1000000 traj_period_nsec=4000000 num_joints=3 num_spindles=1
-+loadrt mux2 count=1
++loadrt mux2 count=2
 +addf mux2.0 servo-thread
++addf mux2.1 servo-thread
 +addf motion-command-handler servo-thread
 +addf motion-controller servo-thread
 +net Xpos joint.0.motor-pos-cmd => joint.0.motor-pos-fb
 +net Ycmd joint.1.motor-pos-cmd => mux2.0.in0
 +net Yfb mux2.0.out => joint.1.motor-pos-fb
-+net Zpos joint.2.motor-pos-cmd => joint.2.motor-pos-fb
++net Zcmd joint.2.motor-pos-cmd => mux2.1.in0
++net Zfb mux2.1.out => joint.2.motor-pos-fb
 +net estop-loop iocontrol.0.user-enable-out iocontrol.0.emc-enable-in
 +setp spindle.0.at-speed true
 +loadrt flipflop count=1
 +addf flipflop.0 servo-thread
 +net enable-seen motion.motion-enabled => flipflop.0.set
-diff --git a/tests/runtime-availability/home-all-gap.ini.in b/tests/runtime-availability/home-all-gap.ini.in
-new file mode 100644
-index 0000000000..f9ed98fca6
---- /dev/null
-+++ b/tests/runtime-availability/home-all-gap.ini.in
-@@ -0,0 +1,12 @@
-+# Case-specific overrides; unspecified values come from FIXTURE.BASE.
-+[FIXTURE]
-+BASE = base.ini
-+
-+[DISPLAY]
-+DISPLAY = ./home-all.py
-+
-+[JOINT_0]
-+HOME_SEQUENCE = 3
-+
-+[JOINT_1]
-+HOME_SEQUENCE = 1
-diff --git a/tests/runtime-availability/home-all-sync.ini.in b/tests/runtime-availability/home-all-sync.ini.in
-new file mode 100644
-index 0000000000..a9d56abfe6
---- /dev/null
-+++ b/tests/runtime-availability/home-all-sync.ini.in
-@@ -0,0 +1,12 @@
-+# Case-specific overrides; unspecified values come from FIXTURE.BASE.
-+[FIXTURE]
-+BASE = base.ini
-+
-+[DISPLAY]
-+DISPLAY = ./home-all.py
-+
-+[JOINT_0]
-+HOME_SEQUENCE = -1
-+
-+[JOINT_1]
-+HOME_SEQUENCE = 1
-diff --git a/tests/runtime-availability/home-all.py b/tests/runtime-availability/home-all.py
-new file mode 100755
-index 0000000000..58022a9451
---- /dev/null
-+++ b/tests/runtime-availability/home-all.py
-@@ -0,0 +1,39 @@
-+#!/usr/bin/env python3
-+import time
-+import linuxcnc
-+import hal
-+h = hal.component('availability-home-all'); h.ready()
-+c = linuxcnc.command(); s = linuxcnc.stat()
-+def wait(fn):
-+    end = time.monotonic() + 8
-+    while time.monotonic() < end:
-+        s.poll()
-+        if fn(): return
-+        time.sleep(.005)
-+    raise AssertionError('Home All timeout')
-+def done(): assert c.wait_complete(8) == linuxcnc.RCS_DONE
-+wait(lambda: s.task_state == linuxcnc.STATE_ESTOP)
-+c.state(linuxcnc.STATE_ESTOP_RESET); done()
-+c.state(linuxcnc.STATE_ON); done()
-+c.teleop_enable(0); done()
-+s.poll()
-+if 'sync' in s.ini_filename:
-+    for joint in (-1, 0):
-+        c.home(joint)
-+        assert c.wait_complete(3) == linuxcnc.RCS_ERROR
-+        s.poll()
-+        assert not any(s.homed) and not any(j['homing'] for j in s.joint[:3])
-+        c.abort(); done()
-+else:
-+    c.home(-1); done()
-+    wait(lambda: s.homed[0])
-+    assert not s.homed[1] and not s.homed[2]
-+    # In-flight acquisition remains distinct from deliberate release.
-+    c.set_joint_availability(1, True)
-+    wait(lambda: s.joint[1]['availability_state'] == 1)
-+    c.home(-1)
-+    assert c.wait_complete(3) == linuxcnc.RCS_ERROR
-+    c.abort(); done()
-+assert all(not hal.get_value('joint.%d.availability-request' % n) for n in (1,2))
-+assert all(not s.joint[n]['homing'] for n in (1,2))
-+print('availability Home All scenario ok')
-diff --git a/tests/runtime-availability/home-no-rehome.ini.in b/tests/runtime-availability/home-no-rehome.ini.in
-new file mode 100644
-index 0000000000..ce4813121c
---- /dev/null
-+++ b/tests/runtime-availability/home-no-rehome.ini.in
-@@ -0,0 +1,23 @@
-+# Case-specific overrides; unspecified values come from FIXTURE.BASE.
-+[FIXTURE]
-+BASE = ../runtime-availability-regressions/base.ini
-+
-+[DISPLAY]
-+DISPLAY = ./home-no-rehome.py
-+
-+[HAL]
-+HALFILE = core_sim.hal
-+
-+[JOINT_0]
-+HOME_ABSOLUTE_ENCODER = 2
-+AVAILABILITY_CONTROL = 0
-+
-+[JOINT_1]
-+HOME_ABSOLUTE_ENCODER = 2
-+AVAILABILITY_CONTROL = 0
-+
-+[JOINT_2]
-+HOME_ABSOLUTE_ENCODER = 2
-+
-+[SPINDLE_0]
-+AVAILABILITY_CONTROL = 0
-diff --git a/tests/runtime-availability/home-no-rehome.py b/tests/runtime-availability/home-no-rehome.py
-new file mode 100755
-index 0000000000..033bb82fab
---- /dev/null
-+++ b/tests/runtime-availability/home-no-rehome.py
-@@ -0,0 +1,21 @@
-+#!/usr/bin/env python3
-+import time
-+import linuxcnc
-+c = linuxcnc.command(); s = linuxcnc.stat()
-+def wait(fn):
-+    end = time.monotonic() + 8
-+    while time.monotonic() < end:
-+        s.poll()
-+        if fn(): return
-+        time.sleep(.005)
-+    raise AssertionError('Home All did not complete into TELEOP')
-+def done(): assert c.wait_complete(8) == linuxcnc.RCS_DONE
-+wait(lambda: s.task_state == linuxcnc.STATE_ESTOP)
-+c.state(linuxcnc.STATE_ESTOP_RESET); done()
-+c.state(linuxcnc.STATE_ON); done()
-+for request in range(2):
-+    c.teleop_enable(0); done()
-+    wait(lambda: s.motion_mode == linuxcnc.TRAJ_MODE_FREE)
-+    c.home(-1); done()
-+    wait(lambda: all(s.homed[:3]) and s.motion_mode == linuxcnc.TRAJ_MODE_TELEOP)
-+print('Home All no-rehome completion ok')
 diff --git a/tests/runtime-availability/initial-ui.py b/tests/runtime-availability/initial-ui.py
 new file mode 100755
-index 0000000000..254060bcfe
+index 0000000000..1c30ffabdd
 --- /dev/null
 +++ b/tests/runtime-availability/initial-ui.py
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,58 @@
 +#!/usr/bin/env python3
 +import time
 +import linuxcnc
@@ -4673,69 +3676,59 @@ index 0000000000..254060bcfe
 +wait(lambda: s.task_state == linuxcnc.STATE_ESTOP, 'startup')
 +c.state(linuxcnc.STATE_ESTOP_RESET); c.wait_complete(3)
 +c.state(linuxcnc.STATE_ON)
-+wait(lambda: hal.get_value('joint.1.availability-request'), 'initial request')
++wait(lambda: hal.get_value('spindle.0.availability-request'), 'initial request')
 +pin('motion.enable', 0)
-+pin('joint.1.availability-ack', 1)
++pin('spindle.0.availability-ack', 1)
 +time.sleep(.05); s.poll()
 +assert not s.enabled and not hal.get_value('flipflop.0.out')
-+assert not hal.get_value('joint.1.available')
-+pin('joint.1.availability-ack', 0)
++assert not hal.get_value('spindle.0.available')
++pin('spindle.0.availability-ack', 0)
 +c.state(linuxcnc.STATE_OFF); c.wait_complete(3)
-+for n in (1,2): c.set_joint_availability(n, False); c.wait_complete(3)
 +c.set_spindle_availability(0, False); c.wait_complete(3)
 +pin('motion.enable', 1)
 +c.state(linuxcnc.STATE_ON)
-+wait(lambda: hal.get_value('joint.1.availability-request'), 'retry request')
++wait(lambda: hal.get_value('spindle.0.availability-request'), 'retry request')
 +c.abort()
-+wait(lambda: not hal.get_value('joint.1.availability-request'), 'abort request')
-+pin('joint.1.availability-ack', 1)
++wait(lambda: not hal.get_value('spindle.0.availability-request'), 'abort request')
++pin('spindle.0.availability-ack', 1)
 +time.sleep(.05); s.poll()
 +assert not s.enabled and not hal.get_value('flipflop.0.out')
-+pin('joint.1.availability-ack', 0)
++pin('spindle.0.availability-ack', 0)
 +c.state(linuxcnc.STATE_OFF); c.wait_complete(3)
-+for n in (1,2): c.set_joint_availability(n, False); c.wait_complete(3)
 +c.set_spindle_availability(0, False); c.wait_complete(3)
 +c.state(linuxcnc.STATE_ON)
-+for name in ['joint.1', 'joint.2', 'spindle.0']:
-+    wait(lambda: hal.get_value(name+'.availability-request'), 'sequential request '+name)
-+    # Repeated On while the initial scan is already pending must not restart it.
-+    c.state(linuxcnc.STATE_ON)
-+    time.sleep(.02)
-+    assert hal.get_value(name+'.availability-request')
-+    pin(name+'.availability-ack', 1)
++wait(lambda: hal.get_value('spindle.0.availability-request'), 'initial spindle request')
++# Repeated On while the initial scan is already pending must not restart it.
++c.state(linuxcnc.STATE_ON)
++time.sleep(.02)
++assert hal.get_value('spindle.0.availability-request')
++pin('spindle.0.availability-ack', 1)
 +assert c.wait_complete(5) == linuxcnc.RCS_DONE
 +wait(lambda: s.enabled, 'machine on')
-+assert s.joint[2]['available'] and not s.joint[2]['homed']
-+assert not hal.get_value('joint.2.homing')
++assert not s.joint[1]['available'] and not s.joint[2]['available']
 +# Initial availability is startup policy, not a permanent ownership requirement.
-+c.set_joint_availability(1, False)
-+wait(lambda: not hal.get_value('joint.1.availability-request'), 'release initial joint')
-+pin('joint.1.availability-ack', 0)
++c.set_spindle_availability(0, False)
++wait(lambda: not hal.get_value('spindle.0.availability-request'), 'release initial spindle')
++pin('spindle.0.availability-ack', 0)
 +assert c.wait_complete(5) == linuxcnc.RCS_DONE
 +c.state(linuxcnc.STATE_ON)
 +assert c.wait_complete(5) == linuxcnc.RCS_DONE
 +time.sleep(.1); s.poll()
-+assert s.enabled and not s.joint[1]['available']
-+assert not hal.get_value('joint.1.availability-request')
++assert s.enabled and not s.spindle[0]['available']
++assert not hal.get_value('spindle.0.availability-request')
 +print('initial availability scenarios ok')
 diff --git a/tests/runtime-availability/initial.ini.in b/tests/runtime-availability/initial.ini.in
 new file mode 100644
-index 0000000000..c155383d69
+index 0000000000..3b9c37cc3b
 --- /dev/null
 +++ b/tests/runtime-availability/initial.ini.in
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,9 @@
 +# Case-specific overrides; unspecified values come from FIXTURE.BASE.
 +[FIXTURE]
 +BASE = base.ini
 +
 +[DISPLAY]
 +DISPLAY = ./initial-ui.py
-+
-+[JOINT_1]
-+INITIAL_AVAILABILITY = 1
-+
-+[JOINT_2]
-+INITIAL_AVAILABILITY = 1
 +
 +[SPINDLE_0]
 +INITIAL_AVAILABILITY = 1
@@ -4790,10 +3783,10 @@ index 0000000000..c9e6f8a64f
 +M2
 diff --git a/tests/runtime-availability/test-ui.py b/tests/runtime-availability/test-ui.py
 new file mode 100755
-index 0000000000..77d841437f
+index 0000000000..d583185995
 --- /dev/null
 +++ b/tests/runtime-availability/test-ui.py
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,303 @@
 +#!/usr/bin/env python3
 +import time
 +import os
@@ -4839,9 +3832,16 @@ index 0000000000..77d841437f
 +    c.state(linuxcnc.STATE_ESTOP_RESET); done()
 +    c.state(linuxcnc.STATE_ON); done()
 +    manual()
-+    c.home(-1); done()
++    c.home(-1)
++    assert c.wait_complete(3) == linuxcnc.RCS_ERROR
++    s.poll()
++    assert all(not s.joint[n]['homing'] for n in range(3))
++    assert all(not hal.get_value('joint.%d.availability-request' % n) for n in (1,2))
++    c.abort(); done(); manual()
++    c.home(0); done()
 +    wait(lambda: s.homed[0], 'home X')
-+    assert all(not s.joint[n]['homing'] and not s.joint[n]['homed'] for n in (1,2))
++    assert all(not s.joint[n]['homing'] for n in (1,2))
++    assert not s.joint[2]['homed']
 +    assert all(not hal.get_value('joint.%d.availability-request' % n) for n in (1,2))
 +wait(lambda: s.task_state == linuxcnc.STATE_ESTOP, 'startup')
 +reset()
@@ -4959,48 +3959,70 @@ index 0000000000..77d841437f
 +c.mode(linuxcnc.MODE_MDI); done()
 +mdi('G94')
 +manual()
-+# Changed encoder feedback becomes the command/planner origin on acquisition.
-+pin('mux2.0.in1', 5); pin('mux2.0.sel', 1)
++# An unhomed nonvolatile joint homes on first acquisition. HOME ALL and ordinary
++# individual HOME/UNHOME commands cannot bypass availability ownership.
++held = hal.get_value('joint.1.pos-cmd')
 +c.set_joint_availability(1, True)
 +wait(lambda: hal.get_value('joint.1.availability-request'), 'request Y')
 +pin('joint.1.availability-ack', 1); done()
-+wait(lambda: s.joint[1]['available'], 'acquire Y')
-+assert abs(hal.get_value('joint.1.pos-cmd')-5) < 1e-6
-+pin('mux2.0.sel', 0)
-+time.sleep(.05)
-+assert abs(hal.get_value('joint.1.pos-cmd')-5) < 1e-6
-+# Available, unhomed joints still block MDI; only deliberate releases are exempt.
-+c.mode(linuxcnc.MODE_MDI); done()
-+before = s.joint_position[0]
-+c.mdi('G0 X50')
++wait(lambda: s.joint[1]['available'] and s.joint[1]['homed'], 'home and acquire Y')
++assert abs(hal.get_value('joint.1.pos-cmd') - held) < 1e-12
++c.home(1)
 +assert c.wait_complete(3) == linuxcnc.RCS_ERROR
-+s.poll()
-+assert abs(s.joint_position[0]-before) < 1e-6
-+manual()
-+# Once homed, release/reacquire at changed feedback and immediately use G91.
-+# No M-code or intervening mode switch may be needed to synchronize canon.
-+c.home(1); done()
-+c.mode(linuxcnc.MODE_MDI); done()
++c.abort(); done(); manual()
++c.unhome(1)
++assert c.wait_complete(3) == linuxcnc.RCS_ERROR
++c.unhome(-1)
++assert c.wait_complete(3) == linuxcnc.RCS_ERROR
++c.abort(); done(); manual()
++assert s.homed[0] and s.joint[1]['available'] and s.joint[1]['homed']
++# Release freezes the logical joint and Cartesian pose. External feedback remains
++# visible at HAL, but a material mismatch rejects acquisition.
++held = hal.get_value('joint.1.pos-cmd')
 +c.set_joint_availability(1, False)
-+wait(lambda: not hal.get_value('joint.1.availability-request'), 'MDI direct release')
++wait(lambda: not hal.get_value('joint.1.availability-request'), 'direct release')
 +pin('joint.1.availability-ack', 0); done()
-+s.poll()
-+origin = s.joint_position[1] + 3
 +pin('mux2.0.in1', hal.get_value('joint.1.motor-pos-fb') + 3)
 +pin('mux2.0.sel', 1)
++time.sleep(.05); s.poll()
++assert abs(hal.get_value('joint.1.motor-pos-fb') - (held + 3)) < 1e-6
++assert abs(s.joint_position[1] - held) < 1e-9
++assert abs(hal.get_value('joint.1.pos-fb') - held) < 1e-9
 +c.set_joint_availability(1, True)
-+wait(lambda: hal.get_value('joint.1.availability-request'), 'MDI direct acquire')
-+c.mdi('G91 G0 Y50')
-+assert c.wait_complete(.2) == linuxcnc.RCS_ERROR, 'interpreted during acquisition'
++wait(lambda: hal.get_value('joint.1.availability-request'), 'mismatching acquire')
 +pin('joint.1.availability-ack', 1)
-+wait(lambda: s.joint[1]['available'] and s.exec_state == linuxcnc.EXEC_DONE,
-+     'MDI acquisition completion')
++wait(lambda: s.joint[1]['availability_fault'] == 8, 'position mismatch fault')
++assert not s.joint[1]['available']
++assert not hal.get_value('joint.1.amp-enable-out')
++assert abs(hal.get_value('joint.1.pos-cmd') - held) < 1e-12
++assert abs(s.joint_position[1] - held) < 1e-9
++pin('joint.1.availability-ack', 0)
 +pin('mux2.0.sel', 0)
-+mdi('G91 G0 Y1')
-+assert abs(s.joint_position[1] - (origin + 1)) < .001, 'stale canonical position after acquisition'
-+mdi('G90')
-+manual()
++reset()
 +# Runtime volatile acquisition may home, but cancellation must clean it up.
++pin('mux2.1.in1', 7); pin('mux2.1.sel', 1)
++time.sleep(.05); s.poll()
++assert abs(hal.get_value('joint.2.motor-pos-fb') - 7) < 1e-6
++assert abs(s.joint_position[2]) < 1e-9
++c.set_joint_availability(2, True)
++wait(lambda: hal.get_value('joint.2.availability-request'), 'request Z')
++pin('joint.2.availability-ack', 1)
++wait(lambda: s.joint[2]['availability_state'] == 2, 'hardware ACK enters homing')
++assert not s.joint[2]['available'] and not s.joint[2]['homed']
++pin('mux2.1.sel', 0)
++for state, switch in [(7, 1), (10, 0), (12, 1)]:
++    wait(lambda: hal.get_value('joint.2.home-state') == state, 'home switch phase %d' % state)
++    assert not hal.get_value('joint.2.available')
++    assert c.wait_complete(.02) == -1, 'completed before required homing'
++    pin('joint.2.home-sw-in', switch)
++done()
++wait(lambda: s.joint[2]['available'] and s.joint[2]['homed'], 'completed home')
++c.set_joint_availability(2, False)
++wait(lambda: not hal.get_value('joint.2.availability-request'), 'release homed Z')
++pin('joint.2.availability-ack', 0); done()
++
++# A later volatile acquisition remains unavailable until homing completes, and
++# cancellation leaves it unavailable and unreferenced.
 +c.set_joint_availability(2, True)
 +wait(lambda: hal.get_value('joint.2.availability-request'), 'request Z')
 +pin('joint.2.availability-ack', 1)
@@ -5017,7 +4039,7 @@ index 0000000000..77d841437f
 +assert not hal.get_value('joint.2.amp-enable-out')
 +assert not hal.get_value('joint.2.active')
 +assert s.joint[2]['inpos'], 'released joint not complete'
-+assert hal.get_value('joint.2.vel-cmd') == 0
++wait(lambda: hal.get_value('joint.2.vel-cmd') == 0, 'homing velocity stopped')
 +wait(lambda: s.state == linuxcnc.RCS_DONE, 'normal completion after cancellation')
 +# Late hardware acknowledgement cannot revive cancelled homing.
 +pin('joint.2.availability-ack', 1)
@@ -5026,6 +4048,7 @@ index 0000000000..77d841437f
 +pin('joint.2.availability-ack', 0)
 +reset()
 +# A fresh acquisition can complete homing and only then become available.
++pin('joint.2.home-sw-in', 0)
 +c.set_joint_availability(2, True)
 +wait(lambda: hal.get_value('joint.2.availability-request'), 'fresh request Z')
 +pin('joint.2.availability-ack', 1)
@@ -5053,11 +4076,18 @@ index 0000000000..77d841437f
 +assert s.spindle[0]['availability_fault'] == 3
 +# Invalid reacquisition feedback must fail explicitly, never publish AVAILABLE.
 +reset()
++c.set_joint_availability(1, True)
++wait(lambda: hal.get_value('joint.1.availability-request'), 'invalid-feedback home setup')
++pin('joint.1.availability-ack', 1); done()
++assert s.joint[1]['available'] and s.joint[1]['homed']
++c.set_joint_availability(1, False)
++wait(lambda: not hal.get_value('joint.1.availability-request'), 'invalid-feedback release setup')
++pin('joint.1.availability-ack', 0); done()
 +pin('mux2.0.in1', 'nan'); pin('mux2.0.sel', 1)
 +c.set_joint_availability(1, True)
 +wait(lambda: hal.get_value('joint.1.availability-request'), 'invalid-feedback request')
 +pin('joint.1.availability-ack', 1)
-+wait(lambda: s.joint[1]['availability_fault'] == 8, 'invalid-feedback resync fault')
++wait(lambda: s.joint[1]['availability_fault'] == 8, 'invalid-feedback position mismatch')
 +assert not s.joint[1]['available'] and not hal.get_value('joint.1.amp-enable-out')
 +print('runtime availability scenarios ok')
 diff --git a/tests/runtime-availability/test.ini.in b/tests/runtime-availability/test.ini.in
@@ -5071,18 +4101,15 @@ index 0000000000..67dab70a3d
 +BASE = base.ini
 diff --git a/tests/runtime-availability/test.sh b/tests/runtime-availability/test.sh
 new file mode 100755
-index 0000000000..c79189b084
+index 0000000000..9a17bf2443
 --- /dev/null
 +++ b/tests/runtime-availability/test.sh
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,5 @@
 +#!/bin/sh
 +set -e
 +python3 ../runtime-availability/make-fixtures.py
 +linuxcnc -r test.ini
 +linuxcnc -r initial.ini
-+linuxcnc -r home-all-gap.ini
-+linuxcnc -r home-all-sync.ini
-+linuxcnc -r home-no-rehome.ini
 diff --git a/tests/runtime-availability/tool.tbl b/tests/runtime-availability/tool.tbl
 new file mode 100644
 index 0000000000..e69de29bb2

@@ -367,17 +367,14 @@ plus selected-spindle behavior for `^`.
 Stages the entire inverse-kinematics target vector, forward-kinematics branch
 flags, and cubic interpolation buffers before committing joint commands. Rejected
 targets retain the previous branch flags; accepted targets publish the new flags. A failure at a later joint cannot
-partially commit earlier targets. Small helpers reseed configured cubics,
-reset stationary command/planner history while preserving limits and the
-applied compensation offset, and inhibit joint outputs while requesting homing
-cancellation. The common reset leaves feedback, following-error state, cubic
-phase, and activation to its caller. This patch exposes no
-availability controls and builds independently of the runtime feature.
+partially commit earlier targets. A small trajectory-planner helper resets an
+axis planner at a stationary position while retaining its configured limits.
+This patch exposes no availability controls and builds independently of the
+runtime feature.
 
-`tests/motion-target-preparation` compiles the production preparation/reset
-functions with deterministic kinematics and the real cubic implementation.
-It covers late invalid targets, interpolation failure, no partial commitment,
-and retention of interpolation configuration and planner limits.
+`tests/motion-target-preparation` compiles the production target-preparation
+function with deterministic kinematics and the real cubic implementation. It
+covers late invalid targets, interpolation failure, and no partial commitment.
 
 ### 0017 — Runtime joint and spindle availability
 
@@ -386,31 +383,43 @@ external hardware to hand physical resources to LinuxCNC and take them back.
 Availability is separate from Machine On and amplifier enable: a resource must
 be acquired before LinuxCNC can use it for ordinary motion or spindle commands.
 
-Each resource opts in through `AVAILABILITY_CONTROL`. `INITIAL_AVAILABILITY`
-selects whether Machine On acquires it, and `AVAILABILITY_TIMEOUT` limits the
-hardware handshake. HAL `availability-request` and `availability-ack` pins
-coordinate the handoff; additional pins expose availability, lifecycle state,
-and fault information. NML and Python provide acquisition/release commands and
-status for application control.
+Each resource opts in through `AVAILABILITY_CONTROL`. Spindle
+`INITIAL_AVAILABILITY` selects whether Machine On acquires it; a controlled
+joint always starts released and is acquired explicitly after Machine On.
+`AVAILABILITY_TIMEOUT` limits the hardware handshake. HAL
+`availability-request` and `availability-ack` pins coordinate the handoff;
+additional pins expose availability, lifecycle state, and fault information.
+NML and Python provide acquisition/release commands and status for application
+control.
 
-Joint acquisition adopts the current feedback position and synchronizes motion
-planners and interpreter positions before reporting completion. Runtime
-acquisition also homes joints configured with `VOLATILE_HOME`; initial Machine
-On acquisition leaves homing to the normal workflow. Release waits for pending
-motion to settle, inhibits the resource's outputs, and completes the hardware
-handoff. Acknowledgment alone does not mean acquisition is complete.
+Releasing an availability-controlled joint freezes its motion-state position;
+its raw HAL feedback pin remains live for diagnostics. Nonvolatile acquisition
+checks that raw feedback still matches the held logical position within the
+joint's existing `MIN_FERROR` tolerance. A mismatch faults the operation without
+changing the held joint or Cartesian position. If the joint is unhomed,
+acquisition treats hardware acknowledgment as an internal step, automatically
+homes the joint, and reports AVAILABLE only after homing succeeds.
+`VOLATILE_HOME` controls whether release invalidates that reference. Release
+waits for queued, jog, joint interpolation, and compensation state to settle
+before inhibiting outputs and completing the hardware handoff; global
+`MOTION_INPOS` keeps upstream behavior.
 
+Availability-controlled joints cannot define `HOME_SEQUENCE`; configuring any
+such joint rejects Home All. Controlled joints are homed individually only by
+acquisition and reject user HOME and UNHOME commands, so AVAILABLE implies a
+valid homed state.
 Other resources can continue operating while a joint or spindle is released.
 Coordinated and teleop motion are permitted only when inverse kinematics leaves
 every unavailable joint at its held command position. Commands requiring an
-unavailable spindle are rejected. Deliberately released joints are excluded
-from Home All and do not block Run or MDI solely because they are unhomed.
+unavailable spindle are rejected. Deliberately released joints do not block Run
+or MDI solely because they are unhomed.
 
 Direct API requests require an idle task, and only one acquisition or release
 may be pending at a time. Abort cancels a pending operation; hardware handshake,
-homing, or position synchronization failures report a fault and inhibit motion.
-Resources are managed independently, with no automatic pairing or switching
-sequence. Patch 0018 adds the M54/M55 G-code interface to these operations.
+homing, or nonvolatile position-validation failures report a fault and inhibit
+motion. Resources are managed independently, with no automatic pairing or
+switching sequence. Patch 0018 adds the M54/M55 G-code interface to these
+operations.
 
 ### 0018 — Standalone M54/M55 interface
 
@@ -427,11 +436,12 @@ line numbers and comments are allowed, but other commands and parameter
 assignments cannot share the block.
 
 Execution waits for preceding work to finish before starting the handoff.
-Acquisition then waits for hardware acknowledgment, any required joint homing,
-and synchronization of motion and interpreter positions. Release waits for the
-resource to reach its released state. Subsequent program blocks continue only
-after the operation completes successfully; a fault stops execution. Abort
-cancels a pending operation through the same runtime lifecycle as the direct API.
+Acquisition then waits for hardware acknowledgment, homing if the joint is
+unhomed, otherwise held-position validation, and normal task/interpreter
+synchronization. Release waits for the resource to reach its released state.
+Subsequent program blocks continue only after the operation completes
+successfully; a fault stops execution. Abort cancels a pending operation through
+the same runtime lifecycle as the direct API.
 
 The commands use the configured availability policy and timeout for each
 resource. They acquire and release resources independently, so the program
