@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Dariusz Majnert <dariusz.majnert@gmail.com>
 Date: Thu, 17 Sep 2026 18:00:42 +0200
-Subject: [PATCH] runtime-joint-and-spindle-availability
+Subject: [PATCH 17/18] runtime-joint-and-spindle-availability
 
 ---
  docs/src/config/ini-config.adoc               |  31 +
@@ -11,8 +11,8 @@ Subject: [PATCH] runtime-joint-and-spindle-availability
  src/emc/ini/inispindle.cc                     |  29 +
  src/emc/ini/linuxcnc_check_ini.py             |   7 +-
  src/emc/motion/axis.c                         |   2 +-
- src/emc/motion/command.c                      | 356 +++++++++++-
- src/emc/motion/control.c                      | 537 ++++++++++++++++--
+ src/emc/motion/command.c                      | 356 ++++++++++-
+ src/emc/motion/control.c                      | 551 ++++++++++++++++--
  src/emc/motion/mot_priv.h                     |  21 +
  src/emc/motion/motion.c                       |  16 +
  src/emc/motion/motion.h                       |  61 +-
@@ -42,9 +42,9 @@ Subject: [PATCH] runtime-joint-and-spindle-availability
  .../joghome.ini.in                            |   6 +
  .../record_abort.ngc                          |   6 +
  .../sequence.ini.in                           |   6 +
- .../runtime-availability-regressions/tail.hal |  23 +
+ .../runtime-availability-regressions/tail.hal |  30 +
  .../tail.ini.in                               |   7 +
- .../test-ui.py                                | 170 ++++++
+ .../test-ui.py                                | 192 ++++++
  .../test.ini.in                               |   3 +
  .../runtime-availability-regressions/test.sh  |  34 ++
  .../runtime-availability-regressions/tool.tbl |   1 +
@@ -63,7 +63,7 @@ Subject: [PATCH] runtime-joint-and-spindle-availability
  tests/runtime-availability/test.ini.in        |   3 +
  tests/runtime-availability/test.sh            |   5 +
  tests/runtime-availability/tool.tbl           |   0
- 59 files changed, 2658 insertions(+), 71 deletions(-)
+ 59 files changed, 2698 insertions(+), 74 deletions(-)
  create mode 100644 tests/motion-target-preparation/availability-cases.h
  create mode 100644 tests/motion-target-preparation/availability-fixture.h
  create mode 100644 tests/runtime-availability-regressions/.gitignore
@@ -954,7 +954,7 @@ index c166af652b..a18acd066f 100644
          }
  	    break;
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index f4dd6777af..4f626a4044 100644
+index 8ed2cb3882..722c58545d 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
 @@ -46,6 +46,9 @@ static int    switchkins_type = 0;
@@ -1527,18 +1527,29 @@ index f4dd6777af..4f626a4044 100644
  	    } else {
  		/* not in position-- don't honor mode change */
  		emcmotInternal->coordinating = 1;
-@@ -1049,7 +1457,9 @@ static void handle_jjogwheels(void)
+@@ -1049,10 +1457,17 @@ static void handle_jjogwheels(void)
  	/* point to joint data */
  	joint_data = &(emcmot_hal_data->joint[joint_num]);
  	joint = &joints[joint_num];
 -	if (!GET_JOINT_ACTIVE_FLAG(joint)) {
-+	if (!GET_JOINT_ACTIVE_FLAG(joint) ||
-+            (emcmotStatus->joint_status[joint_num].availability.controlled &&
-+             emcmotStatus->joint_status[joint_num].availability.state != EMCMOT_AVAILABILITY_AVAILABLE)) {
- 	    /* if joint is not active, skip it */
- 	    continue;
- 	}
-@@ -1066,6 +1476,7 @@ static void handle_jjogwheels(void)
+-	    /* if joint is not active, skip it */
+-	    continue;
+-	}
++        if (emcmotStatus->joint_status[joint_num].availability.controlled &&
++            emcmotStatus->joint_status[joint_num].availability.state != EMCMOT_AVAILABILITY_AVAILABLE) {
++            /* Discard wheel movement while ownership is external so it cannot
++               become a delayed jog when acquisition completes. */
++            joint->old_jjog_counts = *(joint_data->jjog_counts);
++            continue;
++        }
++        if (!GET_JOINT_ACTIVE_FLAG(joint)) {
++            /* if joint is not active, skip it */
++            continue;
++        }
+ 
+         // disallow accel bogus fractions
+         if (    (*(joint_data->jjog_accel_fraction) > 1)
+@@ -1066,6 +1481,7 @@ static void handle_jjogwheels(void)
  	delta = new_jjog_counts - joint->old_jjog_counts;
  	/* save value for next time */
  	joint->old_jjog_counts = new_jjog_counts;
@@ -1546,7 +1557,7 @@ index f4dd6777af..4f626a4044 100644
  	/* initialization complete */
  	if ( first_pass ) {
  	    continue;
-@@ -1197,6 +1608,16 @@ static int prepare_joint_targets(const EmcPose *pose, double *positions,
+@@ -1197,6 +1613,16 @@ static int prepare_joint_targets(const EmcPose *pose, double *positions,
              reportError(_("kinematicsInverse gave non-finite joint location on joint %d"), n);
              return -1;
          }
@@ -1563,7 +1574,7 @@ index f4dd6777af..4f626a4044 100644
          cubics[n] = joints[n].cubic;
          if (cubicNeedNextPoint(&cubics[n]) &&
              cubicAddPoint(&cubics[n], positions[n]) != 0) {
-@@ -1284,7 +1705,10 @@ static void get_pos_cmds(long period)
+@@ -1286,7 +1712,10 @@ static void get_pos_cmds(long period)
  	for (joint_num = 0; joint_num < ALL_JOINTS; joint_num++) {
  	    /* point to joint struct */
  	    joint = &joints[joint_num];
@@ -1575,7 +1586,7 @@ index f4dd6777af..4f626a4044 100644
  	        /* if joint is not active, skip it */
  	        continue;
              }
-@@ -1428,8 +1852,7 @@ static void get_pos_cmds(long period)
+@@ -1430,8 +1859,7 @@ static void get_pos_cmds(long period)
              result = prepare_joint_targets(&emcmotStatus->carte_pos_cmd,
                                             positions, staged_cubics);
              if (result != 0) {
@@ -1585,7 +1596,7 @@ index f4dd6777af..4f626a4044 100644
                  break;
              }
              for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
-@@ -1490,8 +1913,7 @@ static void get_pos_cmds(long period)
+@@ -1492,8 +1920,7 @@ static void get_pos_cmds(long period)
          result = prepare_joint_targets(&emcmotStatus->carte_pos_cmd,
                                         positions, staged_cubics);
          if (result != 0) {
@@ -1595,7 +1606,7 @@ index f4dd6777af..4f626a4044 100644
              break;
          }
          for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
-@@ -1502,6 +1924,8 @@ static void get_pos_cmds(long period)
+@@ -1504,6 +1931,8 @@ static void get_pos_cmds(long period)
                  &joint->vel_cmd, &joint->acc_cmd, &joint->jerk_cmd);
          }
  
@@ -1604,7 +1615,7 @@ index f4dd6777af..4f626a4044 100644
  
  	/* END OF OUTPUT KINS */
  
-@@ -1518,10 +1942,13 @@ static void get_pos_cmds(long period)
+@@ -1520,10 +1949,13 @@ static void get_pos_cmds(long period)
      case EMCMOT_MOTION_DISABLED:
  	/* set position commands to match feedbacks, this avoids
  	   disturbances and/or following errors when enabling */
@@ -1619,7 +1630,7 @@ index f4dd6777af..4f626a4044 100644
  	    /* save old command */
  	    joint->pos_cmd = joint->pos_fb;
  	    /* set joint velocity and acceleration to zero */
-@@ -1909,8 +2336,6 @@ static void output_to_hal(void)
+@@ -1911,8 +2343,6 @@ static void output_to_hal(void)
      double inch_mult;
      emcmot_joint_t *joint;
      joint_hal_t *joint_data;
@@ -1628,7 +1639,7 @@ index f4dd6777af..4f626a4044 100644
  
      /* output machine info to HAL for scoping, etc */
      *(emcmot_hal_data->motion_enabled) = GET_MOTION_ENABLE_FLAG();
-@@ -1952,6 +2377,9 @@ static void output_to_hal(void)
+@@ -1954,6 +2384,9 @@ static void output_to_hal(void)
  
      for (spindle_num = 0; spindle_num < emcmotConfig->numSpindles; spindle_num++){
          double speed;
@@ -1638,7 +1649,7 @@ index f4dd6777af..4f626a4044 100644
  		if(emcmotStatus->spindle_status[spindle_num].css_factor) {
  			double denom = fabs(emcmotStatus->spindle_status[spindle_num].xoffset
  								- emcmotStatus->carte_pos_cmd.tran.x);
-@@ -1986,16 +2414,22 @@ static void output_to_hal(void)
+@@ -1988,16 +2421,22 @@ static void output_to_hal(void)
              }
          }
  
@@ -1666,7 +1677,7 @@ index f4dd6777af..4f626a4044 100644
          // What is this for? Docs don't say
          *(emcmot_hal_data->spindle[spindle_num].spindle_speed_cmd_rps) =
  				emcmotStatus->spindle_status[spindle_num].speed / 60.;
-@@ -2052,6 +2486,13 @@ static void output_to_hal(void)
+@@ -2054,6 +2493,13 @@ static void output_to_hal(void)
  
      /* two way handshaking for the spindle encoder */
      for (spindle_num = 0; spindle_num < emcmotConfig->numSpindles; spindle_num++){
@@ -1680,16 +1691,19 @@ index f4dd6777af..4f626a4044 100644
  		if(emcmotStatus->spindle_status[spindle_num].spindle_index_enable
  				&& !old_motion_index[spindle_num]) {
  			*emcmot_hal_data->spindle[spindle_num].spindle_index_enable = 1;
-@@ -2094,7 +2535,11 @@ static void output_to_hal(void)
+@@ -2096,7 +2542,14 @@ static void output_to_hal(void)
  	*(joint_data->motor_pos_cmd) = joint->motor_pos_cmd;
  	*(joint_data->joint_pos_cmd) = joint->pos_cmd;
  	*(joint_data->joint_pos_fb) = joint->pos_fb;
 -	*(joint_data->amp_enable) = GET_JOINT_ENABLE_FLAG(joint);
++	availability_status_t *availability =
++	    &emcmotStatus->joint_status[joint_num].availability;
 +	*(joint_data->amp_enable) = GET_JOINT_ENABLE_FLAG(joint) &&
-+	    (emcmotStatus->joint_status[joint_num].availability.state ==
++	    (availability->state ==
 +	         EMCMOT_AVAILABILITY_AVAILABLE ||
-+	     emcmotStatus->joint_status[joint_num].availability.state ==
-+	         EMCMOT_AVAILABILITY_HOMING);
++	     availability->state == EMCMOT_AVAILABILITY_HOMING ||
++	     (availability->state == EMCMOT_AVAILABILITY_DISABLING &&
++	      availability->phase == AVAIL_PHASE_WAIT_SETTLED));
  
  	*(joint_data->coarse_pos_cmd) = joint->coarse_pos;
  	*(joint_data->joint_vel_cmd) = joint->vel_cmd;
@@ -2928,7 +2942,7 @@ index 0000000000..153f94a5fc
 +done
 diff --git a/tests/runtime-availability-regressions/core.hal b/tests/runtime-availability-regressions/core.hal
 new file mode 100644
-index 0000000000..f9d056b797
+index 0000000000..7e0cffcfb7
 --- /dev/null
 +++ b/tests/runtime-availability-regressions/core.hal
 @@ -0,0 +1,17 @@
@@ -2944,7 +2958,7 @@ index 0000000000..f9d056b797
 +net Zpos joint.2.motor-pos-cmd => joint.2.motor-pos-fb
 +net estop-loop iocontrol.0.user-enable-out iocontrol.0.emc-enable-in
 +setp spindle.0.at-speed true
-+loadrt flipflop count=4
++loadrt flipflop count=5
 +addf flipflop.0 servo-thread
 +addf flipflop.1 servo-thread
 +net amp-seen joint.1.amp-enable-out => flipflop.0.set
@@ -3142,23 +3156,26 @@ index 0000000000..3786b1533f
 +HOME_SEQUENCE = 1
 diff --git a/tests/runtime-availability-regressions/tail.hal b/tests/runtime-availability-regressions/tail.hal
 new file mode 100644
-index 0000000000..c8a82609e1
+index 0000000000..c9eea9dd0c
 --- /dev/null
 +++ b/tests/runtime-availability-regressions/tail.hal
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,30 @@
 +source core.hal
 +# Observe the interpolation tail every servo cycle, after motion-controller.
 +# Tail: the axis planner stopped but the joint interpolator still has velocity.
 +loadrt near count=2
-+loadrt not count=1
-+loadrt and2 count=2
++loadrt not count=2
++loadrt and2 count=3
 +addf near.0 servo-thread
 +addf near.1 servo-thread
 +addf not.0 servo-thread
 +addf and2.0 servo-thread
 +addf and2.1 servo-thread
++addf not.1 servo-thread
++addf and2.2 servo-thread
 +addf flipflop.2 servo-thread
 +addf flipflop.3 servo-thread
++addf flipflop.4 servo-thread
 +setp near.0.difference 1e-12
 +setp near.1.difference 1e-12
 +net axis-velocity axis.y.teleop-vel-cmd => near.0.in1
@@ -3169,6 +3186,10 @@ index 0000000000..c8a82609e1
 +net interpolation-tail and2.0.out => flipflop.2.set and2.1.in0
 +net motion-inpos motion.in-position => and2.1.in1
 +net premature-inpos and2.1.out => flipflop.3.set
++net amp-seen => not.1.in
++net amplifier-off not.1.out => and2.2.in0
++net joint-owned joint.1.availability-request => and2.2.in1
++net premature-amplifier-off and2.2.out => flipflop.4.set
 diff --git a/tests/runtime-availability-regressions/tail.ini.in b/tests/runtime-availability-regressions/tail.ini.in
 new file mode 100644
 index 0000000000..cdf6f940c4
@@ -3184,10 +3205,10 @@ index 0000000000..cdf6f940c4
 +BACKLASH = 0.4
 diff --git a/tests/runtime-availability-regressions/test-ui.py b/tests/runtime-availability-regressions/test-ui.py
 new file mode 100755
-index 0000000000..c856d5569d
+index 0000000000..468b03b6f2
 --- /dev/null
 +++ b/tests/runtime-availability-regressions/test-ui.py
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,192 @@
 +#!/usr/bin/env python3
 +from fixture import *
 +from pathlib import Path
@@ -3311,15 +3332,35 @@ index 0000000000..c856d5569d
 +        if not cancel:
 +            release('spindle.0')
 +
++elif case == 'jointwheel':
++    c.teleop_enable(0); done()
++    release('joint.1')
++    pin('joint.1.jog-enable', 1)
++    pin('joint.1.jog-scale', .1)
++    before = hal.get_value('joint.1.pos-cmd')
++    counts = hal.get_value('joint.1.jog-counts')
++    pin('joint.1.jog-counts', counts + 10)
++    settle()
++    acquire('joint.1')
++    settle(.3)
++    assert abs(hal.get_value('joint.1.pos-cmd') - before) < 1e-9, \
++        'unavailable joint replayed stale wheel counts'
++    pin('joint.1.jog-counts', counts + 11)
++    wait(lambda: abs(hal.get_value('joint.1.pos-cmd') - before - .1) < 1e-6,
++         'fresh joint wheel count')
++    wait(lambda: s.inpos, 'FREE jog completion')
++    release('joint.1')
++    assert not s.joint[1]['availability_fault'], 'FREE-mode release faulted'
++
 +elif case == 'tail':
 +    c.teleop_enable(1); done()
 +    # Release may begin after logical motion finishes, but it must keep the
 +    # hardware request asserted until interpolation and compensation settle.
 +    for increment in (.01, .019):
 +        before = hal.get_value('joint.1.pos-cmd')
-+        for latch in (2, 3): pin(f'flipflop.{latch}.reset', 1)
++        for latch in (2, 3, 4): pin(f'flipflop.{latch}.reset', 1)
 +        settle()
-+        for latch in (2, 3): pin(f'flipflop.{latch}.reset', 0)
++        for latch in (2, 3, 4): pin(f'flipflop.{latch}.reset', 0)
 +        c.jog(linuxcnc.JOG_INCREMENT, 0, 1, 1, increment)
 +        wait(lambda: abs(s.joint_position[1] - before - increment) < 1e-6
 +             and hal.get_value('motion.in-position'), 'TELEOP endpoint')
@@ -3327,9 +3368,11 @@ index 0000000000..c856d5569d
 +        done()
 +        assert hal.get_value('flipflop.2.out'), 'TELEOP interpolation tail not exercised'
 +        assert hal.get_value('flipflop.3.out'), 'upstream INPOS did not precede interpolation completion'
-+        held = hal.get_value('joint.1.pos-cmd')
 +        c.set_joint_availability(1, False)
 +        wait(lambda: not hal.get_value('joint.1.availability-request'), 'settled release')
++        assert not hal.get_value('flipflop.4.out'), \
++            'amplifier disabled before release tail settled'
++        held = hal.get_value('joint.1.pos-cmd')
 +        settle(.02)
 +        assert abs(hal.get_value('joint.1.backlash-vel')) < 1e-12
 +        assert abs(hal.get_value('joint.1.backlash-corr') -
@@ -3369,14 +3412,14 @@ index 0000000000..67dab70a3d
 +BASE = base.ini
 diff --git a/tests/runtime-availability-regressions/test.sh b/tests/runtime-availability-regressions/test.sh
 new file mode 100755
-index 0000000000..ba9733568e
+index 0000000000..e2dc178445
 --- /dev/null
 +++ b/tests/runtime-availability-regressions/test.sh
 @@ -0,0 +1,34 @@
 +#!/bin/sh
 +set -eu
 +python3 ../runtime-availability/make-fixtures.py
-+for scenario in ${AVAILABILITY_REGRESSION_CASES:-fault wheel tail amp power index jogstop joghome extra sequence}; do
++for scenario in ${AVAILABILITY_REGRESSION_CASES:-fault wheel jointwheel tail amp power index jogstop joghome extra sequence}; do
 +    ini=test.ini
 +    case "$scenario" in
 +        fault) ini=fault.ini ;;
