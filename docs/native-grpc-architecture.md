@@ -21,7 +21,9 @@ server implementation agree.
 `MachineService` provides status snapshots and sparse deltas, command
 execution, error events, and position-history configuration. A serialized NML
 queue orders commands. Cancelling an RPC cancels only its wait, not a command
-already accepted by LinuxCNC.
+already accepted by LinuxCNC. The
+[status delta boundaries](./status-delta-boundaries.md) define the minimum
+atomic values carried by the status stream.
 
 `IniService` returns the parsed active configuration. `ProgramService` accepts
 bounded tar.zst uploads and publishes immutable workspaces after validation.

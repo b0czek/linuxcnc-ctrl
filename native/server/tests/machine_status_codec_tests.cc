@@ -60,7 +60,6 @@ void snapshot_encoding_is_stable() {
 
   source.task_stat.file = "changed.ngc";
   assert(encoded.message.task().file() == "program.ngc");
-  assert(encoded.serialized == encoded.message.SerializeAsString());
   assert(!make_status_delta(encoded, encoded, 2));
 }
 
@@ -81,14 +80,18 @@ void delta_preserves_wire_changes() {
   assert(delta->sequence() == 23);
   assert(delta->echo_serial_number() == 18);
   assert(delta->task().optional_stop_state());
+  assert(!delta->task().has_mode());
   assert(delta->motion().traj().actual_position().values(0) == 15.0);
+  assert(!delta->motion().traj().has_linear_units());
   assert(delta->motion().joint_size() == 1);
   assert(!delta->motion().joint(0).value().homed());
   assert(delta->motion().replace_digital_input());
   assert(delta->motion().digital_input(0) == 1);
   assert(delta->io().tool().tool_in_spindle() == 8);
-  assert(delta->tool_table().replace_all());
-  assert(delta->tool_table().replaced(0).diameter() == 5.0);
+  assert(!delta->io().has_coolant());
+  assert(!delta->io().has_estop());
+  assert(delta->tool_table().tools_size() == 2);
+  assert(delta->tool_table().tools(0).diameter() == 5.0);
 }
 
 void skipped_sample_delta_reconstructs_resets_and_shrinking_collections() {
@@ -156,8 +159,19 @@ void skipped_sample_delta_reconstructs_resets_and_shrinking_collections() {
   assert(motion.replace_analog_input() && motion.analog_input().empty());
   assert(motion.replace_analog_output() && motion.analog_output().empty());
   assert(delta->io().tool().tool_in_spindle() == 0);
-  assert(delta->tool_table().replace_all());
-  assert(delta->tool_table().replaced().empty());
+  assert(delta->tool_table().tools().empty());
+}
+
+void tool_table_changes_preserve_order() {
+  const auto previous = encode_status(status_sample());
+  auto reordered = status_sample();
+  std::swap(reordered.tool_table[0], reordered.tool_table[1]);
+  const auto current = encode_status(reordered);
+
+  const auto delta = make_status_delta(previous, current, 24);
+  assert(delta);
+  assert(delta->tool_table().tools_size() == 2);
+  assert(delta->tool_table().tools(0).tool_no() == 8);
 }
 
 }  // namespace
@@ -166,5 +180,6 @@ int main() {
   snapshot_encoding_is_stable();
   delta_preserves_wire_changes();
   skipped_sample_delta_reconstructs_resets_and_shrinking_collections();
+  tool_table_changes_preserve_order();
   return 0;
 }

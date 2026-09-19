@@ -381,8 +381,46 @@ message TaskStatDelta {
   optional int32 queued_mdi_commands = 32;
 }
 
+message TrajectoryStatDelta {
+  optional double linear_units = 1;
+  optional double angular_units = 2;
+  optional double cycle_time = 3;
+  optional int32 joints = 4;
+  optional int32 spindles = 5;
+  repeated AxisName available_axes = 6;
+  optional TrajMode mode = 7;
+  optional bool enabled = 8;
+  optional bool in_position = 9;
+  optional int32 queue = 10;
+  optional int32 active_queue = 11;
+  optional bool queue_full = 12;
+  optional int32 id = 13;
+  optional bool paused = 14;
+  optional bool single_stepping = 15;
+  optional double feed_rate_override = 16;
+  optional double rapid_rate_override = 17;
+  Position position = 18;
+  Position actual_position = 19;
+  optional double acceleration = 20;
+  optional double max_velocity = 21;
+  optional double max_acceleration = 22;
+  Position probed_position = 23;
+  optional bool probe_tripped = 24;
+  optional bool probing = 25;
+  optional double probe_val = 26;
+  optional KinematicsType kinematics_type = 27;
+  optional MotionType motion_type = 28;
+  optional double distance_to_go = 29;
+  Position dtg = 30;
+  optional double current_velocity = 31;
+  optional bool feed_override_enabled = 32;
+  optional bool adaptive_feed_enabled = 33;
+  optional bool feed_hold_enabled = 34;
+  bool replace_available_axes = 35;
+}
+
 message MotionStatDelta {
-  TrajectoryStat traj = 1;
+  TrajectoryStatDelta traj = 1;
   repeated IndexedJointDelta joint = 2;
   repeated IndexedAxisDelta axis = 3;
   repeated IndexedSpindleDelta spindle = 4;
@@ -403,9 +441,7 @@ message IoStatDelta {
 }
 
 message ToolTableDelta {
-  repeated ToolEntry replaced = 1;
-  repeated int32 removed_tool_numbers = 2 [packed = true];
-  bool replace_all = 3;
+  repeated ToolEntry tools = 1;
 }
 
 message LinuxCNCStatDelta {

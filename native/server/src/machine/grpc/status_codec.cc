@@ -1,6 +1,7 @@
 #include "machine/grpc/status_codec.hpp"
 
 #include <algorithm>
+#include <google/protobuf/util/message_differencer.h>
 
 namespace linuxcnc::server::detail {
 
@@ -226,45 +227,146 @@ void fill_status(const NmlStatusSnapshot& source, LinuxCNCStat* target) {
   }
 }
 
-void copy_task_delta(const TaskStat& source, TaskStatDelta* target) {
-  target->set_mode(source.mode());
-  target->set_state(source.state());
-  target->set_exec_state(source.exec_state());
-  target->set_interp_state(source.interp_state());
-  target->set_stop_state(source.stop_state());
-  target->set_call_level(source.call_level());
-  target->set_motion_line(source.motion_line());
-  target->set_current_line(source.current_line());
-  target->set_read_line(source.read_line());
-  target->set_optional_stop_state(source.optional_stop_state());
-  target->set_block_delete_state(source.block_delete_state());
-  target->set_input_timeout(source.input_timeout());
-  target->set_file(source.file());
-  target->set_command(source.command());
-  target->set_ini_filename(source.ini_filename());
-  *target->mutable_g5x_offset() = source.g5x_offset();
-  target->set_g5x_index(source.g5x_index());
-  target->clear_g5x_offsets();
-  for (const auto& value : source.g5x_offsets())
-    *target->add_g5x_offsets() = value;
-  target->set_replace_g5x_offsets(true);
-  target->clear_g5x_rotations();
-  for (const auto value : source.g5x_rotations())
-    target->add_g5x_rotations(value);
-  target->set_replace_g5x_rotations(true);
-  *target->mutable_g92_offset() = source.g92_offset();
-  *target->mutable_g28_position() = source.g28_position();
-  *target->mutable_g30_position() = source.g30_position();
-  target->set_rotation_xy(source.rotation_xy());
-  *target->mutable_tool_offset() = source.tool_offset();
-  *target->mutable_active_g_codes() = source.active_g_codes();
-  *target->mutable_active_m_codes() = source.active_m_codes();
-  *target->mutable_active_settings() = source.active_settings();
-  target->set_program_units(source.program_units());
-  target->set_interpreter_error_code(source.interpreter_error_code());
-  target->set_task_paused(source.task_paused());
-  target->set_delay_left(source.delay_left());
-  target->set_queued_mdi_commands(source.queued_mdi_commands());
+template <typename Message>
+bool message_equal(const Message& left, const Message& right) {
+  return google::protobuf::util::MessageDifferencer::Equals(left, right);
+}
+
+template <typename Repeated>
+bool repeated_equal(const Repeated& left, const Repeated& right) {
+  return left.size() == right.size() &&
+         std::equal(left.begin(), left.end(), right.begin());
+}
+
+template <typename Repeated>
+bool repeated_message_equal(const Repeated& left, const Repeated& right) {
+  if (left.size() != right.size()) return false;
+  for (int index = 0; index < left.size(); ++index) {
+    if (!message_equal(left.Get(index), right.Get(index))) return false;
+  }
+  return true;
+}
+
+bool copy_task_delta(const TaskStat& previous, const TaskStat& current,
+                     TaskStatDelta* target) {
+  bool changed = false;
+#define COPY_TASK_SCALAR(name)             \
+  if (previous.name() != current.name()) { \
+    target->set_##name(current.name());    \
+    changed = true;                        \
+  }
+  COPY_TASK_SCALAR(mode)
+  COPY_TASK_SCALAR(state)
+  COPY_TASK_SCALAR(exec_state)
+  COPY_TASK_SCALAR(interp_state)
+  COPY_TASK_SCALAR(stop_state)
+  COPY_TASK_SCALAR(call_level)
+  COPY_TASK_SCALAR(motion_line)
+  COPY_TASK_SCALAR(current_line)
+  COPY_TASK_SCALAR(read_line)
+  COPY_TASK_SCALAR(optional_stop_state)
+  COPY_TASK_SCALAR(block_delete_state)
+  COPY_TASK_SCALAR(input_timeout)
+  COPY_TASK_SCALAR(file)
+  COPY_TASK_SCALAR(command)
+  COPY_TASK_SCALAR(ini_filename)
+  COPY_TASK_SCALAR(g5x_index)
+  COPY_TASK_SCALAR(rotation_xy)
+  COPY_TASK_SCALAR(program_units)
+  COPY_TASK_SCALAR(interpreter_error_code)
+  COPY_TASK_SCALAR(task_paused)
+  COPY_TASK_SCALAR(delay_left)
+  COPY_TASK_SCALAR(queued_mdi_commands)
+#undef COPY_TASK_SCALAR
+
+#define COPY_TASK_MESSAGE(name)                         \
+  if (!message_equal(previous.name(), current.name())) { \
+    *target->mutable_##name() = current.name();          \
+    changed = true;                                      \
+  }
+  COPY_TASK_MESSAGE(g5x_offset)
+  COPY_TASK_MESSAGE(g92_offset)
+  COPY_TASK_MESSAGE(g28_position)
+  COPY_TASK_MESSAGE(g30_position)
+  COPY_TASK_MESSAGE(tool_offset)
+  COPY_TASK_MESSAGE(active_g_codes)
+  COPY_TASK_MESSAGE(active_m_codes)
+  COPY_TASK_MESSAGE(active_settings)
+#undef COPY_TASK_MESSAGE
+
+  if (!repeated_message_equal(previous.g5x_offsets(), current.g5x_offsets())) {
+    for (const auto& value : current.g5x_offsets())
+      *target->add_g5x_offsets() = value;
+    target->set_replace_g5x_offsets(true);
+    changed = true;
+  }
+  if (!repeated_equal(previous.g5x_rotations(), current.g5x_rotations())) {
+    for (const auto value : current.g5x_rotations())
+      target->add_g5x_rotations(value);
+    target->set_replace_g5x_rotations(true);
+    changed = true;
+  }
+  return changed;
+}
+
+bool copy_trajectory_delta(const TrajectoryStat& previous,
+                           const TrajectoryStat& current,
+                           TrajectoryStatDelta* target) {
+  bool changed = false;
+#define COPY_TRAJ_SCALAR(name)             \
+  if (previous.name() != current.name()) { \
+    target->set_##name(current.name());    \
+    changed = true;                        \
+  }
+  COPY_TRAJ_SCALAR(linear_units)
+  COPY_TRAJ_SCALAR(angular_units)
+  COPY_TRAJ_SCALAR(cycle_time)
+  COPY_TRAJ_SCALAR(joints)
+  COPY_TRAJ_SCALAR(spindles)
+  COPY_TRAJ_SCALAR(mode)
+  COPY_TRAJ_SCALAR(enabled)
+  COPY_TRAJ_SCALAR(in_position)
+  COPY_TRAJ_SCALAR(queue)
+  COPY_TRAJ_SCALAR(active_queue)
+  COPY_TRAJ_SCALAR(queue_full)
+  COPY_TRAJ_SCALAR(id)
+  COPY_TRAJ_SCALAR(paused)
+  COPY_TRAJ_SCALAR(single_stepping)
+  COPY_TRAJ_SCALAR(feed_rate_override)
+  COPY_TRAJ_SCALAR(rapid_rate_override)
+  COPY_TRAJ_SCALAR(acceleration)
+  COPY_TRAJ_SCALAR(max_velocity)
+  COPY_TRAJ_SCALAR(max_acceleration)
+  COPY_TRAJ_SCALAR(probe_tripped)
+  COPY_TRAJ_SCALAR(probing)
+  COPY_TRAJ_SCALAR(probe_val)
+  COPY_TRAJ_SCALAR(kinematics_type)
+  COPY_TRAJ_SCALAR(motion_type)
+  COPY_TRAJ_SCALAR(distance_to_go)
+  COPY_TRAJ_SCALAR(current_velocity)
+  COPY_TRAJ_SCALAR(feed_override_enabled)
+  COPY_TRAJ_SCALAR(adaptive_feed_enabled)
+  COPY_TRAJ_SCALAR(feed_hold_enabled)
+#undef COPY_TRAJ_SCALAR
+
+#define COPY_TRAJ_MESSAGE(name)                         \
+  if (!message_equal(previous.name(), current.name())) { \
+    *target->mutable_##name() = current.name();          \
+    changed = true;                                      \
+  }
+  COPY_TRAJ_MESSAGE(position)
+  COPY_TRAJ_MESSAGE(actual_position)
+  COPY_TRAJ_MESSAGE(probed_position)
+  COPY_TRAJ_MESSAGE(dtg)
+#undef COPY_TRAJ_MESSAGE
+
+  if (!repeated_equal(previous.available_axes(), current.available_axes())) {
+    for (const auto value : current.available_axes())
+      target->add_available_axes(static_cast<AxisName>(value));
+    target->set_replace_available_axes(true);
+    changed = true;
+  }
+  return changed;
 }
 
 }  // namespace
@@ -272,20 +374,6 @@ void copy_task_delta(const TaskStat& source, TaskStatDelta* target) {
 EncodedStatus encode_status(const NmlStatusSnapshot& source) {
   EncodedStatus encoded;
   fill_status(source, &encoded.message);
-  encoded.serialized = encoded.message.SerializeAsString();
-  encoded.task_serialized = encoded.message.task().SerializeAsString();
-  encoded.motion_serialized = encoded.message.motion().SerializeAsString();
-  encoded.trajectory_serialized =
-      encoded.message.motion().traj().SerializeAsString();
-  encoded.io_serialized = encoded.message.io().SerializeAsString();
-  for (const auto& joint : encoded.message.motion().joint())
-    encoded.joints_serialized.push_back(joint.SerializeAsString());
-  for (const auto& axis : encoded.message.motion().axis())
-    encoded.axes_serialized.push_back(axis.SerializeAsString());
-  for (const auto& spindle : encoded.message.motion().spindle())
-    encoded.spindles_serialized.push_back(spindle.SerializeAsString());
-  for (const auto& tool : encoded.message.tool_table())
-    encoded.tools_serialized.push_back(tool.SerializeAsString());
   return encoded;
 }
 
@@ -309,107 +397,124 @@ std::optional<LinuxCNCStatDelta> make_status_delta(
     delta.set_debug(current_wire.debug());
     changed = true;
   }
-  if (previous.task_serialized != current.task_serialized) {
-    copy_task_delta(current_wire.task(), delta.mutable_task());
+  if (copy_task_delta(previous_wire.task(), current_wire.task(),
+                      delta.mutable_task())) {
     changed = true;
+  } else {
+    delta.clear_task();
   }
   const auto& previous_motion = previous_wire.motion();
   const auto& current_motion = current_wire.motion();
-  if (previous.motion_serialized != current.motion_serialized) {
-    auto* motion = delta.mutable_motion();
-    if (previous.trajectory_serialized != current.trajectory_serialized)
-      *motion->mutable_traj() = current_motion.traj();
-    const auto joint_count =
-        std::max(previous_motion.joint_size(), current_motion.joint_size());
-    for (int index = 0; index < joint_count; ++index) {
-      if (index >= previous_motion.joint_size() ||
-          index >= current_motion.joint_size() ||
-          previous.joints_serialized[static_cast<std::size_t>(index)] !=
-              current.joints_serialized[static_cast<std::size_t>(index)]) {
-        auto* item = motion->add_joint();
-        item->set_index(static_cast<std::uint32_t>(index));
-        if (index < current_motion.joint_size())
-          *item->mutable_value() = current_motion.joint(index);
-      }
+  auto* motion = delta.mutable_motion();
+  bool motion_changed = false;
+  if (copy_trajectory_delta(previous_motion.traj(), current_motion.traj(),
+                            motion->mutable_traj())) {
+    motion_changed = true;
+  } else {
+    motion->clear_traj();
+  }
+  const auto joint_count =
+      std::max(previous_motion.joint_size(), current_motion.joint_size());
+  for (int index = 0; index < joint_count; ++index) {
+    if (index >= previous_motion.joint_size() ||
+        index >= current_motion.joint_size() ||
+        !message_equal(previous_motion.joint(index),
+                       current_motion.joint(index))) {
+      auto* item = motion->add_joint();
+      item->set_index(static_cast<std::uint32_t>(index));
+      if (index < current_motion.joint_size())
+        *item->mutable_value() = current_motion.joint(index);
+      motion_changed = true;
     }
-    const auto axis_count =
-        std::max(previous_motion.axis_size(), current_motion.axis_size());
-    for (int index = 0; index < axis_count; ++index) {
-      if (index >= previous_motion.axis_size() ||
-          index >= current_motion.axis_size() ||
-          previous.axes_serialized[static_cast<std::size_t>(index)] !=
-              current.axes_serialized[static_cast<std::size_t>(index)]) {
-        auto* item = motion->add_axis();
-        item->set_index(static_cast<std::uint32_t>(index));
-        if (index < current_motion.axis_size())
-          *item->mutable_value() = current_motion.axis(index);
-      }
+  }
+  const auto axis_count =
+      std::max(previous_motion.axis_size(), current_motion.axis_size());
+  for (int index = 0; index < axis_count; ++index) {
+    if (index >= previous_motion.axis_size() ||
+        index >= current_motion.axis_size() ||
+        !message_equal(previous_motion.axis(index), current_motion.axis(index))) {
+      auto* item = motion->add_axis();
+      item->set_index(static_cast<std::uint32_t>(index));
+      if (index < current_motion.axis_size())
+        *item->mutable_value() = current_motion.axis(index);
+      motion_changed = true;
     }
-    const auto spindle_count =
-        std::max(previous_motion.spindle_size(), current_motion.spindle_size());
-    for (int index = 0; index < spindle_count; ++index) {
-      if (index >= previous_motion.spindle_size() ||
-          index >= current_motion.spindle_size() ||
-          previous.spindles_serialized[static_cast<std::size_t>(index)] !=
-              current.spindles_serialized[static_cast<std::size_t>(index)]) {
-        auto* item = motion->add_spindle();
-        item->set_index(static_cast<std::uint32_t>(index));
-        if (index < current_motion.spindle_size())
-          *item->mutable_value() = current_motion.spindle(index);
-      }
+  }
+  const auto spindle_count =
+      std::max(previous_motion.spindle_size(), current_motion.spindle_size());
+  for (int index = 0; index < spindle_count; ++index) {
+    if (index >= previous_motion.spindle_size() ||
+        index >= current_motion.spindle_size() ||
+        !message_equal(previous_motion.spindle(index),
+                       current_motion.spindle(index))) {
+      auto* item = motion->add_spindle();
+      item->set_index(static_cast<std::uint32_t>(index));
+      if (index < current_motion.spindle_size())
+        *item->mutable_value() = current_motion.spindle(index);
+      motion_changed = true;
     }
-    const auto changed_ints = [](const auto& left, const auto& right) {
-      return left.size() != right.size() ||
-             !std::equal(left.begin(), left.end(), right.begin());
-    };
-    if (changed_ints(previous_motion.digital_input(),
-                     current_motion.digital_input())) {
-      motion->set_replace_digital_input(true);
-      for (const auto value : current_motion.digital_input())
-        motion->add_digital_input(value);
-    }
-    if (changed_ints(previous_motion.digital_output(),
-                     current_motion.digital_output())) {
-      motion->set_replace_digital_output(true);
-      for (const auto value : current_motion.digital_output())
-        motion->add_digital_output(value);
-    }
-    if (changed_ints(previous_motion.analog_input(),
-                     current_motion.analog_input())) {
-      motion->set_replace_analog_input(true);
-      for (const auto value : current_motion.analog_input())
-        motion->add_analog_input(value);
-    }
-    if (changed_ints(previous_motion.analog_output(),
-                     current_motion.analog_output())) {
-      motion->set_replace_analog_output(true);
-      for (const auto value : current_motion.analog_output())
-        motion->add_analog_output(value);
-    }
+  }
+  if (!repeated_equal(previous_motion.digital_input(),
+                      current_motion.digital_input())) {
+    motion->set_replace_digital_input(true);
+    for (const auto value : current_motion.digital_input())
+      motion->add_digital_input(value);
+    motion_changed = true;
+  }
+  if (!repeated_equal(previous_motion.digital_output(),
+                      current_motion.digital_output())) {
+    motion->set_replace_digital_output(true);
+    for (const auto value : current_motion.digital_output())
+      motion->add_digital_output(value);
+    motion_changed = true;
+  }
+  if (!repeated_equal(previous_motion.analog_input(),
+                      current_motion.analog_input())) {
+    motion->set_replace_analog_input(true);
+    for (const auto value : current_motion.analog_input())
+      motion->add_analog_input(value);
+    motion_changed = true;
+  }
+  if (!repeated_equal(previous_motion.analog_output(),
+                      current_motion.analog_output())) {
+    motion->set_replace_analog_output(true);
+    for (const auto value : current_motion.analog_output())
+      motion->add_analog_output(value);
+    motion_changed = true;
+  }
+  if (motion_changed) {
     changed = true;
+  } else {
+    delta.clear_motion();
   }
-  if (previous.io_serialized != current.io_serialized) {
-    *delta.mutable_io()->mutable_tool() = current_wire.io().tool();
-    *delta.mutable_io()->mutable_coolant() = current_wire.io().coolant();
-    delta.mutable_io()->set_estop(current_wire.io().estop());
+
+  const auto& previous_io = previous_wire.io();
+  const auto& current_io = current_wire.io();
+  auto* io = delta.mutable_io();
+  bool io_changed = false;
+  if (!message_equal(previous_io.tool(), current_io.tool())) {
+    *io->mutable_tool() = current_io.tool();
+    io_changed = true;
+  }
+  if (!message_equal(previous_io.coolant(), current_io.coolant())) {
+    *io->mutable_coolant() = current_io.coolant();
+    io_changed = true;
+  }
+  if (previous_io.estop() != current_io.estop()) {
+    io->set_estop(current_io.estop());
+    io_changed = true;
+  }
+  if (io_changed) {
     changed = true;
+  } else {
+    delta.clear_io();
   }
-  bool tool_table_changed =
-      previous_wire.tool_table_size() != current_wire.tool_table_size();
-  if (!tool_table_changed) {
-    for (int index = 0; index < current_wire.tool_table_size(); ++index) {
-      if (previous.tools_serialized[static_cast<std::size_t>(index)] !=
-          current.tools_serialized[static_cast<std::size_t>(index)]) {
-        tool_table_changed = true;
-        break;
-      }
-    }
-  }
-  if (tool_table_changed) {
+
+  if (!repeated_message_equal(previous_wire.tool_table(),
+                              current_wire.tool_table())) {
     auto* table = delta.mutable_tool_table();
-    table->set_replace_all(true);
-    for (const auto& value : current_wire.tool_table())
-      *table->add_replaced() = value;
+    for (const auto& tool : current_wire.tool_table())
+      *table->add_tools() = tool;
     changed = true;
   }
   if (!changed) return std::nullopt;

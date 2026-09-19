@@ -1200,9 +1200,14 @@ class MachineServiceImpl final : public MachineService::CallbackService,
       history_.clear();
       history_.push_back(latest_);
       published = sequence_;
-    } else if (latest_->encoded.serialized != encoded.serialized) {
+    } else {
+      auto delta =
+          make_status_delta(latest_->encoded, encoded, sequence_ + 1);
+      if (!delta) {
+        lock.unlock();
+        return;
+      }
       ++sequence_;
-      auto delta = make_status_delta(latest_->encoded, encoded, sequence_);
       latest_native_ =
           std::make_shared<const NmlStatusSnapshot>(std::move(fresh));
       latest_ = std::make_shared<const StatusSample>(

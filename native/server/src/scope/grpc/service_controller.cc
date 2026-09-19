@@ -21,7 +21,7 @@ namespace linuxcnc::server::detail {
 namespace {
 
 using namespace linuxcnc::v1;
-constexpr char kScopeOwner[] = "noah-control-plane";
+constexpr char kScopeOwner[] = "grpc-control-plane";
 
 ScopeRuntimeState encode_scope_state(ScopeState state) {
   switch (state) {
