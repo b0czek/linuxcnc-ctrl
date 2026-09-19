@@ -9,21 +9,21 @@ Subject: [PATCH] availability-mcodes
  src/emc/nml_intf/canon.hh                     |   2 +
  src/emc/rs274ngc/gcodemodule.cc               |   2 +
  src/emc/rs274ngc/interp_array.cc              |   2 +-
- src/emc/rs274ngc/interp_check.cc              |  40 ++++-
+ src/emc/rs274ngc/interp_check.cc              |  24 ++-
  src/emc/rs274ngc/interp_convert.cc            |  11 ++
  src/emc/rs274ngc/interp_execute.cc            |   4 +
- src/emc/rs274ngc/interp_internal.hh           |   2 +
- src/emc/rs274ngc/interp_read.cc               |   7 +-
+ src/emc/rs274ngc/interp_internal.cc           |   1 +
+ src/emc/rs274ngc/interp_internal.hh           |   7 +
+ src/emc/rs274ngc/interp_read.cc               |   9 +-
  src/emc/rs274ngc/interp_remap.cc              |   2 +
  src/emc/rs274ngc/recordingcanon.cc            |   3 +
- src/emc/rs274ngc/rs274ngc_pre.cc              |   2 +
  src/emc/sai/saicanon.cc                       |   5 +
  src/emc/task/emccanon.cc                      |  18 +++
  .../.gitignore                                |   2 +
  tests/availability-mcodes-regressions/README  |   9 ++
  .../checkresult                               |   5 +
  .../availability-mcodes-regressions/step.ngc  |   6 +
- .../test-ui.py                                |  74 ++++++++++
+ .../test-ui.py                                |  74 +++++++++
  .../test.ini.in                               |   9 ++
  tests/availability-mcodes-regressions/test.sh |   6 +
  tests/availability-mcodes/.gitignore          |   2 +
@@ -33,13 +33,13 @@ Subject: [PATCH] availability-mcodes
  tests/availability-mcodes/homing.ngc          |   4 +
  tests/availability-mcodes/no-force.ini.in     |   6 +
  tests/availability-mcodes/ordered.ngc         |   6 +
- tests/availability-mcodes/test-ui.py          | 137 ++++++++++++++++++
+ tests/availability-mcodes/test-ui.py          | 142 ++++++++++++++++++
  tests/availability-mcodes/test.ini            |   1 +
  tests/availability-mcodes/test.sh             |   5 +
  tests/availability-mcodes/timeout.ngc         |   4 +
  tests/availability-mcodes/tool.tbl            |   1 +
  tests/availability-mcodes/unhomed.ngc         |   4 +
- tests/interp/availability-mcodes/README       |   4 +
+ tests/interp/availability-mcodes/README       |   6 +
  .../interp/availability-mcodes/bad-joint.ngc  |   2 +
  .../availability-mcodes/double-selector.ngc   |   2 +
  .../availability-mcodes/execute-status.cc     |  26 ++++
@@ -69,7 +69,7 @@ Subject: [PATCH] availability-mcodes
  tests/interp/availability-mcodes/test.sh      |  80 ++++++++++
  .../availability-mcodes/valid-joint.ngc       |   3 +
  .../availability-mcodes/valid-spindle.ngc     |   3 +
- 65 files changed, 637 insertions(+), 7 deletions(-)
+ 65 files changed, 634 insertions(+), 7 deletions(-)
  create mode 100644 tests/availability-mcodes-regressions/.gitignore
  create mode 100644 tests/availability-mcodes-regressions/README
  create mode 100755 tests/availability-mcodes-regressions/checkresult
@@ -251,47 +251,38 @@ index ba393b5b9f..606365a3bd 100644
     7,  7,  7, 7, -1, -1, -1, -1, -1, -1,  // 79
    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  // 89
 diff --git a/src/emc/rs274ngc/interp_check.cc b/src/emc/rs274ngc/interp_check.cc
-index 3b139a0ca6..03bfd59736 100644
+index 3b139a0ca6..4707bc5afc 100644
 --- a/src/emc/rs274ngc/interp_check.cc
 +++ b/src/emc/rs274ngc/interp_check.cc
-@@ -175,6 +175,36 @@ reading. This function checks for additional errors in m_codes.
+@@ -17,6 +17,7 @@
+ #include <math.h>
+ #include <string.h>
+ #include <ctype.h>
++#include <limits.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include "rs274ngc.hh"
+@@ -175,6 +176,19 @@ reading. This function checks for additional errors in m_codes.
  
  int Interp::check_m_codes(block_pointer block)   //!< pointer to a block to be checked
  {
 +  if (((block->m_modes[9] == 54) || (block->m_modes[9] == 55)) &&
 +      !is_user_defined_m_code(block, &(_setup), 9)) {
-+    bool has_g_code = false;
-+    for (int group = 0; group < GM_MAX_MODAL_GROUPS; group++) {
-+      if (block->g_modes[group] != -1) {
-+        has_g_code = true;
-+        break;
-+      }
-+    }
-+    const bool has_other_word =
-+        block->a_flag || block->b_flag || block->c_flag || block->d_flag ||
-+        block->e_flag || block->f_flag || block->h_flag || block->i_flag ||
-+        block->j_flag || block->k_flag || block->l_flag || block->q_flag ||
-+        block->r_flag || block->s_flag || block->t_flag || block->u_flag ||
-+        block->v_flag || block->w_flag || block->x_flag || block->y_flag ||
-+        block->z_flag || block->radius_flag || block->theta_flag ||
-+        _setup.parameter_occurrence || _setup.named_parameter_occurrence;
-+    CHKS((block->m_count != 1 || has_g_code || has_other_word ||
-+          block->o_type != O_none),
-+         _("M54/M55 must be the only command in its block"));
 +    CHKS((block->p_flag == block->dollar_flag),
 +         _("M54/M55 requires exactly one P joint selector or $ spindle selector"));
++    CHKS((!block->is_standalone(1)),
++         _("M54/M55 must be the only command in its block"));
 +    CHKS((block->p_flag && (!isfinite(block->p_number) || block->p_number < 0 ||
-+          floor(block->p_number) != block->p_number || block->p_number >= _setup.num_joints)),
-+         _("M54/M55 P selector must be a non-negative integer joint number in range"));
++          floor(block->p_number) != block->p_number || block->p_number > INT_MAX)),
++         _("M54/M55 P selector must be a non-negative integer joint number"));
 +    CHKS((block->dollar_flag && (block->dollar_value != block->dollar_number ||
-+          block->dollar_number < 0 ||
-+          block->dollar_number >= _setup.num_spindles)),
-+         _("M54/M55 $ selector must name one valid spindle"));
++          block->dollar_number < 0)),
++         _("M54/M55 $ selector must be a non-negative integer spindle number"));
 +  }
  
    CHKS((block->m_count > MAX_EMS), NCE_TOO_MANY_M_CODES_ON_LINE);
    return INTERP_OK;
-@@ -268,8 +298,9 @@ int Interp::check_other_codes(block_pointer block)       //!< pointer to a block
+@@ -268,8 +282,9 @@ int Interp::check_other_codes(block_pointer block)       //!< pointer to a block
        (block->g_modes[GM_SPINDLE_MODE] != G_97) &&
        (block->m_modes[7] != 3) && (block->m_modes[7] != 4) &&
        (block->m_modes[7] != 5) && (block->m_modes[7] != 19) &&
@@ -303,7 +294,7 @@ index 3b139a0ca6..03bfd59736 100644
    }
  
    if (block->e_flag) {
-@@ -327,12 +358,13 @@ int Interp::check_other_codes(block_pointer block)       //!< pointer to a block
+@@ -327,12 +342,13 @@ int Interp::check_other_codes(block_pointer block)       //!< pointer to a block
            (motion != G_2) && (motion != G_3) &&
  	  (motion != G_74) && (motion != G_84) &&
            (block->m_modes[9] != 50) && (block->m_modes[9] != 51) && (block->m_modes[9] != 52) &&
@@ -356,28 +347,44 @@ index e30635d881..119b9d8a43 100644
    // All changes to settings are complete
    write_canon_state_tag(block, settings);
    return INTERP_OK;
+diff --git a/src/emc/rs274ngc/interp_internal.cc b/src/emc/rs274ngc/interp_internal.cc
+index 5d4156d983..6fe1006528 100644
+--- a/src/emc/rs274ngc/interp_internal.cc
++++ b/src/emc/rs274ngc/interp_internal.cc
+@@ -287,6 +287,7 @@ int Interp::init_block(block_pointer block)      //!< pointer to a block to be i
+   block->line_number = -1;
+   block->n_number = -1;
+   block->motion_to_be = -1;
++  block->item_count = 0;
+   block->m_count = 0;
+   for (n = 0; n < 11; n++) {
+     block->m_modes[n] = -1;
 diff --git a/src/emc/rs274ngc/interp_internal.hh b/src/emc/rs274ngc/interp_internal.hh
-index e7e3497d34..3556efa3f8 100644
+index e7e3497d34..a8f87b03df 100644
 --- a/src/emc/rs274ngc/interp_internal.hh
 +++ b/src/emc/rs274ngc/interp_internal.hh
-@@ -458,6 +458,7 @@ struct block_struct
+@@ -454,12 +454,19 @@ struct block_struct
+   int line_number{};
+   int saved_line_number{};  // value of sequence_number when a remap was encountered
+   int motion_to_be{};
++  int item_count{};         // non-comment block items, excluding the line number
+   int m_count{};
    int m_modes[11]{};
    int user_m{};
    int dollar_number{};
 +  double dollar_value{}; // unrounded selector for standalone resource validation
    int g_modes[GM_MAX_MODAL_GROUPS]{};
  
++  bool is_standalone(int argument_items = 0) const
++  {
++    return item_count == argument_items + 1;
++  }
++
    bool a_flag{};
-@@ -759,6 +760,7 @@ struct setup
-   int selected_pocket;          // tool slot (index) selected but not active
-     int selected_tool;          // start switchover to pocket-agnostic interp
-   int sequence_number;          // sequence number of line last read
-+  int num_joints;              // configured resource selectors for M54/M55
-   int num_spindles;				// number of spindles available
-   int active_spindle;			// the spindle currently used for CSS, FPR etc.
-   double speed[EMCMOT_MAX_SPINDLES];// array of spindle speeds
+   bool b_flag{};
+   bool c_flag{};
 diff --git a/src/emc/rs274ngc/interp_read.cc b/src/emc/rs274ngc/interp_read.cc
-index 24ad8d99e4..9b93a1f49f 100644
+index 24ad8d99e4..0011efae1a 100644
 --- a/src/emc/rs274ngc/interp_read.cc
 +++ b/src/emc/rs274ngc/interp_read.cc
 @@ -20,6 +20,7 @@
@@ -399,6 +406,16 @@ index 24ad8d99e4..9b93a1f49f 100644
 +  block->dollar_number = isfinite(value) && value >= INT_MIN && value <= INT_MAX
 +      ? static_cast<int>(value) : -2;
    block->dollar_flag = true;
+   return INTERP_OK;
+ }
+@@ -870,7 +875,9 @@ int Interp::read_items(block_pointer block,      //!< pointer to a block being f
+   }
+ 
+   for (; counter < length;) {
++    const char item = line[counter];
+     CHP(read_one_item(line, &counter, block, parameters));
++    if (item != '(' && item != ';') block->item_count++;
+   }
    return INTERP_OK;
  }
 diff --git a/src/emc/rs274ngc/interp_remap.cc b/src/emc/rs274ngc/interp_remap.cc
@@ -428,26 +445,6 @@ index 235da9b7ea..9593f45c44 100644
  void USE_TOOL_LENGTH_OFFSET(const EmcPose &offset)
  {
      tool_offset = offset;
-diff --git a/src/emc/rs274ngc/rs274ngc_pre.cc b/src/emc/rs274ngc/rs274ngc_pre.cc
-index 55b048cad7..ce758fbcf2 100644
---- a/src/emc/rs274ngc/rs274ngc_pre.cc
-+++ b/src/emc/rs274ngc/rs274ngc_pre.cc
-@@ -867,6 +867,7 @@ int Interp::init()
-   _setup.value_returned = 0;
-   _setup.remap_level = 0; // remapped blocks stack index
-   _setup.call_state = CS_NORMAL;
-+  _setup.num_joints = EMCMOT_MAX_JOINTS;
-   _setup.num_spindles = 1;
- 
-   _setup.tolerance_default = 0;
-@@ -889,6 +890,7 @@ int Interp::init()
-           _setup.b_axis_wrapped = inifile.findBoolV("WRAPPED_ROTARY", "AXIS_B", false);
-           _setup.c_axis_wrapped = inifile.findBoolV("WRAPPED_ROTARY", "AXIS_C", false);
-           _setup.random_toolchanger = inifile.findBoolV("RANDOM_TOOLCHANGER", "EMCIO", false);
-+          _setup.num_joints = inifile.findIntV("JOINTS", "KINS", EMCMOT_MAX_JOINTS);
-           _setup.num_spindles = inifile.findIntV("SPINDLES", "TRAJ", 1);
- 
-           _setup.tolerance_default = inifile.findRealV("G64_DEFAULT_TOLERANCE", "RS274NGC", 0.0);
 diff --git a/src/emc/sai/saicanon.cc b/src/emc/sai/saicanon.cc
 index c4703d40d8..4af879ae03 100644
 --- a/src/emc/sai/saicanon.cc
@@ -656,13 +653,13 @@ index 0000000000..425d52b6e7
 +!/base.ini
 diff --git a/tests/availability-mcodes/README b/tests/availability-mcodes/README
 new file mode 100644
-index 0000000000..963dd37d0a
+index 0000000000..a8a62f3415
 --- /dev/null
 +++ b/tests/availability-mcodes/README
 @@ -0,0 +1,9 @@
 +AUTO M54/M55 barriers: prior motion drains, ACK wait, held-position validation,
 +required homing wait, release wait, and failure prevents continuation.
-+Runs with interpolation rate 4 and releases the joint just moved, checking a fixed command and successful unrelated motion. Configuring an availability-controlled joint disables Home All; any unhomed controlled joint is homed individually inside M54 before the program may continue. A second run confirms this with forced homing disabled, then covers direct nonvolatile reacquisition.
++Runs with interpolation rate 4 and releases the joint just moved, checking a fixed command and successful unrelated motion. Home All skips unavailable availability-controlled joints; any unhomed controlled joint is homed individually inside M54 before the program may continue. Invalid but syntactically representable selectors are passed through the interpreter and rejected against authoritative task topology. A second run confirms acquisition homing with forced homing disabled, then covers direct nonvolatile reacquisition.
 +Abort in AUTO during ACK wait and moving acquisition homing terminates the program. Late ACK never enables the joint or executes the following block; a new program can reacquire and home.
 +
 +INI fixtures are generated by test.sh from the shared FIXTURE.BASE and local
@@ -723,10 +720,10 @@ index 0000000000..a18005598f
 +M2
 diff --git a/tests/availability-mcodes/test-ui.py b/tests/availability-mcodes/test-ui.py
 new file mode 100755
-index 0000000000..b181668e9f
+index 0000000000..6b827943b9
 --- /dev/null
 +++ b/tests/availability-mcodes/test-ui.py
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,142 @@
 +#!/usr/bin/env python3
 +import os
 +import time
@@ -752,10 +749,15 @@ index 0000000000..b181668e9f
 +c.state(linuxcnc.STATE_ON); done()
 +c.home(0); done()
 +wait(lambda: s.homed[0], 'home X')
++c.mode(linuxcnc.MODE_MDI); done()
++for code in ('M54 P99', 'M54 $99'):
++    c.mdi(code)
++    assert c.wait_complete(3) == linuxcnc.RCS_ERROR, code + ' was not rejected by task'
++    c.abort(); done()
 +c.mode(linuxcnc.MODE_AUTO); done()
 +if os.environ.get('AVAILABILITY_NO_FORCE'):
 +    # Forced-homing policy does not bypass acquisition homing. The unhomed
-+    # controlled joint is referenced individually; Home All is unavailable.
++    # controlled joint is referenced individually; Home All skips it.
 +    run('unhomed.ngc')
 +    wait(lambda: hal.get_value('joint.1.availability-request'), 'unhomed request')
 +    pin('joint.1.availability-ack',1)
@@ -776,7 +778,7 @@ index 0000000000..b181668e9f
 +    raise SystemExit(0)
 +c.mode(linuxcnc.MODE_MANUAL); done()
 +c.teleop_enable(0); done()
-+# Controlled joints are acquired individually; Home All is unavailable.
++# Controlled joints are acquired individually; Home All skips them.
 +c.set_joint_availability(1,True)
 +wait(lambda: hal.get_value('joint.1.availability-request'), 'manual request')
 +pin('joint.1.availability-ack',1); done()
@@ -913,11 +915,13 @@ index 0000000000..e5728900ed
 +M2
 diff --git a/tests/interp/availability-mcodes/README b/tests/interp/availability-mcodes/README
 new file mode 100644
-index 0000000000..7ed2a46ba5
+index 0000000000..6054ffdd70
 --- /dev/null
 +++ b/tests/interp/availability-mcodes/README
-@@ -0,0 +1,4 @@
-+Exercise the native M54/M55 joint and spindle selectors and their validation.
+@@ -0,0 +1,6 @@
++Exercise the native M54/M55 joint and spindle selectors, generic standalone
++block validation, and interpreter checks limited to selector representation.
++Configured resource topology is deliberately left to task and motion.
 +
 +Execute-status coverage checks zero queue-buster returns for legacy M54/M55
 +remaps and two for each built-in acquire/release program. Requires a built RIP tree.
@@ -1188,7 +1192,7 @@ index 0000000000..03afbfaa99
 +PARAMETER_FILE = linuxcnc.var
 diff --git a/tests/interp/availability-mcodes/test.sh b/tests/interp/availability-mcodes/test.sh
 new file mode 100755
-index 0000000000..2527db91f0
+index 0000000000..c61548a3fd
 --- /dev/null
 +++ b/tests/interp/availability-mcodes/test.sh
 @@ -0,0 +1,80 @@
@@ -1219,8 +1223,8 @@ index 0000000000..2527db91f0
 +        "$kind" "$selector" "$kind" "$selector" >"$output_dir/expected"
 +    diff -u "$output_dir/expected" "$output_dir/actual"
 +}
-+check_valid valid-joint.ngc JOINT 2
-+check_valid valid-spindle.ngc SPINDLE 0
++check_valid valid-joint.ngc JOINT 99
++check_valid valid-spindle.ngc SPINDLE 99
 +
 +check_rejected() {
 +    program=$1
@@ -1239,7 +1243,7 @@ index 0000000000..2527db91f0
 +check_rejected missing-selector.ngc "requires exactly one P joint selector or $ spindle selector"
 +check_rejected double-selector.ngc "requires exactly one P joint selector or $ spindle selector"
 +check_rejected fractional-joint.ngc "P selector must be a non-negative integer joint number"
-+check_rejected group-spindle.ngc '$ selector must name one valid spindle'
++check_rejected group-spindle.ngc '$ selector must be a non-negative integer spindle number'
 +check_rejected mixed-motion.ngc "must be the only command in its block"
 +check_rejected mixed-stop.ngc "must be the only command in its block"
 +check_rejected mixed-feed.ngc "must be the only command in its block"
@@ -1252,9 +1256,9 @@ index 0000000000..2527db91f0
 +check_rejected bad-joint.ngc "P selector must be a non-negative integer joint number"
 +check_rejected negative-joint.ngc "P selector must be a non-negative integer joint number"
 +
-+check_rejected fractional-spindle.ngc '$ selector must name one valid spindle'
-+check_rejected negative-fractional-spindle.ngc '$ selector must name one valid spindle'
-+check_rejected huge-spindle.ngc '$ selector must name one valid spindle'
++check_rejected fractional-spindle.ngc '$ selector must be a non-negative integer spindle number'
++check_rejected negative-fractional-spindle.ngc '$ selector must be a non-negative integer spindle number'
++check_rejected huge-spindle.ngc '$ selector must be a non-negative integer spindle number'
 +
 +# Legacy remaps accept their own words without built-in resource selectors.
 +rs274 -n 0 -i remap.ini -g remapped.ngc >"$output_dir/remap" 2>"$output_dir/diagnostics"
@@ -1274,19 +1278,19 @@ index 0000000000..2527db91f0
 +python3 execute-status.py
 diff --git a/tests/interp/availability-mcodes/valid-joint.ngc b/tests/interp/availability-mcodes/valid-joint.ngc
 new file mode 100644
-index 0000000000..d9b4c0fb64
+index 0000000000..d697df4d37
 --- /dev/null
 +++ b/tests/interp/availability-mcodes/valid-joint.ngc
 @@ -0,0 +1,3 @@
-+N10 M54 P2 (joint resource)
-+N20 M55 P2 ; release
++N10 M54 P99 (joint resource)
++N20 M55 P99 ; release
 +M2
 diff --git a/tests/interp/availability-mcodes/valid-spindle.ngc b/tests/interp/availability-mcodes/valid-spindle.ngc
 new file mode 100644
-index 0000000000..c158bacf32
+index 0000000000..10632c2188
 --- /dev/null
 +++ b/tests/interp/availability-mcodes/valid-spindle.ngc
 @@ -0,0 +1,3 @@
-+M54 $0
-+M55 $0
++M54 $99
++M55 $99
 +M2

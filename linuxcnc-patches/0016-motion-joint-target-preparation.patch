@@ -5,15 +5,15 @@ Subject: [PATCH] motion-joint-target-preparation
 
 ---
  src/emc/motion/axis.c                    |   7 +-
- src/emc/motion/control.c                 | 135 ++++++++++++-----------
- src/emc/motion/mot_priv.h                |   2 +
+ src/emc/motion/control.c                 | 164 ++++++++++++++---------
+ src/emc/motion/mot_priv.h                |   9 ++
  src/emc/motion/simple_tp.c               |  11 ++
  src/emc/motion/simple_tp.h               |   2 +
  tests/motion-target-preparation/README   |   1 +
  tests/motion-target-preparation/expected |   0
- tests/motion-target-preparation/test.py  |  90 +++++++++++++++
+ tests/motion-target-preparation/test.py  |  90 +++++++++++++
  tests/motion-target-preparation/test.sh  |   3 +
- 9 files changed, 181 insertions(+), 70 deletions(-)
+ 9 files changed, 217 insertions(+), 70 deletions(-)
  create mode 100644 tests/motion-target-preparation/README
  create mode 100644 tests/motion-target-preparation/expected
  create mode 100644 tests/motion-target-preparation/test.py
@@ -38,10 +38,10 @@ index 25b74309be..ba87f42442 100644
  }
  
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index 040e534653..a8deb2ee56 100644
+index 040e534653..f4dd6777af 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
-@@ -1178,9 +1178,52 @@ static void handle_jjogwheels(void)
+@@ -1178,9 +1178,81 @@ static void handle_jjogwheels(void)
      first_pass = 0;
  }
  
@@ -75,6 +75,35 @@ index 040e534653..a8deb2ee56 100644
 +    return 0;
 +}
 +
++/* Keep the definition of a releasable joint with the motion machinery that
++ * owns the planners, interpolators, compensation, and auxiliary motion.
++ * Command admission may accept a joint whose final samples are still
++ * draining; ownership handoff requires the fully ready state. */
++motion_joint_release_state_t motion_joint_release_state(int n)
++{
++    const emcmot_joint_t *joint = &joints[n];
++    const CUBIC_STRUCT *cubic = &joint->cubic;
++
++    if (tpQueueDepth(&emcmotInternal->coord_tp) != 0 ||
++        !GET_MOTION_INPOS_FLAG() || joint->free_tp.active ||
++        get_homing_is_active() || axis_jog_is_active() ||
++        emcmotStatus->probing || emcmotStatus->external_offsets_applied)
++        return MOTION_JOINT_RELEASE_BLOCKED;
++
++    if (!isfinite(joint->vel_cmd) || !isfinite(joint->acc_cmd) ||
++        !isfinite(joint->backlash_corr) || !isfinite(joint->backlash_filt) ||
++        !isfinite(joint->backlash_vel) || joint->kb_jjog_active ||
++        joint->wheel_jjog_active || cubic->x0 != cubic->x3 ||
++        cubic->x1 != cubic->x3 || cubic->x2 != cubic->x3 ||
++        joint->coarse_pos != cubic->x3 || fabs(joint->vel_cmd) > 1e-12 ||
++        fabs(joint->acc_cmd) > 1e-12 ||
++        fabs(joint->backlash_corr - joint->backlash_filt) > 1e-12 ||
++        fabs(joint->backlash_vel) > 1e-12)
++        return MOTION_JOINT_RELEASE_DRAINING;
++
++    return MOTION_JOINT_RELEASE_READY;
++}
++
 +/* Inhibit immediately; homing still owns its abort state and must run before
 + * the caller deactivates the joint. Never run the homing engine recursively
 + * from command processing. */
@@ -95,7 +124,7 @@ index 040e534653..a8deb2ee56 100644
      emcmot_joint_t *joint;
      double positions[EMCMOT_MAX_JOINTS];
      double vel_lim;
-@@ -1353,40 +1396,21 @@ static void get_pos_cmds(long period)
+@@ -1353,40 +1425,21 @@ static void get_pos_cmds(long period)
                  ext_offset_coord_limit = 0;
              }
  
@@ -148,7 +177,7 @@ index 040e534653..a8deb2ee56 100644
  	/* there is data in the interpolators */
  	/* run interpolation */
  	for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
-@@ -1434,39 +1458,20 @@ static void get_pos_cmds(long period)
+@@ -1434,39 +1487,20 @@ static void get_pos_cmds(long period)
  	/* the next position then gets run through the inverse kins,
  	    to compute the next positions of the joints */
  
@@ -203,13 +232,20 @@ index 040e534653..a8deb2ee56 100644
  
  	/* END OF OUTPUT KINS */
 diff --git a/src/emc/motion/mot_priv.h b/src/emc/motion/mot_priv.h
-index 5eba0f6711..516fc57253 100644
+index 5eba0f6711..2050ad51a3 100644
 --- a/src/emc/motion/mot_priv.h
 +++ b/src/emc/motion/mot_priv.h
-@@ -347,4 +347,6 @@ int joint_is_lockable(int joint_num);
+@@ -347,4 +347,13 @@ int joint_is_lockable(int joint_num);
  
  #define SET_JOINT_FAULT_FLAG(joint,fl) if (fl) (joint)->flag |= EMCMOT_JOINT_FAULT_BIT; else (joint)->flag &= ~EMCMOT_JOINT_FAULT_BIT;
  
++typedef enum {
++    MOTION_JOINT_RELEASE_BLOCKED,
++    MOTION_JOINT_RELEASE_DRAINING,
++    MOTION_JOINT_RELEASE_READY
++} motion_joint_release_state_t;
++
++motion_joint_release_state_t motion_joint_release_state(int joint_num);
 +void motion_cancel_joint(int joint_num);
 +
  #endif /* MOT_PRIV_H */

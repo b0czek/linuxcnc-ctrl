@@ -369,6 +369,9 @@ flags, and cubic interpolation buffers before committing joint commands. Rejecte
 targets retain the previous branch flags; accepted targets publish the new flags. A failure at a later joint cannot
 partially commit earlier targets. A small trajectory-planner helper resets an
 axis planner at a stationary position while retaining its configured limits.
+It also owns the motion-internal definition of joint release readiness, so
+later availability code sees only blocked, draining, or ready states rather
+than planner, interpolator, compensation, jog, homing, and probing internals.
 This patch exposes no availability controls and builds independently of the
 runtime feature.
 
@@ -404,10 +407,10 @@ waits for queued, jog, joint interpolation, and compensation state to settle
 before inhibiting outputs and completing the hardware handoff; global
 `MOTION_INPOS` keeps upstream behavior.
 
-Availability-controlled joints cannot define `HOME_SEQUENCE`; configuring any
-such joint rejects Home All. Controlled joints are homed individually only by
-acquisition and reject user HOME and UNHOME commands, so AVAILABLE implies a
-valid homed state.
+Availability-controlled joints cannot define `HOME_SEQUENCE`; Home All skips
+unavailable controlled joints and continues with its ordinary sequence.
+Controlled joints are homed individually only by acquisition and reject user
+HOME and UNHOME commands, so AVAILABLE implies a valid homed state.
 Other resources can continue operating while a joint or spindle is released.
 Coordinated and teleop motion are permitted only when inverse kinematics leaves
 every unavailable joint at its held command position. Commands requiring an
@@ -433,7 +436,10 @@ identifies a spindle. Selectors are zero-based integer indices, and the selected
 resource must have availability control enabled. For example, `M54 P2` acquires
 joint 2, while `M55 $0` releases spindle 0. Each command occupies its own block;
 line numbers and comments are allowed, but other commands and parameter
-assignments cannot share the block.
+assignments cannot share the block. Standalone validation uses the parser's
+generic non-comment item count. The interpreter checks selector representation;
+task and motion authoritatively validate configured resource topology and
+availability ownership.
 
 Execution waits for preceding work to finish before starting the handoff.
 Acquisition then waits for hardware acknowledgment, homing if the joint is
