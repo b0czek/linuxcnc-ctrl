@@ -1,0 +1,403 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dariusz Majnert <dariusz.majnert@gmail.com>
+Date: Thu, 17 Sep 2026 17:40:12 +0200
+Subject: [PATCH 16/18] motion-joint-target-preparation
+
+---
+ src/emc/motion/axis.c                    |   7 +-
+ src/emc/motion/control.c                 | 166 ++++++++++++++---------
+ src/emc/motion/mot_priv.h                |   9 ++
+ src/emc/motion/simple_tp.c               |  11 ++
+ src/emc/motion/simple_tp.h               |   2 +
+ tests/motion-target-preparation/README   |   1 +
+ tests/motion-target-preparation/expected |   0
+ tests/motion-target-preparation/test.py  |  90 ++++++++++++
+ tests/motion-target-preparation/test.sh  |   3 +
+ 9 files changed, 219 insertions(+), 70 deletions(-)
+ create mode 100644 tests/motion-target-preparation/README
+ create mode 100644 tests/motion-target-preparation/expected
+ create mode 100644 tests/motion-target-preparation/test.py
+ create mode 100755 tests/motion-target-preparation/test.sh
+
+diff --git a/src/emc/motion/axis.c b/src/emc/motion/axis.c
+index 25b74309be..ba87f42442 100644
+--- a/src/emc/motion/axis.c
++++ b/src/emc/motion/axis.c
+@@ -451,11 +451,8 @@ void axis_sync_teleop_tp_to_carte_pos(int extfactor, double *pcmd_p[])
+     // synced curr_pos the next time simple_tp_update integrates one
+     // cycle of motion.
+     for (n = 0; n < EMCMOT_MAX_AXIS; n++) {
+-        axis_array[n].teleop_tp.curr_pos = *pcmd_p[n]
+-                            + extfactor * axis_array[n].ext_offset_tp.curr_pos;
+-        axis_array[n].teleop_tp.pos_cmd = axis_array[n].teleop_tp.curr_pos;
+-        axis_array[n].teleop_tp.curr_vel = 0.0;
+-        axis_array[n].teleop_tp.curr_acc = 0.0;
++        simple_tp_set_pos(&axis_array[n].teleop_tp, *pcmd_p[n]
++                         + extfactor * axis_array[n].ext_offset_tp.curr_pos);
+     }
+ }
+ 
+diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
+index 040e534653..8ed2cb3882 100644
+--- a/src/emc/motion/control.c
++++ b/src/emc/motion/control.c
+@@ -1178,9 +1178,83 @@ static void handle_jjogwheels(void)
+     first_pass = 0;
+ }
+ 
++/* Prepare the entire vector, including interpolators, before committing any
++ * joint. A late invalid solution or interpolation error cannot partially
++ * advance the command vector. The caller owns the motion fault path. */
++static int prepare_joint_targets(const EmcPose *pose, double *positions,
++                                 CUBIC_STRUCT *cubics)
++{
++    int n;
++    KINEMATICS_FORWARD_FLAGS staged_fflags = fflags;
++    for (n = 0; n < NO_OF_KINS_JOINTS; n++)
++        positions[n] = joints[n].coarse_pos;
++    if (kinematicsInverse(pose, positions, &iflags, &staged_fflags) != 0) {
++        reportError(_("kinematicsInverse failed"));
++        return -1;
++    }
++    for (n = 0; n < NO_OF_KINS_JOINTS; n++) {
++        if (!isfinite(positions[n])) {
++            reportError(_("kinematicsInverse gave non-finite joint location on joint %d"), n);
++            return -1;
++        }
++        cubics[n] = joints[n].cubic;
++        if (cubicNeedNextPoint(&cubics[n]) &&
++            cubicAddPoint(&cubics[n], positions[n]) != 0) {
++            reportError(_("joint %d interpolation preparation failed"), n);
++            return -1;
++        }
++    }
++    fflags = staged_fflags;
++    return 0;
++}
++
++/* Keep the definition of a releasable joint with the motion machinery that
++ * owns the planners, interpolators, compensation, and auxiliary motion.
++ * Command admission may accept a joint whose final samples are still
++ * draining; ownership handoff requires the fully ready state. */
++motion_joint_release_state_t motion_joint_release_state(int n)
++{
++    const emcmot_joint_t *joint = &joints[n];
++    const CUBIC_STRUCT *cubic = &joint->cubic;
++
++    if (tpQueueDepth(&emcmotInternal->coord_tp) != 0 ||
++        !GET_MOTION_INPOS_FLAG() || joint->free_tp.active ||
++        get_homing_is_active() || axis_jog_is_active() ||
++        emcmotStatus->probing || emcmotStatus->external_offsets_applied)
++        return MOTION_JOINT_RELEASE_BLOCKED;
++
++    if (!isfinite(joint->vel_cmd) || !isfinite(joint->acc_cmd) ||
++        !isfinite(joint->backlash_corr) || !isfinite(joint->backlash_filt) ||
++        !isfinite(joint->backlash_vel) || joint->kb_jjog_active ||
++        joint->wheel_jjog_active ||
++        (emcmotStatus->motion_state != EMCMOT_MOTION_FREE &&
++         (cubic->x0 != cubic->x3 || cubic->x1 != cubic->x3 ||
++          cubic->x2 != cubic->x3 || joint->coarse_pos != cubic->x3)) ||
++        fabs(joint->vel_cmd) > 1e-12 ||
++        fabs(joint->acc_cmd) > 1e-12 ||
++        fabs(joint->backlash_corr - joint->backlash_filt) > 1e-12 ||
++        fabs(joint->backlash_vel) > 1e-12)
++        return MOTION_JOINT_RELEASE_DRAINING;
++
++    return MOTION_JOINT_RELEASE_READY;
++}
++
++/* Inhibit immediately; homing still owns its abort state and must run before
++ * the caller deactivates the joint. Never run the homing engine recursively
++ * from command processing. */
++void motion_cancel_joint(int n)
++{
++    SET_JOINT_ENABLE_FLAG(&joints[n], 0);
++    joints[n].free_tp.enable = 0;
++    joints[n].kb_jjog_active = 0;
++    joints[n].wheel_jjog_active = 0;
++    do_cancel_homing(n);
++}
++
+ static void get_pos_cmds(long period)
+ {
+-    int joint_num, result;
++    CUBIC_STRUCT staged_cubics[EMCMOT_MAX_JOINTS];
++    int joint_num, result = 0;
+     emcmot_joint_t *joint;
+     double positions[EMCMOT_MAX_JOINTS];
+     double vel_lim;
+@@ -1353,40 +1427,21 @@ static void get_pos_cmds(long period)
+                 ext_offset_coord_limit = 0;
+             }
+ 
+-	    /* OUTPUT KINEMATICS - convert to joints in local array */
+-	    result = kinematicsInverse(&emcmotStatus->carte_pos_cmd, positions,
+-		&iflags, &fflags);
+-	    if(result == 0)
+-	    {
+-		/* copy to joint structures and spline them up */
+-		for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
+-		    if(!isfinite(positions[joint_num]))
+-		    {
+-                       reportError(_("kinematicsInverse gave non-finite joint location on joint %d"),
+-                           joint_num);
+-                       SET_MOTION_ERROR_FLAG(1);
+-                       emcmotInternal->enabling = 0;
+-                       break;
+-		    }
+-		    /* point to joint struct */
+-		    joint = &joints[joint_num];
+-		    joint->coarse_pos = positions[joint_num];
+-		    /* spline joints up-- note that we may be adding points
+-		       that fail soft limits, but we'll abort at the end of
+-		       this cycle so it doesn't really matter */
+-		    cubicAddPoint(&(joint->cubic), joint->coarse_pos);
+-		}
+-	    }
+-	    else
+-	    {
+-	       reportError(_("kinematicsInverse failed"));
+-	       SET_MOTION_ERROR_FLAG(1);
+-	       emcmotInternal->enabling = 0;
+-	       break;
+-	    }
++            result = prepare_joint_targets(&emcmotStatus->carte_pos_cmd,
++                                           positions, staged_cubics);
++            if (result != 0) {
++                SET_MOTION_ERROR_FLAG(1);
++                emcmotInternal->enabling = 0;
++                break;
++            }
++            for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
++                joints[joint_num].coarse_pos = positions[joint_num];
++                joints[joint_num].cubic = staged_cubics[joint_num];
++            }
+ 
+ 	    /* END OF OUTPUT KINS */
+ 	} // while
++        if (result != 0) break;
+ 	/* there is data in the interpolators */
+ 	/* run interpolation */
+ 	for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
+@@ -1434,39 +1489,20 @@ static void get_pos_cmds(long period)
+ 	/* the next position then gets run through the inverse kins,
+ 	    to compute the next positions of the joints */
+ 
+-	/* OUTPUT KINEMATICS - convert to joints in local array */
+-	result = kinematicsInverse(&emcmotStatus->carte_pos_cmd, positions, &iflags, &fflags);
+-
+-	/* copy to joint structures and spline them up */
+-	if(result == 0)
+-	{
+-	    for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
+-		if(!isfinite(positions[joint_num]))
+-		{
+-		   reportError(_("kinematicsInverse gave non-finite joint location on joint %d"),
+-		         joint_num);
+-		   SET_MOTION_ERROR_FLAG(1);
+-		   emcmotInternal->enabling = 0;
+-		   break;
+-		}
+-		/* point to joint struct */
+-		joint = &joints[joint_num];
+-		joint->coarse_pos = positions[joint_num];
+-		/* spline joints up-- note that we may be adding points
+-		       that fail soft limits, but we'll abort at the end of
+-		       this cycle so it doesn't really matter */
+-		cubicAddPoint(&(joint->cubic), joint->coarse_pos);
+-		/* interpolate to get new position and velocity */
+-		joint->pos_cmd = cubicInterpolate(&(joint->cubic), 0, &(joint->vel_cmd), &(joint->acc_cmd),  &(joint->jerk_cmd));
+-	    }
+-	}
+-	else
+-	{
+-	   reportError(_("kinematicsInverse failed"));
+-	   SET_MOTION_ERROR_FLAG(1);
+-	   emcmotInternal->enabling = 0;
+-	   break;
+-	}
++        result = prepare_joint_targets(&emcmotStatus->carte_pos_cmd,
++                                       positions, staged_cubics);
++        if (result != 0) {
++            SET_MOTION_ERROR_FLAG(1);
++            emcmotInternal->enabling = 0;
++            break;
++        }
++        for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
++            joint = &joints[joint_num];
++            joint->coarse_pos = positions[joint_num];
++            joint->cubic = staged_cubics[joint_num];
++            joint->pos_cmd = cubicInterpolate(&joint->cubic, 0,
++                &joint->vel_cmd, &joint->acc_cmd, &joint->jerk_cmd);
++        }
+ 
+ 
+ 	/* END OF OUTPUT KINS */
+diff --git a/src/emc/motion/mot_priv.h b/src/emc/motion/mot_priv.h
+index 5eba0f6711..2050ad51a3 100644
+--- a/src/emc/motion/mot_priv.h
++++ b/src/emc/motion/mot_priv.h
+@@ -347,4 +347,13 @@ int joint_is_lockable(int joint_num);
+ 
+ #define SET_JOINT_FAULT_FLAG(joint,fl) if (fl) (joint)->flag |= EMCMOT_JOINT_FAULT_BIT; else (joint)->flag &= ~EMCMOT_JOINT_FAULT_BIT;
+ 
++typedef enum {
++    MOTION_JOINT_RELEASE_BLOCKED,
++    MOTION_JOINT_RELEASE_DRAINING,
++    MOTION_JOINT_RELEASE_READY
++} motion_joint_release_state_t;
++
++motion_joint_release_state_t motion_joint_release_state(int joint_num);
++void motion_cancel_joint(int joint_num);
++
+ #endif /* MOT_PRIV_H */
+diff --git a/src/emc/motion/simple_tp.c b/src/emc/motion/simple_tp.c
+index 64ffc4f35e..0f9ff04e33 100644
+--- a/src/emc/motion/simple_tp.c
++++ b/src/emc/motion/simple_tp.c
+@@ -18,6 +18,17 @@
+ 
+ void simple_scurve_tp_update(simple_tp_t *tp, double period);
+ 
++void simple_tp_set_pos(simple_tp_t *tp, double position)
++{
++    simple_tp_t synced = {0};
++    synced.max_vel = tp->max_vel;
++    synced.max_acc = tp->max_acc;
++    synced.max_jerk = tp->max_jerk;
++    synced.use_trapezoid = tp->use_trapezoid;
++    synced.curr_pos = synced.pos_cmd = synced.last_pos_cmd = position;
++    *tp = synced;
++}
++
+ void simple_tp_update(simple_tp_t *tp, double period)
+ {
+     if(tp->max_jerk <= 0.0001 || GET_TRAJ_PLANNER_TYPE() == 0){
+diff --git a/src/emc/motion/simple_tp.h b/src/emc/motion/simple_tp.h
+index 26f1a64b48..c4b10cd20d 100644
+--- a/src/emc/motion/simple_tp.h
++++ b/src/emc/motion/simple_tp.h
+@@ -97,6 +97,8 @@ extern "C" {
+    is enabled.  'period' is the period between calls, in seconds.
+ */
+ 
++/* Reset motion history at a stationary position, retaining configured limits. */
++extern void simple_tp_set_pos(simple_tp_t *tp, double position);
+ extern void simple_tp_update(simple_tp_t *tp, double period);
+ extern void simple_tp_update_normal(simple_tp_t *tp, double period);
+ extern void simple_scurve_tp_update(simple_tp_t *tp, double period);
+diff --git a/tests/motion-target-preparation/README b/tests/motion-target-preparation/README
+new file mode 100644
+index 0000000000..99955caa22
+--- /dev/null
++++ b/tests/motion-target-preparation/README
+@@ -0,0 +1 @@
++Compiles production target preparation with deterministic inverse-kinematics doubles and the real cubic implementation. Checks that inverse-kinematics and interpolation failures cannot partially update the joint command vector. No runtime or realtime privileges are required.
+diff --git a/tests/motion-target-preparation/expected b/tests/motion-target-preparation/expected
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/tests/motion-target-preparation/test.py b/tests/motion-target-preparation/test.py
+new file mode 100644
+index 0000000000..1fa2553aa3
+--- /dev/null
++++ b/tests/motion-target-preparation/test.py
+@@ -0,0 +1,90 @@
++import os
++import re
++from pathlib import Path
++import subprocess
++import tempfile
++root = Path(__file__).resolve().parents[2]
++source = (root / 'src/emc/motion/control.c').read_text()
++def function(name, source=source):
++    start = re.search(r'^(?:static )?(?:int|void) ' + name + r'\(', source, re.M).start()
++    brace = source.index('{', start)
++    depth = 1
++    end = brace + 1
++    while depth:
++        depth += (source[end] == '{') - (source[end] == '}')
++        end += 1
++    return source[start:end]
++preamble = r"""
++#include <assert.h>
++#include <math.h>
++#include <string.h>
++#include "cubic.h"
++#define _(s) s
++#define reportError(...) ((void)0)
++#define NO_OF_KINS_JOINTS 3
++typedef struct { double x; } EmcPose;
++typedef struct {
++    double coarse_pos;
++    CUBIC_STRUCT cubic;
++} emcmot_joint_t;
++static emcmot_joint_t joints[3];
++typedef int KINEMATICS_FORWARD_FLAGS;
++static int iflags, fflags;
++static int ik_result;
++static double solution[3];
++static int kinematicsInverse(const EmcPose *p, double *out, int *i, int *f) {
++    *f = *f + 1;
++    memcpy(out, solution, sizeof(solution)); return ik_result;
++}
++"""
++# The second patch supplies additional lifecycle/held-reference test fixtures.
++extension = Path(__file__).with_name('availability-fixture.h')
++if extension.exists(): preamble += extension.read_text()
++main = r"""
++int main(void) {
++    double positions[3]; CUBIC_STRUCT staged[3]; EmcPose pose = {0};
++    for (int n=0; n<3; n++) {
++        cubicInit(&joints[n].cubic);
++        cubicSetSegmentTime(&joints[n].cubic, .004);
++        cubicSetInterpolationRate(&joints[n].cubic, 4);
++        joints[n].coarse_pos = 20+n;
++        solution[n] = n;
++    }
++    unsigned char before[sizeof(joints)]; memcpy(before, joints, sizeof(joints));
++    fflags = 10;
++    ik_result = -1;
++    assert(prepare_joint_targets(&pose, positions, staged) != 0);
++    assert(fflags == 10);
++    ik_result = 0;
++    solution[2] = NAN;
++    assert(prepare_joint_targets(&pose, positions, staged) != 0);
++    assert(memcmp(before, joints, sizeof(joints)) == 0);
++    assert(fflags == 10);
++    solution[2] = 2;
++    assert(prepare_joint_targets(&pose, positions, staged) == 0);
++    assert(memcmp(before, joints, sizeof(joints)) == 0);
++    assert(fflags == 11);
++    assert(positions[0] == 0 && positions[1] == 1 && positions[2] == 2);
++    joints[2].cubic.configured = 0;
++    memcpy(before, joints, sizeof(joints));
++    assert(prepare_joint_targets(&pose, positions, staged) != 0);
++    assert(memcmp(before, joints, sizeof(joints)) == 0);
++    assert(fflags == 11);
++    joints[2].cubic.configured = joints[0].cubic.configured;
++#ifdef TEST_AVAILABILITY
++    test_availability(&pose, positions, staged);
++#endif
++}
++"""
++with tempfile.TemporaryDirectory() as tmp:
++    tmp = Path(tmp)
++    # Only the math header is shimmed; cubic.c is compiled unchanged.
++    (tmp/'rtapi_math.h').write_text('#include <math.h>\n')
++    text = preamble + '\n' + function('prepare_joint_targets')
++    extra = Path(__file__).with_name('availability-cases.h')
++    if extra.exists(): text += '\n' + extra.read_text()
++    (tmp/'test.c').write_text(text + '\n' + main)
++    subprocess.run([os.environ.get('CC', 'cc'), '-std=c99', '-I'+str(tmp),
++                    '-I'+str(root/'src/emc/kinematics'), '-I'+str(root/'src/emc/motion'), str(tmp/'test.c'),
++                    str(root/'src/emc/kinematics/cubic.c'), '-lm', '-o', str(tmp/'test')], check=True)
++    subprocess.run([str(tmp/'test')], check=True)
+diff --git a/tests/motion-target-preparation/test.sh b/tests/motion-target-preparation/test.sh
+new file mode 100755
+index 0000000000..0cd44bb027
+--- /dev/null
++++ b/tests/motion-target-preparation/test.sh
+@@ -0,0 +1,3 @@
++#!/bin/sh
++set -eu
++python3 test.py

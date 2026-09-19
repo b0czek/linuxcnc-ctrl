@@ -62,15 +62,12 @@ older stack, rebuild it explicitly. The previous tip is retained under
 ./linuxcnc-patches/apply.sh --rebuild /path/to/linuxcnc
 ```
 
-## Editing the series
+## Developing the series
 
-Work on the managed branch and make each logical LinuxCNC patch one commit.
-Append a new commit for a new patch. To change an existing patch, use
-interactive rebase to edit or amend its commit and rebase the later commits.
-Do not accumulate patch changes as an uncommitted tree.
-
-After the branch is clean and tests pass, export its commits back to the
-reviewable patch files:
+Follow the repository's
+[`patch-linuxcnc` skill](../skills/patch-linuxcnc/SKILL.md) for the development,
+finalization, and full-validation workflow. Keep each logical patch as one
+commit on the managed branch and export commits with the repository tooling:
 
 ```sh
 ./linuxcnc-patches/refresh.sh /path/to/linuxcnc
@@ -364,3 +361,95 @@ checked and supplied as `s`; omitting `$` preserves the spindle 0 default.
 The `tests/remap/dollar-argspec` regression covers omitted, numbered, and
 all-spindle selectors through Python, named NGC, and positional NGC remaps,
 plus selected-spindle behavior for `^`.
+
+### 0016 — Motion joint-target preparation
+
+Stages the entire inverse-kinematics target vector, forward-kinematics branch
+flags, and cubic interpolation buffers before committing joint commands. Rejected
+targets retain the previous branch flags; accepted targets publish the new flags. A failure at a later joint cannot
+partially commit earlier targets. A small trajectory-planner helper resets an
+axis planner at a stationary position while retaining its configured limits.
+It also owns the motion-internal definition of joint release readiness, so
+later availability code sees only blocked, draining, or ready states rather
+than planner, interpolator, compensation, jog, homing, and probing internals.
+This patch exposes no availability controls and builds independently of the
+runtime feature.
+
+`tests/motion-target-preparation` compiles the production target-preparation
+function with deterministic kinematics and the real cubic implementation. It
+covers late invalid targets, interpolation failure, and no partial commitment.
+
+### 0017 — Runtime joint and spindle availability
+
+Adds runtime acquisition and release of individual joints and spindles, allowing
+external hardware to hand physical resources to LinuxCNC and take them back.
+Availability is separate from Machine On and amplifier enable: a resource must
+be acquired before LinuxCNC can use it for ordinary motion or spindle commands.
+
+Each resource opts in through `AVAILABILITY_CONTROL`. Spindle
+`INITIAL_AVAILABILITY` selects whether Machine On acquires it; a controlled
+joint always starts released and is acquired explicitly after Machine On.
+`AVAILABILITY_TIMEOUT` limits the hardware handshake. HAL
+`availability-request` and `availability-ack` pins coordinate the handoff;
+additional pins expose availability, lifecycle state, and fault information.
+NML and Python provide acquisition/release commands and status for application
+control.
+
+Releasing an availability-controlled joint freezes its motion-state position;
+its raw HAL feedback pin remains live for diagnostics. Nonvolatile acquisition
+checks that raw feedback still matches the held logical position within the
+joint's existing `MIN_FERROR` tolerance. A mismatch faults the operation without
+changing the held joint or Cartesian position. If the joint is unhomed,
+acquisition treats hardware acknowledgment as an internal step, automatically
+homes the joint, and reports AVAILABLE only after homing succeeds.
+`VOLATILE_HOME` controls whether release invalidates that reference. Release
+waits for queued, jog, joint interpolation, and compensation state to settle
+before inhibiting outputs and completing the hardware handoff; global
+`MOTION_INPOS` keeps upstream behavior.
+
+Availability-controlled joints cannot define `HOME_SEQUENCE`; Home All skips
+unavailable controlled joints and continues with its ordinary sequence.
+Controlled joints are homed individually only by acquisition and reject user
+HOME and UNHOME commands, so AVAILABLE implies a valid homed state.
+Other resources can continue operating while a joint or spindle is released.
+Coordinated and teleop motion are permitted only when inverse kinematics leaves
+every unavailable joint at its held command position. Commands requiring an
+unavailable spindle are rejected. Deliberately released joints do not block Run
+or MDI solely because they are unhomed.
+
+Direct API requests require an idle task, and only one acquisition or release
+may be pending at a time. Abort cancels a pending operation; hardware handshake,
+homing, or nonvolatile position-validation failures report a fault and inhibit
+motion. Resources are managed independently, with no automatic pairing or
+switching sequence. Patch 0018 adds the M54/M55 G-code interface to these
+operations.
+
+### 0018 — Standalone M54/M55 interface
+
+Adds G-code commands for the runtime availability operations in patch 0017.
+`M54` acquires a joint or spindle, and `M55` releases it. Programs can explicitly
+hand resources to and from external hardware as part of an AUTO sequence or
+through MDI.
+
+Each command selects exactly one resource: `P` identifies a joint, and `$`
+identifies a spindle. Selectors are zero-based integer indices, and the selected
+resource must have availability control enabled. For example, `M54 P2` acquires
+joint 2, while `M55 $0` releases spindle 0. Each command occupies its own block;
+line numbers and comments are allowed, but other commands and parameter
+assignments cannot share the block. Standalone validation uses the parser's
+generic non-comment item count. The interpreter checks selector representation;
+task and motion authoritatively validate configured resource topology and
+availability ownership.
+
+Execution waits for preceding work to finish before starting the handoff.
+Acquisition then waits for hardware acknowledgment, homing if the joint is
+unhomed, otherwise held-position validation, and normal task/interpreter
+synchronization. Release waits for the resource to reach its released state.
+Subsequent program blocks continue only after the operation completes
+successfully; a fault stops execution. Abort cancels a pending operation through
+the same runtime lifecycle as the direct API.
+
+The commands use the configured availability policy and timeout for each
+resource. They acquire and release resources independently, so the program
+specifies the order of any multi-resource handoff. `REMAP` definitions can
+replace either code with custom behavior and argument rules.

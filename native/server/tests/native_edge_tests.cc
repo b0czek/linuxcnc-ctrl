@@ -294,6 +294,21 @@ void command_validation_test() {
   assert(validate_nml_command(command, nullptr).code ==
          NmlCommandValidationCode::StatusUnavailable);
 
+  command = {};
+  command.kind = NmlCommandKind::SetJointAvailability;
+  command.integer = 2;
+  command.boolean = true;
+  assert(validate_nml_command(command, &configuration));
+  command.integer = 3;
+  assert(!validate_nml_command(command, &configuration));
+
+  command.kind = NmlCommandKind::SetSpindleAvailability;
+  command.integer = 1;
+  command.boolean = false;
+  assert(validate_nml_command(command, &configuration));
+  command.integer = -1;
+  assert(!validate_nml_command(command, &configuration));
+
   const std::array<double, 3> malformed{
       std::numeric_limits<double>::quiet_NaN(),
       std::numeric_limits<double>::infinity(),

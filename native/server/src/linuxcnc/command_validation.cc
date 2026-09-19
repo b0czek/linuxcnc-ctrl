@@ -118,6 +118,16 @@ NmlCommandValidation validate_nml_command(
                               configuration->motion_stat.traj.spindles,
                               "spindle index");
     }
+    case NmlCommandKind::SetSpindleAvailability:
+      if (!configuration) return unavailable();
+      return configured_index(command.integer,
+                              configuration->motion_stat.traj.spindles,
+                              "spindle index");
+    case NmlCommandKind::SetJointAvailability:
+      if (!configuration) return unavailable();
+      return configured_index(command.integer,
+                              configuration->motion_stat.traj.joints,
+                              "joint index");
     case NmlCommandKind::HomeJoint:
       if (!configuration) return unavailable();
       if (command.integer == -1) return {};

@@ -1,137 +1,166 @@
 ---
 name: patch-linuxcnc
-description: Use when adding, modifying, or rebasing LinuxCNC patches in linuxcnc-patches/. Covers EMC_STAT/NML changes, parameter mapping, native daemon exposure, and verification for the pinned LinuxCNC baseline.
+description: Use when developing, modifying, finalizing, rebasing, or validating LinuxCNC patches in linuxcnc-patches/. Covers the persistent development checkout, deterministic patch-stack tooling, focused iteration, final replay, and LinuxCNC/native integration boundaries.
 ---
 
 # Patching LinuxCNC for linuxcnc-ctrl
 
-This project maintains a patch series in `linuxcnc-patches/` against a pinned
-LinuxCNC baseline (`linuxcnc-patches/base-revision`). The native daemon is
-ABI-locked to LinuxCNC built with this series applied.
+This project maintains a linear patch series in `linuxcnc-patches/` against the
+revision in `linuxcnc-patches/base-revision`. The pinned revision and maintained
+patch files are the source of truth. The native daemon is ABI-locked to a
+LinuxCNC build containing the complete series.
 
-## Baseline
+Use the cheapest phase that can provide new information. Do not turn final
+validation into the ordinary edit-build-test loop.
 
-- Repository: https://github.com/LinuxCNC/linuxcnc
-- Expected revision: read from `linuxcnc-patches/base-revision`
-- Pinned LinuxCNC checkout in this workspace: `linuxcnc/`
-- System LinuxCNC used for builds: usually `/home/dariusz/Desktop/linuxcnc`
+## Invariants
 
-## Before patching
+- Keep patch order explicit and keep exactly one logical patch per commit on
+  the managed LinuxCNC patch branch.
+- Use `linuxcnc-patches/apply.sh` to materialize the series and
+  `linuxcnc-patches/refresh.sh` to export it. Do not reproduce their behavior
+  with ad hoc clones, `git am` loops, or hand-built patch files.
+- A request to develop or fix a LinuxCNC patch authorizes the local staging,
+  commits, amendments, rebases, and export needed to deliver the maintained
+  patch files. Complete that workflow without a separate permission request.
+- Never reset, discard, or absorb unrelated user changes. Preserve the parent
+  repository's existing index; patch-stack commits belong in the LinuxCNC
+  checkout. Use an isolated worktree when unrelated edits prevent finalization.
+- `apply.sh` and `refresh.sh` cleanliness, linear-history, replay, ordering,
+  backup, and deterministic-ID checks are guarantees, not optional ceremony.
+- LinuxCNC tests must work with its userspace simulator under ordinary POSIX
+  scheduling. Do not require hard real-time privileges or timing.
 
-1. Materialize the managed patch branch:
-   ```sh
-   ./linuxcnc-patches/apply.sh linuxcnc
-   ```
-2. Confirm the checkout is clean and inspect the existing commits:
-   ```sh
-   git -C linuxcnc status --short
-   git -C linuxcnc log --oneline \
-     "$(cat linuxcnc-patches/base-revision)..HEAD"
-   ```
+## Phase 1: fast development loop
 
-The tooling refuses dirty, partial, or divergent state. Never reset or discard
-an existing dirty checkout automatically. A checkout produced by the legacy
-uncommitted workflow can be converted with `apply.sh --adopt linuxcnc`, but
-only when its complete tree exactly matches the patch files.
+Treat `linuxcnc/` as a persistent development workspace. Materialize it once
+when it does not already contain the current managed stack:
 
-## Adding or extending a patch
+```sh
+./linuxcnc-patches/apply.sh linuxcnc
+```
 
-1. **Work in commits.** Each patch is exactly one commit on the managed
-   `linuxcnc-ctrl/patch-stack` branch. Append a commit for a new patch. To
-   change an existing patch, interactively rebase, amend that commit, and
-   rebase all later commits. Do not layer changes in the working tree.
+Before editing, inspect its branch, status, and patch commits. If it is dirty,
+preserve the existing work and determine whether it belongs to the current
+task; do not invoke stack reconstruction to erase or bypass it.
 
-2. **Modify LinuxCNC source** in `linuxcnc/src/`. Common files:
-   - `src/emc/nml_intf/emc_nml.hh` — add fields to `EMC_TASK_STAT` or other
-     status structures.
-   - `src/emc/nml_intf/emc.cc` — add `CMS->update()` / `EmcPose_update()` calls
-     in the matching `::update()` method.
-   - `src/emc/nml_intf/emcops.cc` — initialize new fields in constructors.
-   - `src/emc/task/emctask.cc` — populate fields in `emcTaskUpdate()`.
-     Interpreter parameter data is available through the global `_is` pointer
-     to `struct setup` (use only after null-check).
-   - `src/emc/usr_intf/axis/extensions/emcmodule.cc` — expose new fields in the
-     Python `linuxcnc.stat` object if relevant.
+```sh
+git -C linuxcnc status --short
+git -C linuxcnc branch --show-current
+git -C linuxcnc log --oneline \
+  "$(cat linuxcnc-patches/base-revision)..HEAD"
+```
 
-3. **Keep parameter mappings accurate.** Common interpreter parameter blocks:
-   - G5x offsets + rotations: `#5221–#5390` (20 per system, 9 systems).
-     Offset fields occupy `base+0` through `base+8`, rotation is `base+9`.
-   - G28 home: `#5161–#5169`.
-   - G30 home: `#5181–#5189`.
+During iteration:
 
-4. **Update the native daemon mapping** in `native/server/src/` and the
-   protobuf contract when the new data crosses the transport boundary.
+- Edit the persistent checkout directly. An ordinary working-tree diff is
+  expected while exploring a change.
+- Reuse its existing run-in-place configuration and build outputs.
+- Reconfigure only when configuration inputs changed or the build tree is
+  demonstrably invalid.
+- Compile incrementally. Prefer the narrowest useful build target when one is
+  known; otherwise run the existing build without cleaning it.
+- Run focused tests that exercise the changed behavior, followed by nearby
+  subsystem tests when useful.
+- Build or test native/protobuf consumers only when the affected boundary
+  reaches them.
 
-5. **Coordinate downstream clients** after changing the protobuf boundary.
-   This repository owns only the canonical schema and native implementation.
+Do not refresh patch files, reconstruct the whole stack, clean-build LinuxCNC,
+or run the full regression suite after every edit. Repeat an expensive check
+only when the implementation or relevant inputs changed enough for it to
+provide new evidence.
 
-6. **Commit the LinuxCNC change** with the intended patch author and message,
-   then test the clean branch. Refresh every patch file from the linear commit
-   history:
+## Phase 2: patch finalization
+
+When the implementation is stable, turn the development state into the
+maintained commit stack and export it as part of the requested work. Source
+edits alone do not complete a patch fix:
+
+1. Ensure each logical patch is represented by one commit. Append a commit for
+   a new patch. To modify an existing patch, use interactive rebase to stop at
+   that commit, amend it, and rebase later patch commits.
+2. Keep the history linear and rooted at `base-revision`. Finish with a clean
+   LinuxCNC checkout; do not export an uncommitted tree.
+3. Run broader relevant LinuxCNC tests and any affected native contract or
+   integration tests. Progressively broaden coverage according to the risk of
+   the change.
+4. Export with the repository tooling:
 
    ```sh
    ./linuxcnc-patches/refresh.sh linuxcnc
    ```
 
-   `refresh.sh` preserves existing filenames by ordinal, creates a numbered
-   filename for each appended commit, normalizes mail headers with
-   `git format-patch`, and verifies a full replay before replacing files. It
-   normalizes the branch to the deterministic replayed commit IDs and retains
-   the pre-normalization tip under `linuxcnc-ctrl/backups/`.
+   `refresh.sh` preserves established filenames by ordinal, creates names for
+   appended commits, uses normalized `git format-patch` output, replays the
+   complete generated series before replacing files, compares the replayed
+   tree, and normalizes the managed branch to deterministic replayed commit
+   IDs. It retains the previous tip under `linuxcnc-ctrl/backups/` when needed
+   and refuses implicit patch removal.
+5. Update the patch inventory in `linuxcnc-patches/README.md` when adding,
+   removing, or materially changing a documented patch.
 
-7. **Document the patch** in `linuxcnc-patches/README.md` under the patch
-   inventory section.
+After refresh, verify the repository diff and run
+`./linuxcnc-patches/test-stack.sh` when patch tooling changed or when final
+stack-integrity evidence is needed. Do not manually edit generated patch
+content as a substitute for amending its commit and refreshing.
 
-## Applying the series
+## Phase 3: full validation and CI
 
-From a clean checkout at the pinned baseline:
+Use this phase for release-quality validation, baseline changes, CI, or when a
+change is stable enough that complete-stack evidence is worth its cost.
+
+1. Materialize the complete series from the pinned revision with
+   `apply.sh`. Use `--detach` for CI and image builds. If patch files changed
+   while a clean managed checkout contains the older stack, use `--rebuild`;
+   the script retains the prior tip under `linuxcnc-ctrl/backups/`.
+2. Confirm the replayed commit count and ordering match the patch series.
+3. Perform a clean build where isolation from stale artifacts matters.
+4. Run the full LinuxCNC regression suite and affected integration checks.
+5. Build the native daemon against that LinuxCNC tree and run its complete
+   contract/integration suite when ABI, NML, protobuf, or mapped status data is
+   involved.
+
+This is the final validation path, not the default response to a source edit.
+CI remains the authoritative clean-environment execution of this phase.
+
+## Tooling modes
+
+From a clean checkout at the pinned baseline, materialize a managed branch:
 
 ```sh
 ./linuxcnc-patches/apply.sh /path/to/linuxcnc
 ```
 
-The script checks the revision, validates the entire series in a temporary
-worktree, and then creates one commit per patch on
-`linuxcnc-ctrl/patch-stack`. Use `--detach` for CI or image builds. If patch
-files changed while an older managed branch is checked out, use `--rebuild`;
-the script saves the old tip under `linuxcnc-ctrl/backups/` before replacing
-it.
+Use `--detach` for a disposable CI/image result. `--adopt` is only for the
+one-time migration of a legacy uncommitted checkout whose complete tree
+exactly matches an independently materialized series. Never use adoption to
+absorb extra work.
 
-## Verification
+## Cross-boundary changes
 
-Never write tests that require hard real-time scheduling, a real-time kernel,
-or real-time privileges. All LinuxCNC tests must pass with the userspace
-simulator under ordinary POSIX scheduling. Using LinuxCNC's HAL and userspace
-real-time process infrastructure is acceptable; depending on deterministic
-real-time timing is not.
+When changing status or commands, trace the complete boundary as applicable:
 
-1. Materialize the complete series and verify the commit count equals the
-   patch count:
-   ```sh
-   ./linuxcnc-patches/apply.sh linuxcnc
-   git -C linuxcnc rev-list --count \
-     "$(cat linuxcnc-patches/base-revision)..HEAD"
-   ```
-2. Apply the same series to the system LinuxCNC source used for builds
-   (`/home/dariusz/Desktop/linuxcnc` in this workspace).
-3. Rebuild LinuxCNC so the shared libraries match the new `EMC_STAT` layout.
-4. Build the native daemon:
-   ```sh
-   cmake -S . -B build/native-grpc-linuxcnc \
-     -DLINUXCNC_ROOT=/path/to/linuxcnc \
-     -DLINUXCNC_GRPC_BUILD_WIRE=ON \
-     -DLINUXCNC_GRPC_BUILD_TESTS=ON \
-     -DLINUXCNC_GRPC_ENABLE_NML=ON
-   cmake --build build/native-grpc-linuxcnc --parallel
-   ```
-5. Run the native contract and integration tests with the LinuxCNC runtime
-   environment sourced:
-   ```sh
-   ctest --test-dir build/native-grpc-linuxcnc --output-on-failure
-   ```
+- `src/emc/nml_intf/emc_nml.hh`: NML/status structures.
+- `src/emc/nml_intf/emc.cc`: matching serialization updates.
+- `src/emc/nml_intf/emcops.cc`: initialization.
+- `src/emc/task/emctask.cc`: task status population. Interpreter parameter
+  data is available through `_is` only after a null check.
+- `src/emc/usr_intf/axis/extensions/emcmodule.cc`: Python status exposure.
+- `native/server/src/` and `proto/`: native mapping and wire contract.
 
-## Rebuilding the series after a baseline bump
+Coordinate downstream clients when the protobuf boundary changes. This
+repository owns the canonical schema and native implementation, not every
+consumer.
 
-If `base-revision` changes, the complete patch series must be rebased against
-the new baseline as a linear commit stack, then regenerated with `refresh.sh`.
-Do not change `base-revision` without replaying and testing the full series.
+Common interpreter parameter blocks are:
+
+- G5x offsets and rotations: `#5221–#5390`, 20 parameters per system across
+  nine systems. Offsets use `base+0` through `base+8`; rotation is `base+9`.
+- G28 home: `#5161–#5169`.
+- G30 home: `#5181–#5189`.
+
+## Baseline changes
+
+Changing `base-revision` requires rebasing the complete linear patch stack,
+refreshing it with `refresh.sh`, and running full validation. Never update the
+pinned revision without replaying and testing the entire series.

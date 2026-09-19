@@ -461,6 +461,16 @@ class MachineServiceImpl final : public MachineService::CallbackService,
         command.kind = NmlCommandKind::SetAdaptiveFeedEnable;
         command.boolean = request->set_adaptive_feed_enable().enable();
         break;
+      case ExecuteCommandRequest::kSetJointAvailability:
+        command.kind = NmlCommandKind::SetJointAvailability;
+        command.integer = request->set_joint_availability().joint_index();
+        command.boolean = request->set_joint_availability().available();
+        break;
+      case ExecuteCommandRequest::kSetSpindleAvailability:
+        command.kind = NmlCommandKind::SetSpindleAvailability;
+        command.integer = request->set_spindle_availability().spindle_index();
+        command.boolean = request->set_spindle_availability().available();
+        break;
       case ExecuteCommandRequest::kHomeJoint:
         command.kind = NmlCommandKind::HomeJoint;
         command.integer = request->home_joint().joint_index();
