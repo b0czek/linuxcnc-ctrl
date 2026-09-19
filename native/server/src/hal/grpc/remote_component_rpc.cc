@@ -85,8 +85,7 @@ struct RemoteComponentRpc::Impl {
 
     void shutdown() {
       detach_transport();
-      request_finish({::grpc::StatusCode::UNAVAILABLE,
-                      "server shutting down"});
+      request_finish({::grpc::StatusCode::UNAVAILABLE, "server shutting down"});
     }
 
     void tick(std::chrono::steady_clock::time_point now) {
@@ -164,43 +163,41 @@ struct RemoteComponentRpc::Impl {
       const auto proxy_id = proxy_id_;
       const auto generation = generation_;
       auto component_callbacks = callbacks();
-      if (!owner_.worker.submit(
-              [owner = &owner_, weak, proxy_id, generation,
-               callbacks = std::move(component_callbacks),
-               request = std::move(request)]() mutable {
-                auto result = owner->registry.consume(
-                    proxy_id, generation, std::move(callbacks), request);
-                const auto cleanup_id = result.proxy_id;
-                const auto cleanup_generation = result.generation;
-                bool delivered = false;
-                if (auto gate = weak.lock())
-                  delivered = gate->invoke(
-                      [result = std::move(result)](Reactor& reactor) mutable {
-                        if (!result.status.ok()) {
-                          reactor.detach_transport();
-                          reactor.request_finish(result.status);
-                          return;
-                        }
-                        if (!result.proxy_id.empty()) {
-                          reactor.proxy_id_ = std::move(result.proxy_id);
-                          reactor.generation_ = result.generation;
-                        }
-                        if (result.response) {
-                          reactor.offer_response(std::move(*result.response));
-                          if (result.close) {
-                            reactor.detach_requested_ = true;
-                            reactor.finish_after_responses_ = true;
-                          }
-                        } else if (result.close) {
-                          reactor.request_finish(::grpc::Status::OK);
-                        } else if (!reactor.write_finish_
-                                        .termination_requested()) {
-                          reactor.StartRead(&reactor.request_);
-                        }
-                      });
-                if (!delivered && !cleanup_id.empty())
-                  owner->registry.detach(cleanup_id, cleanup_generation);
-              })) {
+      if (!owner_.worker.submit([owner = &owner_, weak, proxy_id, generation,
+                                 callbacks = std::move(component_callbacks),
+                                 request = std::move(request)]() mutable {
+            auto result = owner->registry.consume(
+                proxy_id, generation, std::move(callbacks), request);
+            const auto cleanup_id = result.proxy_id;
+            const auto cleanup_generation = result.generation;
+            bool delivered = false;
+            if (auto gate = weak.lock())
+              delivered = gate->invoke(
+                  [result = std::move(result)](Reactor& reactor) mutable {
+                    if (!result.status.ok()) {
+                      reactor.detach_transport();
+                      reactor.request_finish(result.status);
+                      return;
+                    }
+                    if (!result.proxy_id.empty()) {
+                      reactor.proxy_id_ = std::move(result.proxy_id);
+                      reactor.generation_ = result.generation;
+                    }
+                    if (result.response) {
+                      reactor.offer_response(std::move(*result.response));
+                      if (result.close) {
+                        reactor.detach_requested_ = true;
+                        reactor.finish_after_responses_ = true;
+                      }
+                    } else if (result.close) {
+                      reactor.request_finish(::grpc::Status::OK);
+                    } else if (!reactor.write_finish_.termination_requested()) {
+                      reactor.StartRead(&reactor.request_);
+                    }
+                  });
+            if (!delivered && !cleanup_id.empty())
+              owner->registry.detach(cleanup_id, cleanup_generation);
+          })) {
         request_finish({::grpc::StatusCode::RESOURCE_EXHAUSTED,
                         "HAL runtime queue is full"});
       }
@@ -287,17 +284,18 @@ struct RemoteComponentRpc::Impl {
   }
 };
 
-RemoteComponentRpc::RemoteComponentRpc(
-    LinuxCncHalAdapter& adapter, BoundedExecutor& worker,
-    AdmissionCounter& component_admission, AdmissionCounter& stream_admission,
-    ActiveCallbackRegistry& callbacks, const DaemonConfig& config)
+RemoteComponentRpc::RemoteComponentRpc(LinuxCncHalAdapter& adapter,
+                                       BoundedExecutor& worker,
+                                       AdmissionCounter& component_admission,
+                                       AdmissionCounter& stream_admission,
+                                       ActiveCallbackRegistry& callbacks,
+                                       const DaemonConfig& config)
     : impl_(std::make_unique<Impl>(adapter, worker, component_admission,
-                                  stream_admission, callbacks, config)) {}
+                                   stream_admission, callbacks, config)) {}
 
 RemoteComponentRpc::~RemoteComponentRpc() = default;
 
-::grpc::ServerBidiReactor<HalComponentClientMessage,
-                          HalComponentServerMessage>*
+::grpc::ServerBidiReactor<HalComponentClientMessage, HalComponentServerMessage>*
 RemoteComponentRpc::run() {
   return new Impl::Reactor(*impl_);
 }

@@ -26,7 +26,8 @@ HalComponentServerMessage delta(
   return message;
 }
 
-HalComponentServerMessage acknowledgement(std::string, std::int32_t value) {
+HalComponentServerMessage acknowledgement(const std::string&,
+                                          std::int32_t value) {
   HalComponentServerMessage message;
   message.mutable_update_ack()->set_generation(7);
   message.mutable_update_ack()->set_sequence(static_cast<std::uint64_t>(value));

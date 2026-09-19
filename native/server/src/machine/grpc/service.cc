@@ -1201,8 +1201,7 @@ class MachineServiceImpl final : public MachineService::CallbackService,
       history_.push_back(latest_);
       published = sequence_;
     } else {
-      auto delta =
-          make_status_delta(latest_->encoded, encoded, sequence_ + 1);
+      auto delta = make_status_delta(latest_->encoded, encoded, sequence_ + 1);
       if (!delta) {
         lock.unlock();
         return;

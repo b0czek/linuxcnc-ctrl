@@ -25,11 +25,10 @@ constexpr char kOnlinePin[] = "online";
 
 ::grpc::Status hal_error(const HalAdapterError& error) {
   const auto code =
-      error.code() == -ENOENT  ? ::grpc::StatusCode::NOT_FOUND
-      : error.code() == -EBUSY ? ::grpc::StatusCode::RESOURCE_EXHAUSTED
-      : error.code() == -EINVAL
-          ? ::grpc::StatusCode::INVALID_ARGUMENT
-          : ::grpc::StatusCode::FAILED_PRECONDITION;
+      error.code() == -ENOENT   ? ::grpc::StatusCode::NOT_FOUND
+      : error.code() == -EBUSY  ? ::grpc::StatusCode::RESOURCE_EXHAUSTED
+      : error.code() == -EINVAL ? ::grpc::StatusCode::INVALID_ARGUMENT
+                                : ::grpc::StatusCode::FAILED_PRECONDITION;
   return {code, error.what()};
 }
 
@@ -66,7 +65,7 @@ bool typed_value(HalAdapterType type, const HalScalar& scalar,
   auto decoded = decode_hal_scalar(scalar);
   if (!decoded || decoded->index() != static_cast<std::size_t>(type))
     return false;
-  if (value) *value = std::move(*decoded);
+  if (value) *value = *decoded;
   return true;
 }
 
@@ -111,8 +110,8 @@ struct RemoteComponentRegistry::Impl {
   std::unordered_map<std::string, std::unique_ptr<Proxy>> proxies;
   std::size_t retained_item_count = 0;
 
-  Impl(LinuxCncHalAdapter& adapter,
-       AdmissionCounter& component_admission, const DaemonConfig& config)
+  Impl(LinuxCncHalAdapter& adapter, AdmissionCounter& component_admission,
+       const DaemonConfig& config)
       : adapter(adapter),
         component_admission(component_admission),
         max_items(config.max_remote_hal_items),
@@ -126,11 +125,10 @@ struct RemoteComponentRegistry::Impl {
     auto name = ref.name();
     const auto prefix = proxy.component->prefix() + ".";
     if (name.rfind(prefix, 0) == 0) name.erase(0, prefix.size());
-    const auto found =
-        std::find_if(proxy.items.begin(), proxy.items.end(),
-                     [&](const auto& item) {
-                       return item.suffix == name && item.kind == ref.kind();
-                     });
+    const auto found = std::find_if(
+        proxy.items.begin(), proxy.items.end(), [&](const auto& item) {
+          return item.suffix == name && item.kind == ref.kind();
+        });
     return found == proxy.items.end() ? nullptr : &*found;
   }
 
@@ -152,7 +150,7 @@ struct RemoteComponentRegistry::Impl {
       HalAdapterValue value;
       if (!typed_value(item->type, update.value(), &value))
         return invalid("component update value has the wrong exact type");
-      decoded->emplace_back(item, std::move(value));
+      decoded->emplace_back(item, value);
     }
     if (complete) {
       const auto expected = static_cast<std::size_t>(
@@ -252,7 +250,7 @@ struct RemoteComponentRegistry::Impl {
               "wrong type");
           return result;
         }
-        disconnect = std::move(value);
+        disconnect = value;
       }
       definitions.push_back({pin.name(), HAL_ITEM_KIND_PIN, *type,
                              static_cast<int>(pin.direction()), disconnect});
@@ -276,11 +274,11 @@ struct RemoteComponentRegistry::Impl {
               "component parameter disconnect value has the wrong type");
           return result;
         }
-        disconnect = std::move(value);
+        disconnect = value;
       }
-      definitions.push_back(
-          {parameter.name(), HAL_ITEM_KIND_PARAM, *type,
-           static_cast<int>(parameter.direction()), disconnect});
+      definitions.push_back({parameter.name(), HAL_ITEM_KIND_PARAM, *type,
+                             static_cast<int>(parameter.direction()),
+                             disconnect});
     }
 
     const std::size_t item_count = definitions.size() + 1;
@@ -306,11 +304,10 @@ struct RemoteComponentRegistry::Impl {
         if (definition.kind == HAL_ITEM_KIND_PIN) {
           const auto direction =
               static_cast<HalPinDirection>(definition.direction);
-          const auto adapter_direction = direction == HAL_PIN_DIRECTION_IN
-                                             ? HalAdapterPinDirection::In
-                                         : direction == HAL_PIN_DIRECTION_OUT
-                                             ? HalAdapterPinDirection::Out
-                                             : HalAdapterPinDirection::Io;
+          const auto adapter_direction =
+              direction == HAL_PIN_DIRECTION_IN    ? HalAdapterPinDirection::In
+              : direction == HAL_PIN_DIRECTION_OUT ? HalAdapterPinDirection::Out
+                                                   : HalAdapterPinDirection::Io;
           added = proxy->component->add_pin(definition.name, definition.type,
                                             adapter_direction);
           writable = direction != HAL_PIN_DIRECTION_IN;
@@ -328,18 +325,17 @@ struct RemoteComponentRegistry::Impl {
         }
         if (!added)
           throw HalAdapterError("component item was rejected", -EINVAL);
-        proxy->items.push_back(
-            {definition.name, definition.kind, definition.type,
-             prefix + "." + definition.name, writable, readable,
-             definition.disconnect, std::nullopt});
+        proxy->items.push_back({definition.name, definition.kind,
+                                definition.type, prefix + "." + definition.name,
+                                writable, readable, definition.disconnect,
+                                std::nullopt});
       }
       if (!proxy->component->add_pin(kOnlinePin, HalAdapterType::Bit,
                                      HalAdapterPinDirection::Out))
         throw HalAdapterError("managed online pin was rejected", -EINVAL);
       proxy->items.push_back({kOnlinePin, HAL_ITEM_KIND_PIN,
                               HalAdapterType::Bit, prefix + ".online", false,
-                              false,
-                              std::nullopt, std::nullopt});
+                              false, std::nullopt, std::nullopt});
       proxy->component->write(kOnlinePin, HalAdapterValue{false});
       proxy->component->set_ready();
       const auto requested =
@@ -418,14 +414,15 @@ struct RemoteComponentRegistry::Impl {
     return result;
   }
 
-  RemoteComponentResult consume(
-      const std::string& attached_id, std::uint64_t attached_generation,
-      RemoteComponentCallbacks callbacks,
-      const HalComponentClientMessage& request) {
+  RemoteComponentResult consume(const std::string& attached_id,
+                                std::uint64_t attached_generation,
+                                RemoteComponentCallbacks callbacks,
+                                const HalComponentClientMessage& request) {
     RemoteComponentResult result;
     const bool first = attached_id.empty();
     if (first && !request.has_create() && !request.has_attach()) {
-      result.status = invalid("first component message must be Create or Attach");
+      result.status =
+          invalid("first component message must be Create or Attach");
       return result;
     }
     if (!first && (request.has_create() || request.has_attach())) {
@@ -515,7 +512,8 @@ struct RemoteComponentRegistry::Impl {
       if (request.close().generation() != proxy.generation ||
           (request.close().mode() != HAL_COMPONENT_CLOSE_MODE_DETACH &&
            request.close().mode() != HAL_COMPONENT_CLOSE_MODE_DESTROY)) {
-        result.status = invalid("component close mode or generation is invalid");
+        result.status =
+            invalid("component close mode or generation is invalid");
         return result;
       }
       const auto mode = request.close().mode();

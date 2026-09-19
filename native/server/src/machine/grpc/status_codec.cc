@@ -1,7 +1,8 @@
 #include "machine/grpc/status_codec.hpp"
 
-#include <algorithm>
 #include <google/protobuf/util/message_differencer.h>
+
+#include <algorithm>
 
 namespace linuxcnc::server::detail {
 
@@ -279,7 +280,7 @@ bool copy_task_delta(const TaskStat& previous, const TaskStat& current,
   COPY_TASK_SCALAR(queued_mdi_commands)
 #undef COPY_TASK_SCALAR
 
-#define COPY_TASK_MESSAGE(name)                         \
+#define COPY_TASK_MESSAGE(name)                          \
   if (!message_equal(previous.name(), current.name())) { \
     *target->mutable_##name() = current.name();          \
     changed = true;                                      \
@@ -349,7 +350,7 @@ bool copy_trajectory_delta(const TrajectoryStat& previous,
   COPY_TRAJ_SCALAR(feed_hold_enabled)
 #undef COPY_TRAJ_SCALAR
 
-#define COPY_TRAJ_MESSAGE(name)                         \
+#define COPY_TRAJ_MESSAGE(name)                          \
   if (!message_equal(previous.name(), current.name())) { \
     *target->mutable_##name() = current.name();          \
     changed = true;                                      \
@@ -432,7 +433,8 @@ std::optional<LinuxCNCStatDelta> make_status_delta(
   for (int index = 0; index < axis_count; ++index) {
     if (index >= previous_motion.axis_size() ||
         index >= current_motion.axis_size() ||
-        !message_equal(previous_motion.axis(index), current_motion.axis(index))) {
+        !message_equal(previous_motion.axis(index),
+                       current_motion.axis(index))) {
       auto* item = motion->add_axis();
       item->set_index(static_cast<std::uint32_t>(index));
       if (index < current_motion.axis_size())
