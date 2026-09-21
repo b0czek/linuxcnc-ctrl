@@ -453,3 +453,20 @@ The commands use the configured availability policy and timeout for each
 resource. They acquire and release resources independently, so the program
 specifies the order of any multi-resource handoff. `REMAP` definitions can
 replace either code with custom behavior and argument rules.
+
+### 0019 — Concurrent individual joint homing
+
+Positive individual joint HOME requests start that joint's existing homing
+state machine without entering or modifying the global HOME ALL sequence
+controller. Additional positive joints may therefore begin homing while other
+individually requested joints remain active, and each publishes completion or
+failure independently. Aggregate homing activity remains asserted until the
+last joint finishes.
+
+HOME ALL ordering and negative synchronized `HOME_SEQUENCE` groups retain the
+global sequence controller. HOME ALL or a synchronized group cannot start
+while independent homing is active, and independent requests cannot be mixed
+into an active global sequence. Duplicate requests for an active joint are
+rejected. An abort or homing error affects only that joint during independent
+homing, while sequence-controlled operations preserve their group-wide abort
+behavior. No NML or protobuf interface changes are required.

@@ -1,0 +1,784 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dariusz Majnert <dariusz.majnert@gmail.com>
+Date: Sun, 20 Sep 2026 00:52:14 +0200
+Subject: [PATCH] motion: allow concurrent individual joint homing
+
+---
+ src/emc/motion/command.c            |  12 +-
+ src/emc/motion/control.c            |  19 +--
+ src/emc/motion/homing.c             | 109 +++++++-------
+ src/emc/motion/homing.h             |   1 +
+ src/hal/components/homecomp.comp    |  21 +--
+ tests/homing-concurrent/checkresult |   3 +
+ tests/homing-concurrent/homing.hal  |  14 ++
+ tests/homing-concurrent/test-ui.py  | 217 ++++++++++++++++++++++++++++
+ tests/homing-concurrent/test.ini    | 133 +++++++++++++++++
+ tests/homing-concurrent/test.sh     |   4 +
+ tests/homing-concurrent/tool.tbl    |   0
+ 11 files changed, 449 insertions(+), 84 deletions(-)
+ create mode 100755 tests/homing-concurrent/checkresult
+ create mode 100644 tests/homing-concurrent/homing.hal
+ create mode 100755 tests/homing-concurrent/test-ui.py
+ create mode 100644 tests/homing-concurrent/test.ini
+ create mode 100755 tests/homing-concurrent/test.sh
+ create mode 100644 tests/homing-concurrent/tool.tbl
+
+diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
+index a18acd066f..f4fd73b31b 100644
+--- a/src/emc/motion/command.c
++++ b/src/emc/motion/command.c
+@@ -1596,8 +1596,16 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+ 	                   joint_num);
+                 return;
+ 	    }
+-	    if ( get_homing_is_active() ) {
+-	        reportError("Homing not possible until current homing process is finished.\n");
++	    if (joint_num >= 0 && !get_home_is_idle(joint_num)) {
++	        reportError(_("joint %d is already homing"), joint_num);
++	        emcmotStatus->commandStatus = EMCMOT_COMMAND_INVALID_COMMAND;
++	        return;
++	    }
++	    if (get_home_sequence_is_active() ||
++	        (get_homing_is_active() &&
++	         (joint_num < 0 || get_home_sequence(joint_num) < 0))) {
++	        reportError("Homing sequence not possible until current homing process is finished.\n");
++	        emcmotStatus->commandStatus = EMCMOT_COMMAND_INVALID_COMMAND;
+ 	        return;
+ 	    }
+ 	    if (!GET_MOTION_ENABLE_FLAG()) {
+diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
+index 722c58545d..a3e7a3b776 100644
+--- a/src/emc/motion/control.c
++++ b/src/emc/motion/control.c
+@@ -2625,18 +2625,13 @@ static void update_status(void)
+ 	}
+ #endif
+ 	joint_status->flag = joint->flag;
+-	if(!(joint_status->homing && !get_homing(joint_num) && get_homing_is_active())) {
+-		// Prevent race condition.
+-		// (See also emc/motion/homing.c: base_write_homing_out_pins())
+-		// The homing status variable turns false before get_homing_is_active()
+-		// turns false. This means that a new homing command on a joint might
+-		// fail due to the homing state machine being active while all joints
+-		// already are in the 'not homing' state.
+-		// Solution:
+-		// Do not update the homing status when going from homing --> not homing
+-		// and the state machine is still active. The homing status deassertion
+-		// must be delayed until the state machine is done.
+-		joint_status->homing = get_homing(joint_num);
++	if (!(joint_status->homing && !get_homing(joint_num) &&
++	      get_home_sequence_is_active())) {
++	    // A sequence may need another servo cycle to observe that its joints
++	    // have finished.  Keep completion asserted until it can accept the
++	    // next HOME request.  Independent homes do not use the sequence
++	    // controller and publish their completion immediately.
++	    joint_status->homing = get_homing(joint_num);
+ 	}
+ 	joint_status->homed  = get_homed(joint_num);
+ 	joint_status->pos_cmd = joint->pos_cmd;
+diff --git a/src/emc/motion/homing.c b/src/emc/motion/homing.c
+index 13c5e6b513..2611ee8f0e 100644
+--- a/src/emc/motion/homing.c
++++ b/src/emc/motion/homing.c
+@@ -64,7 +64,6 @@ void homeMotFunctions(void(*pSetRotaryUnlock)(int,int)
+ typedef enum {
+   HOME_SEQUENCE_IDLE = 0,        // valid start state
+   HOME_SEQUENCE_START,           // valid start state
+-  HOME_SEQUENCE_DO_ONE_JOINT,    // valid start state
+   HOME_SEQUENCE_DO_ONE_SEQUENCE, // valid start state
+   HOME_SEQUENCE_START_JOINTS,    // internal usage
+   HOME_SEQUENCE_WAIT_JOINTS,     // internal usage
+@@ -260,6 +259,7 @@ static void do_home_all(void)
+ {
+     if (!get_homing_is_active() ) {
+         sequence_state = HOME_SEQUENCE_START;
++        homing_active = 1;
+     }
+ } // do_home_all()
+ 
+@@ -276,9 +276,11 @@ static void do_home_one_joint(int jno)
+             }
+         }
+     } else {
+-        sequence_state = HOME_SEQUENCE_DO_ONE_JOINT;
++        // Positive sequences only control HOME ALL ordering.  An individual
++        // request runs this joint's state machine independently.
++        H[jno].home_state = HOME_START;
+     }
+-    H[jno].home_state = HOME_START;
++    homing_active = 1;
+ } // do_home_one_joint()
+ 
+ static void set_all_unhomed(int unhome_method, motion_state_t motstate)
+@@ -340,19 +342,6 @@ static void do_homing_sequence(void)
+         /* nothing to do */
+         break;
+ 
+-    case HOME_SEQUENCE_DO_ONE_JOINT:
+-        // Expect one joint with home_state==HOME_START
+-        for (i=0; i < all_joints; i++) {
+-            if (H[i].home_state == HOME_START) {
+-               H[i].joint_in_sequence = 1;
+-               current_sequence = ABS(H[i].home_sequence);
+-            } else {
+-               H[i].joint_in_sequence = 0;
+-            }
+-        }
+-        sequence_is_set = 1;
+-        /* Fallthrough */
+-
+     case HOME_SEQUENCE_DO_ONE_SEQUENCE:
+         // Expect multiple joints with home_state==HOME_START
+         // specified by a negative sequence
+@@ -428,8 +417,6 @@ static void do_homing_sequence(void)
+                 return;
+             }
+         }
+-        /* tell the world we're on the job */
+-        homing_active = 1;
+         /* Fallthrough */
+ 
+     case HOME_SEQUENCE_START_JOINTS:
+@@ -450,8 +437,6 @@ static void do_homing_sequence(void)
+         } else {
+             /* no joints have this sequence number, we're done */
+             sequence_state = HOME_SEQUENCE_IDLE;
+-            /* tell the world */
+-            homing_active = 0;
+         }
+         break;
+ 
+@@ -482,7 +467,6 @@ static void do_homing_sequence(void)
+         rtapi_print_msg(RTAPI_MSG_ERR, _("unknown state '%d' during homing sequence"),
+                         sequence_state);
+         sequence_state = HOME_SEQUENCE_IDLE;
+-        homing_active = 0;
+         break;
+     }
+ } // do_homing_sequence()
+@@ -543,20 +527,12 @@ static void base_write_homing_out_pins(int njoints)
+     one_joint_home_data_t *addr;
+     for (jno = 0; jno < njoints; jno++) {
+         addr = &(joint_home_data->jhd[jno]);
+-        if(!(*(addr->homing) && !H[jno].homing && homing_active)) {
+-            // Prevent race condition.
+-            // (See also emc/motion/control.c: update_status())
+-            // The homing status variable turns false before homing_active state
+-            // turns false. This means that a new homing command on a joint might
+-            // fail due to the homing state machine being active while all joints
+-            // already are in the 'not homing' state.
+-            // Solution:
+-            // Do not update the homing status when going from homing --> not homing
+-            // and the state machine is still active. The homing status deassertion
+-            // must be delayed until the state machine is done.
+-            *(addr->homing) = H[jno].homing;
++        if (!(*(addr->homing) && !H[jno].homing &&
++              sequence_state != HOME_SEQUENCE_IDLE)) {
++            // Match the NML status completion gate: a sequence remains busy
++            // until it has observed that its joints finished.
++            *(addr->homing) = H[jno].homing;         // OUT
+         }
+-        *(addr->homing)       = H[jno].homing;       // OUT
+         *(addr->homed)        = H[jno].homed;        // OUT
+         *(addr->home_state)   = H[jno].home_state;   // OUT
+         *(addr->index_enable) = H[jno].index_enable; // IO
+@@ -573,9 +549,7 @@ static void base_do_home_joint(int jno) {
+ }
+ 
+ static void base_do_cancel_homing(int jno) {
+-    if (H[jno].homing) {
+-        H[jno].home_state = HOME_ABORT;
+-    }else if(H[jno].joint_in_sequence){
++    if (H[jno].home_state != HOME_IDLE || H[jno].joint_in_sequence) {
+         H[jno].home_state = HOME_ABORT;
+     }
+ }
+@@ -674,6 +648,10 @@ static bool base_get_homing_is_active(void) {
+     return homing_active;
+ }
+ 
++static bool base_get_home_sequence_is_active(void) {
++    return sequence_state != HOME_SEQUENCE_IDLE;
++}
++
+ static int base_get_home_sequence(int jno) {
+     return H[jno].home_sequence;
+ }
+@@ -1374,17 +1352,24 @@ static int base_1joint_state_machine(int joint_num)
+             H[joint_num].joint_in_sequence = 0;
+             break;
+ 
+-        case HOME_ABORT:
+-            for(int i = 0; i < all_joints; i++) {
++        case HOME_ABORT: {
++            int first_joint = joint_num;
++            int last_joint = joint_num + 1;
++            if (sequence_state != HOME_SEQUENCE_IDLE) {
++                first_joint = 0;
++                last_joint = all_joints;
++            }
++            for(int i = first_joint; i < last_joint; i++) {
+                 H[i].homing = 0;
+                 H[i].homed = 0;
+                 H[i].joint_in_sequence = 0;
+-                joint[i].free_tp.enable = 0;
++                joints[i].free_tp.enable = 0;
+                 H[i].home_state = HOME_IDLE;
+                 H[i].index_enable = 0;
+             }
+             immediate_state = 1;
+             break;
++        }
+ 
+         default:
+             /* should never get here */
+@@ -1399,31 +1384,43 @@ static int base_1joint_state_machine(int joint_num)
+     return homing_flag;
+ } // base_1joint_state_machine()
+ 
++static void update_homing_active(void)
++{
++    homing_active = sequence_state != HOME_SEQUENCE_IDLE;
++    for (int joint_num = 0; joint_num < all_joints; joint_num++) {
++        if (H[joint_num].home_state != HOME_IDLE) {
++            homing_active = 1;
++            break;
++        }
++    }
++}
++
++static bool finish_homing_cycle(bool beginning_allhomed)
++{
++    bool completed = !beginning_allhomed && get_allhomed();
++    if (completed) {
++        // control.c may switch to teleop immediately, so finish the sequence
++        // before reporting completion; no later sequence tick is guaranteed.
++        sequence_state = HOME_SEQUENCE_IDLE;
++    }
++    update_homing_active();
++    return completed;
++}
++
+ static bool base_do_homing(void)
+ {
+-    int  joint_num;
+-    int  homing_flag = 0;
++    int joint_num;
+     bool beginning_allhomed = get_allhomed();
+ 
+     do_homing_sequence();
+     /* loop thru joints, treat each one individually */
+     for (joint_num = 0; joint_num < all_joints; joint_num++) {
+-        if (!H[joint_num].joint_in_sequence)            { continue; }
++        if (H[joint_num].home_state == HOME_IDLE)       { continue; }
+         if (!GET_JOINT_ACTIVE_FLAG(&joints[joint_num])) { continue; }
+         // DEFAULT joint homing state machine:
+-        homing_flag += base_1joint_state_machine(joint_num);
++        base_1joint_state_machine(joint_num);
+     }
+-    if ( homing_flag > 0 ) { /* one or more joint is homing */
+-        homing_active = 1;
+-    } else { /* is a homing sequence in progress? */
+-        if (sequence_state == HOME_SEQUENCE_IDLE) {
+-            /* no, single joint only, we're done */
+-            homing_active = 0;
+-        }
+-    }
+-    // return 1 if homing completed this period
+-    if (!beginning_allhomed && get_allhomed()) {homing_active=0; return 1;}
+-    return 0;
++    return finish_homing_cycle(beginning_allhomed);
+ } // base_do_homing()
+ 
+ /***********************************************************************
+@@ -1461,6 +1458,7 @@ int  get_home_sequence(int jno)           { return base_get_home_sequence(jno);
+ bool get_homing(int jno)                  { return base_get_homing(jno); }
+ bool get_homing_at_index_search_wait(int jno) { return base_get_homing_at_index_search_wait(jno); }
+ bool get_homing_is_active(void)               { return base_get_homing_is_active(); }
++bool get_home_sequence_is_active(void)        { return base_get_home_sequence_is_active(); }
+ bool get_index_enable(int jno)                { return base_get_index_enable(jno); }
+ 
+ void read_homing_in_pins(int njoints)              { base_read_homing_in_pins(njoints); }
+@@ -1515,6 +1513,7 @@ EXPORT_SYMBOL(get_home_sequence);
+ EXPORT_SYMBOL(get_homing);
+ EXPORT_SYMBOL(get_homing_at_index_search_wait);
+ EXPORT_SYMBOL(get_homing_is_active);
++EXPORT_SYMBOL(get_home_sequence_is_active);
+ EXPORT_SYMBOL(get_index_enable);
+ EXPORT_SYMBOL(read_homing_in_pins);
+ EXPORT_SYMBOL(do_home_joint);
+diff --git a/src/emc/motion/homing.h b/src/emc/motion/homing.h
+index 0c4869de6d..409ca2547e 100644
+--- a/src/emc/motion/homing.h
++++ b/src/emc/motion/homing.h
+@@ -63,6 +63,7 @@ void set_unhomed(int jno,motion_state_t motstate);
+ // overall status:
+ bool get_allhomed(void);
+ bool get_homing_is_active(void);
++bool get_home_sequence_is_active(void);
+ 
+ // per-joint information:
+ int  get_home_sequence(int jno); //return s
+diff --git a/src/hal/components/homecomp.comp b/src/hal/components/homecomp.comp
+index 79c4691787..74025d5e07 100644
+--- a/src/hal/components/homecomp.comp
++++ b/src/hal/components/homecomp.comp
+@@ -258,34 +258,23 @@ void write_homing_out_pins(int njoints)
+ bool do_homing(void)
+ {
+     int  joint_num;
+-    int  homing_flag = 0;
+     bool beginning_allhomed = get_allhomed();
+ 
+     do_homing_sequence();
+     /* loop thru joints, treat each one individually */
+     for (joint_num = 0; joint_num < all_joints; joint_num++) {
+-        if (!H[joint_num].joint_in_sequence)            { continue; }
++        if (H[joint_num].home_state == HOME_IDLE)       { continue; }
+         if (!GET_JOINT_ACTIVE_FLAG(&joints[joint_num])) { continue; }
+ 
+         if (customH[joint_num].is_custom_homing) {
+             // CUSTOM joint homing state machine:
+-            homing_flag += custom_1joint_state_machine(joint_num);
++            custom_1joint_state_machine(joint_num);
+         } else {
+             // DEFAULT joint homing state machine:
+-            homing_flag += base_1joint_state_machine(joint_num);
++            base_1joint_state_machine(joint_num);
+         }
+     }
+-    if ( homing_flag > 0 ) { /* one or more joint is homing */
+-        homing_active = 1;
+-    } else { /* is a homing sequence in progress? */
+-        if (sequence_state == HOME_SEQUENCE_IDLE) {
+-            /* no, single joint only, we're done */
+-            homing_active = 0;
+-        }
+-    }
+-    // return 1 if homing completed this period
+-    if (!beginning_allhomed && get_allhomed()) {homing_active=0; return 1;}
+-    return 0;
++    return finish_homing_cycle(beginning_allhomed);
+ }
+ 
+ //===============================================================================
+@@ -299,6 +288,7 @@ int  get_home_sequence(int jno)           { return base_get_home_sequence(jno);
+ bool get_homing(int jno)                  { return base_get_homing(jno); }
+ bool get_homing_at_index_search_wait(int jno) { return base_get_homing_at_index_search_wait(jno); }
+ bool get_homing_is_active(void)               { return base_get_homing_is_active(); }
++bool get_home_sequence_is_active(void)        { return base_get_home_sequence_is_active(); }
+ bool get_index_enable(int jno)                { return base_get_index_enable(jno); }
+ 
+ void do_home_joint(int jno)                        { base_do_home_joint(jno); }
+@@ -417,6 +407,7 @@ int  get_home_sequence(int jno)                      { (void)jno; return 0;}
+ bool get_homing(int jno)                             { (void)jno; return 0;}
+ bool get_homing_at_index_search_wait(int jno)        { (void)jno; return 0;}
+ bool get_homing_is_active()                          {return 0;}
++bool get_home_sequence_is_active()                   {return 0;}
+ bool get_index_enable(int jno)                       { (void)jno; return 0;}
+ void read_homing_in_pins(int njoints)                { (void)njoints; return;}
+ void do_home_joint(int jno)                          { (void)jno; return;}
+diff --git a/tests/homing-concurrent/checkresult b/tests/homing-concurrent/checkresult
+new file mode 100755
+index 0000000000..9c14eb33b3
+--- /dev/null
++++ b/tests/homing-concurrent/checkresult
+@@ -0,0 +1,3 @@
++#!/bin/sh
++set -e
++grep -q "^concurrent homing regression passed$" "$1"
+diff --git a/tests/homing-concurrent/homing.hal b/tests/homing-concurrent/homing.hal
+new file mode 100644
+index 0000000000..2eeb379e69
+--- /dev/null
++++ b/tests/homing-concurrent/homing.hal
+@@ -0,0 +1,14 @@
++loadrt [KINS]KINEMATICS
++loadrt [EMCMOT]EMCMOT servo_period_nsec=[EMCMOT]SERVO_PERIOD num_joints=[KINS]JOINTS unlock_joints_mask=31
++
++addf motion-command-handler servo-thread
++addf motion-controller servo-thread
++
++net joint-0-position joint.0.motor-pos-cmd => joint.0.motor-pos-fb
++net joint-1-position joint.1.motor-pos-cmd => joint.1.motor-pos-fb
++net joint-2-position joint.2.motor-pos-cmd => joint.2.motor-pos-fb
++net joint-3-position joint.3.motor-pos-cmd => joint.3.motor-pos-fb
++net joint-4-position joint.4.motor-pos-cmd => joint.4.motor-pos-fb
++
++net estop-loop <= iocontrol.0.user-enable-out
++net estop-loop => iocontrol.0.emc-enable-in
+diff --git a/tests/homing-concurrent/test-ui.py b/tests/homing-concurrent/test-ui.py
+new file mode 100755
+index 0000000000..e0c65cab6d
+--- /dev/null
++++ b/tests/homing-concurrent/test-ui.py
+@@ -0,0 +1,217 @@
++#!/usr/bin/env python3
++
++import time
++
++import hal
++import linuxcnc
++
++
++HOME_IDLE = 0
++HOME_UNLOCK_WAIT = 3
++HOME_FINAL_MOVE_START = 20
++HOME_LOCK_WAIT = 23
++TIMEOUT = 5.0
++
++
++command = linuxcnc.command()
++status = linuxcnc.stat()
++errors = linuxcnc.error_channel()
++component = hal.component("homing-concurrent-test")
++for joint in range(5):
++    component.newpin("is-unlocked-%d" % joint, hal.HAL_BIT, hal.HAL_OUT)
++component.newpin("joint-0-home-switch", hal.HAL_BIT, hal.HAL_OUT)
++component.ready()
++for joint in range(5):
++    signal = "homing-concurrent-test-unlocked-%d" % joint
++    hal.new_sig(signal, hal.HAL_BIT)
++    hal.connect(
++        "homing-concurrent-test.is-unlocked-%d" % joint,
++        signal,
++    )
++    hal.connect("joint.%d.is-unlocked" % joint, signal)
++hal.new_sig("homing-concurrent-test-joint-0-home-switch", hal.HAL_BIT)
++hal.connect(
++    "homing-concurrent-test.joint-0-home-switch",
++    "homing-concurrent-test-joint-0-home-switch",
++)
++hal.connect("joint.0.home-sw-in", "homing-concurrent-test-joint-0-home-switch")
++
++
++def wait(predicate, description, timeout=TIMEOUT, poll_interval=0.01):
++    deadline = time.time() + timeout
++    while time.time() < deadline:
++        status.poll()
++        if predicate():
++            return
++        time.sleep(poll_interval)
++    raise AssertionError("timeout waiting for %s" % description)
++
++
++def state(joint):
++    return hal.get_value("joint.%d.home-state" % joint)
++
++
++def homing(joint):
++    return status.joint[joint]["homing"]
++
++
++def issue(function, expected=linuxcnc.RCS_DONE):
++    function()
++    result = command.wait_complete(TIMEOUT)
++    assert result == expected, "command returned %s, expected %s" % (result, expected)
++
++
++def wait_error(fragment):
++    deadline = time.time() + TIMEOUT
++    while time.time() < deadline:
++        error = errors.poll()
++        if error is not None and fragment in error[1]:
++            return
++        time.sleep(0.01)
++    raise AssertionError("missing error containing %r" % fragment)
++
++
++def wait_for_start(*joints):
++    wait(
++        lambda: all(state(joint) == HOME_UNLOCK_WAIT for joint in joints),
++        "joints %s to wait for unlock" % (joints,),
++    )
++
++
++def finish_joint(joint, wait_for_published_completion=True):
++    component["is-unlocked-%d" % joint] = True
++    wait(lambda: state(joint) == HOME_LOCK_WAIT, "joint %d lock wait" % joint)
++    component["is-unlocked-%d" % joint] = False
++    wait(
++        lambda: state(joint) == HOME_IDLE
++        and status.joint[joint]["homed"]
++        and (not wait_for_published_completion or not homing(joint)),
++        "joint %d homing completion" % joint,
++    )
++
++
++def finish_synchronized_group():
++    wait_for_start(3, 4)
++    component["is-unlocked-3"] = True
++    wait(lambda: state(3) == HOME_FINAL_MOVE_START, "joint 3 synchronized wait")
++    time.sleep(0.05)
++    assert state(3) == HOME_FINAL_MOVE_START
++    assert state(4) == HOME_UNLOCK_WAIT
++    component["is-unlocked-4"] = True
++    wait(
++        lambda: state(3) == HOME_LOCK_WAIT and state(4) == HOME_LOCK_WAIT,
++        "synchronized final moves",
++    )
++    component["is-unlocked-3"] = False
++    component["is-unlocked-4"] = False
++    wait(
++        lambda: all(
++            state(joint) == HOME_IDLE
++            and status.joint[joint]["homed"]
++            and not homing(joint)
++            for joint in (3, 4)
++        ),
++        "synchronized group completion",
++        poll_interval=0.0001,
++    )
++
++
++wait(
++    lambda: status.task_state == linuxcnc.STATE_ESTOP
++    and status.exec_state == linuxcnc.EXEC_DONE,
++    "LinuxCNC startup",
++    timeout=10.0,
++)
++issue(lambda: command.state(linuxcnc.STATE_ESTOP_RESET))
++issue(lambda: command.state(linuxcnc.STATE_ON))
++issue(lambda: command.mode(linuxcnc.MODE_MANUAL))
++issue(lambda: command.teleop_enable(0))
++wait(lambda: status.motion_mode == linuxcnc.TRAJ_MODE_FREE, "joint mode")
++
++# Positive individual requests run concurrently and a third can join later.
++issue(lambda: command.home(0))
++wait_for_start(0)
++issue(lambda: command.home(2))
++wait_for_start(0, 2)
++issue(lambda: command.home(1))
++wait_for_start(0, 1, 2)
++assert all(homing(joint) for joint in (0, 1, 2))
++
++# A duplicate request is rejected without restarting the joint.
++issue(lambda: command.home(0), linuxcnc.RCS_ERROR)
++wait_error("joint 0 is already homing")
++assert state(0) == HOME_UNLOCK_WAIT
++
++# One joint can finish while the others continue and publish independent state.
++finish_joint(2)
++assert not homing(2)
++assert homing(0) and homing(1)
++
++# Aborting one independent home does not cancel the other.
++issue(lambda: command.jog(linuxcnc.JOG_STOP, 1, 0))
++wait(
++    lambda: state(0) == HOME_IDLE and not homing(0) and not status.joint[0]["homed"],
++    "joint 0 abort",
++)
++assert state(1) == HOME_UNLOCK_WAIT and homing(1)
++
++# A per-joint homing error is also isolated from an independent home.
++component["joint-0-home-switch"] = True
++issue(lambda: command.home(0))
++wait(
++    lambda: state(0) == HOME_IDLE and not homing(0) and not status.joint[0]["homed"],
++    "joint 0 homing error cleanup",
++)
++wait_error("Cannot home while shared home switch is closed j=0")
++assert state(1) == HOME_UNLOCK_WAIT and homing(1)
++component["joint-0-home-switch"] = False
++
++# HOME ALL and synchronized groups cannot be mixed into independent homing.
++issue(lambda: command.home(-1), linuxcnc.RCS_ERROR)
++wait_error("Homing sequence not possible")
++issue(lambda: command.home(3), linuxcnc.RCS_ERROR)
++wait_error("Homing sequence not possible")
++
++finish_joint(1)
++issue(lambda: command.home(0))
++wait_for_start(0)
++finish_joint(0)
++
++# A synchronized group must not publish completion until its sequence
++# controller can accept the next request.  Leave joint 2 unhomed so completing
++# the group does not take finish_homing_cycle()'s all-homed fast path.
++issue(lambda: command.unhome(2))
++wait(lambda: not status.joint[2]["homed"], "joint 2 unhome")
++issue(lambda: command.home(3))
++finish_synchronized_group()
++issue(lambda: command.home(2))
++wait_for_start(2)
++finish_joint(2)
++
++# HOME ALL retains HOME_SEQUENCE ordering and starts the synchronized group last.
++issue(lambda: command.teleop_enable(0))
++wait(lambda: status.motion_mode == linuxcnc.TRAJ_MODE_FREE, "joint mode for HOME ALL")
++issue(lambda: command.home(-1))
++wait_for_start(0)
++assert all(state(joint) == HOME_IDLE for joint in (1, 2, 3, 4))
++finish_joint(0, wait_for_published_completion=False)
++wait_for_start(1)
++assert all(state(joint) == HOME_IDLE for joint in (2, 3, 4))
++finish_joint(1, wait_for_published_completion=False)
++wait_for_start(2)
++assert all(state(joint) == HOME_IDLE for joint in (3, 4))
++finish_joint(2, wait_for_published_completion=False)
++finish_synchronized_group()
++wait(lambda: all(status.homed[:5]), "HOME ALL completion")
++wait(
++    lambda: status.motion_mode == linuxcnc.TRAJ_MODE_TELEOP,
++    "automatic teleop transition",
++)
++x_before_jog = status.joint_position[0]
++issue(lambda: command.jog(linuxcnc.JOG_INCREMENT, 0, 0, 1, 0.1))
++wait(
++    lambda: abs(status.joint_position[0] - x_before_jog - 0.1) < 1e-6,
++    "axis jog after HOME ALL",
++)
++
++print("concurrent homing regression passed")
+diff --git a/tests/homing-concurrent/test.ini b/tests/homing-concurrent/test.ini
+new file mode 100644
+index 0000000000..49d5777ad0
+--- /dev/null
++++ b/tests/homing-concurrent/test.ini
+@@ -0,0 +1,133 @@
++[EMC]
++VERSION = 1.1
++MACHINE = homing-concurrent
++DEBUG = 0
++
++[DISPLAY]
++DISPLAY = ./test-ui.py
++
++[RS274NGC]
++PARAMETER_FILE = sim.var
++
++[EMCMOT]
++EMCMOT = motmod
++COMM_TIMEOUT = 4.0
++SERVO_PERIOD = 1000000
++
++[TASK]
++TASK = milltask
++CYCLE_TIME = 0.001
++
++[EMCIO]
++TOOL_TABLE = tool.tbl
++
++[HAL]
++HALFILE = homing.hal
++
++[TRAJ]
++AXES = 5
++COORDINATES = XYZUV
++LINEAR_UNITS = mm
++ANGULAR_UNITS = degree
++DEFAULT_LINEAR_VELOCITY = 10
++MAX_LINEAR_VELOCITY = 50
++
++[KINS]
++KINEMATICS = trivkins coordinates=XYZUV
++JOINTS = 5
++
++[AXIS_X]
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++MAX_VELOCITY = 50
++MAX_ACCELERATION = 500
++
++[AXIS_Y]
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++MAX_VELOCITY = 50
++MAX_ACCELERATION = 500
++
++[AXIS_Z]
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++MAX_VELOCITY = 50
++MAX_ACCELERATION = 500
++
++[AXIS_U]
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++MAX_VELOCITY = 50
++MAX_ACCELERATION = 500
++
++[AXIS_V]
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++MAX_VELOCITY = 50
++MAX_ACCELERATION = 500
++
++[JOINT_0]
++TYPE = LINEAR
++HOME = 0
++HOME_OFFSET = 0
++LOCKING_INDEXER = 1
++HOME_IS_SHARED = 1
++HOME_SEQUENCE = 1
++MAX_VELOCITY = 50
++MAX_ACCELERATION = 500
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++FERROR = 1
++MIN_FERROR = 0.25
++
++[JOINT_1]
++TYPE = LINEAR
++HOME = 0
++HOME_OFFSET = 0
++LOCKING_INDEXER = 1
++HOME_SEQUENCE = 2
++MAX_VELOCITY = 50
++MAX_ACCELERATION = 500
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++FERROR = 1
++MIN_FERROR = 0.25
++
++[JOINT_2]
++TYPE = LINEAR
++HOME = 0
++HOME_OFFSET = 0
++LOCKING_INDEXER = 1
++HOME_SEQUENCE = 3
++MAX_VELOCITY = 50
++MAX_ACCELERATION = 500
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++FERROR = 1
++MIN_FERROR = 0.25
++
++[JOINT_3]
++TYPE = LINEAR
++HOME = 0
++HOME_OFFSET = 0
++LOCKING_INDEXER = 1
++HOME_SEQUENCE = -4
++MAX_VELOCITY = 50
++MAX_ACCELERATION = 500
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++FERROR = 1
++MIN_FERROR = 0.25
++
++[JOINT_4]
++TYPE = LINEAR
++HOME = 0
++HOME_OFFSET = 0
++LOCKING_INDEXER = 1
++HOME_SEQUENCE = -4
++MAX_VELOCITY = 50
++MAX_ACCELERATION = 500
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++FERROR = 1
++MIN_FERROR = 0.25
+diff --git a/tests/homing-concurrent/test.sh b/tests/homing-concurrent/test.sh
+new file mode 100755
+index 0000000000..3e0b51699c
+--- /dev/null
++++ b/tests/homing-concurrent/test.sh
+@@ -0,0 +1,4 @@
++#!/bin/sh
++set -e
++rm -f sim.var sim.var.bak
++linuxcnc -r test.ini
+diff --git a/tests/homing-concurrent/tool.tbl b/tests/homing-concurrent/tool.tbl
+new file mode 100644
+index 0000000000..e69de29bb2
