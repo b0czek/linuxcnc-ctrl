@@ -1,0 +1,1268 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dariusz Majnert <dariusz.majnert@gmail.com>
+Date: Tue, 22 Sep 2026 11:50:09 +0200
+Subject: [PATCH] feat(motion): add native lathe power jogging
+
+---
+ docs/src/man/man1/halui.1.adoc       |  28 ++++
+ src/Makefile                         |   1 +
+ src/emc/motion-logger/Submakefile    |   1 +
+ src/emc/motion/axis.c                |  68 ++++++++-
+ src/emc/motion/axis.h                |   5 +-
+ src/emc/motion/command.c             |  27 ++++
+ src/emc/motion/control.c             |   9 +-
+ src/emc/motion/mot_priv.h            |   1 +
+ src/emc/motion/motion.c              |   8 ++
+ src/emc/motion/motion.h              |   3 +
+ src/emc/motion/power_jog.c           | 128 +++++++++++++++++
+ src/emc/motion/power_jog.h           |  37 +++++
+ src/emc/nml_intf/emc.cc              |  14 ++
+ src/emc/nml_intf/emc.hh              |   2 +
+ src/emc/nml_intf/emc_nml.hh          |  11 ++
+ src/emc/task/emctaskmain.cc          |   8 ++
+ src/emc/task/taskintf.cc             |  12 ++
+ src/emc/tp/sp_scurve.c               |  52 +++++++
+ src/emc/tp/sp_scurve.h               |   7 +
+ src/emc/usr_intf/halui.cc            |  14 ++
+ src/emc/usr_intf/halui_power_feed.hh |  69 ++++++++++
+ tests/power-jog/.gitignore           |   3 +
+ tests/power-jog/checkresult          |   4 +
+ tests/power-jog/core_sim.hal         |  11 ++
+ tests/power-jog/test-ui.py           | 199 +++++++++++++++++++++++++++
+ tests/power-jog/test.ini             |  69 ++++++++++
+ tests/power-jog/test.sh              |   7 +
+ tests/power-jog/tool.tbl             |   1 +
+ 28 files changed, 795 insertions(+), 4 deletions(-)
+ create mode 100644 src/emc/motion/power_jog.c
+ create mode 100644 src/emc/motion/power_jog.h
+ create mode 100644 src/emc/usr_intf/halui_power_feed.hh
+ create mode 100644 tests/power-jog/.gitignore
+ create mode 100755 tests/power-jog/checkresult
+ create mode 100644 tests/power-jog/core_sim.hal
+ create mode 100755 tests/power-jog/test-ui.py
+ create mode 100644 tests/power-jog/test.ini
+ create mode 100755 tests/power-jog/test.sh
+ create mode 100644 tests/power-jog/tool.tbl
+
+diff --git a/docs/src/man/man1/halui.1.adoc b/docs/src/man/man1/halui.1.adoc
+index c172f579cd..003290e96a 100644
+--- a/docs/src/man/man1/halui.1.adoc
++++ b/docs/src/man/man1/halui.1.adoc
+@@ -371,6 +371,34 @@ _L_ = axis letter (xyzabcuvw)
+ *halui.axis.selected.plus* bit in::
+   pin for jogging the selected axis bit in in positive direction at the halui.axis.jog-speed velocity
+ 
++=== Power Feed Jogging
++
++These inputs exist only with '[DISPLAY] LATHE = true' and configured X/Z axes.
++Power-feed directions use separate inputs from ordinary axis jogging.
++
++*halui.power-feed.x.plus/minus* bit in (default: *FALSE*)::
++  Request spindle-dependent power feed in the positive/negative X direction.
++*halui.power-feed.z.plus/minus* bit in (default: *FALSE*)::
++  Request spindle-dependent power feed in the positive/negative Z direction.
++*halui.power-feed.per-rev* float in (default: *0*)::
++  Positive physical machine units/revolution, captured on the first press until
++  all X/Z buttons release. Interpreter F and G95 are not consulted.
++*halui.power-feed.spindle* u32 in (default: *0*)::
++  Configured spindle index. Speed uses the absolute speed-in feedback in
++  revolutions/second; feed override remains live and is applied once.
++*halui.power-feed.taper-slope* float in (default: *0*)::
++  Finite physical delta-X/delta-Z in [-1,1]. Zero disables taper. For slope k,
++  Z+ moves along (k,1)
++  and X+ along (1,-k), normalized to preserve the requested path feedrate.
++  Simultaneous X/Z inputs combine before normalization. Diameter mode has no
++  effect on this physical slope.
++
++The coupled axes share one acceleration/limit-constrained path. Direction
++changes decelerate before changing that path. A stop of either axis stops both.
++Spindle or taper changes while held require neutral before rearming.
++Power feed requires enabled, homed manual teleop motion and a commanded-on,
++available spindle. It is speed-based feed, not synchronized threading.
++
+ === Flood coolant
+ 
+ *halui.flood.is-on* bit out::
+diff --git a/src/Makefile b/src/Makefile
+index fa06ec5664..30d00fc7c3 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -1275,6 +1275,7 @@ obj-m += 5axiskins.o
+ obj-$(CONFIG_MOTMOD) += motmod.o
+ motmod-objs := emc/kinematics/cubic.o
+ motmod-objs += emc/motion/axis.o
++motmod-objs += emc/motion/power_jog.o
+ motmod-objs += emc/motion/motion.o
+ motmod-objs += emc/motion/command.o
+ motmod-objs += emc/motion/control.o
+diff --git a/src/emc/motion-logger/Submakefile b/src/emc/motion-logger/Submakefile
+index 7b572d7c32..acdd1b532c 100644
+--- a/src/emc/motion-logger/Submakefile
++++ b/src/emc/motion-logger/Submakefile
+@@ -3,6 +3,7 @@ TARGETS += ../bin/motion-logger
+ MOTION_LOGGER_SRCS := \
+ 	$(addprefix emc/motion-logger/, motion-logger.c) \
+ 	emc/motion/axis.c \
++	emc/motion/power_jog.c \
+ 	emc/motion/simple_tp.c \
+ 	emc/tp/sp_scurve.c \
+ 	emc/tp/ruckig_wrapper.c
+diff --git a/src/emc/motion/axis.c b/src/emc/motion/axis.c
+index 1be690a25c..279a577e96 100644
+--- a/src/emc/motion/axis.c
++++ b/src/emc/motion/axis.c
+@@ -5,6 +5,7 @@
+ 
+ #include "axis.h"
+ #include "simple_tp.h"
++#include "power_jog.h"
+ 
+ typedef struct {
+     double pos_cmd;                 /* commanded axis position */
+@@ -57,7 +58,26 @@ typedef struct {
+ 
+ static emcmot_axis_t axis_array[EMCMOT_MAX_AXIS];
+ static axis_hal_data_t *hal_data = NULL;
++static power_jog_t power_jog;
+ 
++int axis_power_jog_spindle(void)
++{
++    return power_jog_reserved(&power_jog) ? power_jog.spindle : -1;
++}
++
++int axis_power_jog_request(int x, int z, double feed, int spindle, double slope)
++{
++    if ((x || z) && power_jog.phase == POWER_JOG_IDLE) {
++        for (int n = 0; n <= 2; n += 2) {
++            emcmot_axis_t *axis = &axis_array[n];
++            if (axis->teleop_tp.active || axis->kb_ajog_active ||
++                axis->wheel_ajog_active || axis->locking_joint >= 0 ||
++                axis->ext_offset_tp.active || axis->max_pos_limit <= axis->min_pos_limit)
++                return -1;
++        }
++    }
++    return power_jog_request(&power_jog, x, z, feed, spindle, slope);
++}
+ 
+ // Mark strings for translation, but defer translation to userspace
+ #define _(s) (s)
+@@ -268,6 +288,7 @@ double axis_get_ext_offset_curr_pos(int axis_num)
+ 
+ void axis_jog_cont(int axis_num, double vel, long servo_period)
+ {
++    if (power_jog_reserved(&power_jog) && (axis_num == 0 || axis_num == 2)) return;
+     (void)servo_period;
+     emcmot_axis_t *axis = &axis_array[axis_num];
+ 
+@@ -285,6 +306,7 @@ void axis_jog_cont(int axis_num, double vel, long servo_period)
+ 
+ void axis_jog_incr(int axis_num, double offset, double vel, long servo_period)
+ {
++    if (power_jog_reserved(&power_jog) && (axis_num == 0 || axis_num == 2)) return;
+     (void)servo_period;
+     emcmot_axis_t *axis = &axis_array[axis_num];
+     double tmp1;
+@@ -307,6 +329,7 @@ void axis_jog_incr(int axis_num, double offset, double vel, long servo_period)
+ 
+ void axis_jog_abs(int axis_num, double offset, double vel)
+ {
++    if (power_jog_reserved(&power_jog) && (axis_num == 0 || axis_num == 2)) return;
+     emcmot_axis_t *axis = &axis_array[axis_num];
+     double tmp1;
+ 
+@@ -328,6 +351,16 @@ void axis_jog_abs(int axis_num, double offset, double vel)
+ 
+ bool axis_jog_abort(int axis_num, bool immediate)
+ {
++    if (power_jog_reserved(&power_jog) && (axis_num == 0 || axis_num == 2)) {
++        power_jog_abort(&power_jog, immediate);
++        if (!immediate) return 1;
++        for (int n = 0; n <= 2; n += 2) {
++            emcmot_axis_t *member = &axis_array[n];
++            simple_tp_set_pos(&member->teleop_tp, member->teleop_tp.curr_pos);
++            member->kb_ajog_active = member->wheel_ajog_active = 0;
++        }
++        return 1;
++    }
+     bool aborted = 0;
+     emcmot_axis_t *axis = &axis_array[axis_num];
+     if (axis->teleop_tp.enable) {
+@@ -354,6 +387,7 @@ bool axis_jog_abort_all(bool immediate)
+ 
+ bool axis_jog_is_active(void)
+ {
++    if (power_jog_reserved(&power_jog)) return 1;
+     int n;
+     emcmot_axis_t *axis;
+     for (n = 0; n < EMCMOT_MAX_AXIS; n++) {
+@@ -391,6 +425,7 @@ void axis_handle_jogwheels(bool motion_teleop_flag, bool motion_enable_flag, boo
+         delta = new_ajog_counts - axis->old_ajog_counts;
+         axis->old_ajog_counts = new_ajog_counts;
+         if ( first_pass ) { continue; }
++        if (power_jog_reserved(&power_jog) && (axis_num == 0 || axis_num == 2)) continue;
+         if ( delta == 0 ) {
+             //just update counts
+             continue;
+@@ -438,6 +473,7 @@ void axis_handle_jogwheels(bool motion_teleop_flag, bool motion_enable_flag, boo
+ 
+ void axis_sync_teleop_tp_to_carte_pos(int extfactor, double *pcmd_p[])
+ {
++    power_jog_abort(&power_jog, 1);
+     int n;
+     // expect extfactor =  -1 || 0 || +1
+     //
+@@ -672,11 +708,38 @@ static int update_teleop_with_check(int axis_num, simple_tp_t *the_tp, double se
+     return 0;
+ }
+ 
+-int axis_calc_motion(double servo_period)
++int axis_calc_motion(double servo_period, double power_speed,
++                     double power_override, int power_permitted)
+ {
+     int axis_num;
+     int violated_teleop_limit = 0;
+     emcmot_axis_t *axis;
++    int power_reserved = power_jog_reserved(&power_jog);
++    if (power_reserved) {
++        if (!power_permitted || !isfinite(power_speed) ||
++            !isfinite(power_override))
++            power_jog_abort(&power_jog, 0);
++        power_jog_axis_t axes[2];
++        for (int i = 0; i < 2; ++i) {
++            axis = &axis_array[2*i];
++            axes[i] = (power_jog_axis_t){axis->teleop_tp.curr_pos,
++                axis->min_pos_limit - axis->ext_offset_tp.curr_pos,
++                axis->max_pos_limit - axis->ext_offset_tp.curr_pos,
++                axis->vel_limit, axis->acc_limit, axis->jerk_limit};
++            if (axis->ext_offset_tp.active) power_jog_abort(&power_jog, 0);
++        }
++        power_jog_update(&power_jog, axes, power_speed, power_override,
++                         servo_period);
++        for (int i = 0; i < 2; ++i) {
++            axis = &axis_array[2*i];
++            simple_tp_set_pos(&axis->teleop_tp, axes[i].position);
++            axis->teleop_tp.max_vel = fabs(power_jog.direction[i]) * power_jog.path.max_vel;
++            axis->teleop_tp.curr_vel = power_jog.direction[i] * power_jog.path.curr_vel;
++            axis->teleop_tp.curr_acc = power_jog.direction[i] * power_jog.path.curr_acc;
++            axis->teleop_tp.active = axis->teleop_tp.enable = power_jog_reserved(&power_jog);
++            axis->kb_ajog_active = power_jog_reserved(&power_jog);
++        }
++    }
+ 
+     for (axis_num = 0; axis_num < EMCMOT_MAX_AXIS; axis_num++) {
+         axis = &axis_array[axis_num];
+@@ -685,7 +748,8 @@ int axis_calc_motion(double servo_period)
+         if (axis->teleop_tp.max_vel > axis->vel_limit) {
+             axis->teleop_tp.max_vel = axis->vel_limit;
+         }
+-        if (update_teleop_with_check(axis_num, &(axis->teleop_tp), servo_period)) {
++        if (!(power_reserved && (axis_num == 0 || axis_num == 2)) &&
++            update_teleop_with_check(axis_num, &(axis->teleop_tp), servo_period)) {
+             violated_teleop_limit = 1;
+         }
+ 
+diff --git a/src/emc/motion/axis.h b/src/emc/motion/axis.h
+index 5d61f0b13f..f1ce1d7e90 100644
+--- a/src/emc/motion/axis.h
++++ b/src/emc/motion/axis.h
+@@ -18,6 +18,8 @@ bool axis_plan_external_offsets(double servo_period, bool motion_enable_flag, bo
+ void axis_check_constraints(double pos[], int failing_axes[]);
+ 
+ void axis_jog_cont(int axis_num, double vel, long servo_period);
++int axis_power_jog_request(int x, int z, double feed, int spindle, double slope);
++int axis_power_jog_spindle(void);
+ void axis_jog_incr(int axis_num, double offset, double vel, long servo_period);
+ void axis_jog_abs(int axis_num, double offset, double vel);
+ bool axis_jog_abort_all(bool immediate);
+@@ -51,7 +53,8 @@ void axis_apply_ext_offsets_to_carte_pos(int extfactor, double *pcmd_p[]);
+ 
+ int axis_update_coord_with_bound(double *pcmd_p[], double servo_period);
+ 
+-int axis_calc_motion(double servo_period);
++int axis_calc_motion(double servo_period, double power_speed,
++                     double power_override, int power_permitted);
+ 
+ 
+ #ifdef __cplusplus
+diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
+index f4fd73b31b..70b6be49a1 100644
+--- a/src/emc/motion/command.c
++++ b/src/emc/motion/command.c
+@@ -112,6 +112,17 @@ STATIC int spindle_range_is_available(int first, int last)
+     return 1;
+ }
+ 
++int power_jog_permitted(int spindle)
++{
++    return GET_MOTION_ENABLE_FLAG() && GET_MOTION_TELEOP_FLAG() &&
++        !GET_MOTION_ERROR_FLAG() && get_allhomed() && !get_homing_is_active() &&
++        !availability_transition_busy() && !*emcmot_hal_data->jog_inhibit &&
++        !*emcmot_hal_data->jog_stop && !*emcmot_hal_data->jog_stop_immediate &&
++        spindle >= 0 && spindle < emcmotConfig->numSpindles &&
++        spindle_range_is_available(spindle, spindle) &&
++        emcmotStatus->spindle_status[spindle].direction;
++}
++
+ /* limits_ok() returns 1 if none of the hard limits are set,
+    0 if any are set. Called on a linear and circular move. */
+ STATIC int limits_ok(void)
+@@ -872,6 +883,22 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+ 	    joint->min_ferror = emcmotCommand->minFerror;
+ 	    break;
+ 
++        case EMCMOT_JOG_POWER: {
++            int x = emcmotCommand->power_x_direction;
++            int z = emcmotCommand->power_z_direction;
++            int spindle = emcmotCommand->spindle;
++            if (!x && !z) {
++                axis_power_jog_request(0, 0, 0, 0, 0);
++                break;
++            }
++            if (!power_jog_permitted(spindle) ||
++                axis_power_jog_request(x, z, emcmotCommand->power_feed_per_rev,
++                    spindle, emcmotCommand->power_taper_slope)) {
++                reportError(_("Cannot start power jog: invalid request or machine state"));
++                emcmotStatus->commandStatus = EMCMOT_COMMAND_INVALID_COMMAND;
++            }
++            break;
++        }
+ 	case EMCMOT_JOG_CONT:
+ 	    /* do a continuous jog, implemented as an incremental jog to the
+ 	       limit.  When the user lets go of the button an abort will
+diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
+index a3e7a3b776..49983d19b5 100644
+--- a/src/emc/motion/control.c
++++ b/src/emc/motion/control.c
+@@ -1900,7 +1900,14 @@ static void get_pos_cmds(long period)
+ 	break;
+ 
+     case EMCMOT_MOTION_TELEOP:
+-        ext_offset_teleop_limit = axis_calc_motion(servo_period);
++        {
++            int spindle = axis_power_jog_spindle();
++            double speed = spindle >= 0 ?
++                emcmotStatus->spindle_status[spindle].spindleSpeedIn : 0;
++            ext_offset_teleop_limit = axis_calc_motion(servo_period, speed,
++                emcmotStatus->net_feed_scale,
++                spindle >= 0 && power_jog_permitted(spindle));
++        }
+         if (!ext_offset_teleop_limit) {
+             ext_offset_coord_limit = 0; //in case was set in prior coord motion
+         }
+diff --git a/src/emc/motion/mot_priv.h b/src/emc/motion/mot_priv.h
+index 631c146ee2..3191b219e1 100644
+--- a/src/emc/motion/mot_priv.h
++++ b/src/emc/motion/mot_priv.h
+@@ -376,5 +376,6 @@ void availability_release_joint(int n, availability_fault_t fault);
+ void availability_release_spindle(int n, availability_fault_t fault);
+ void availability_cancel(int all);
+ int availability_transition_busy(void);
++int power_jog_permitted(int spindle);
+ 
+ #endif /* MOT_PRIV_H */
+diff --git a/src/emc/motion/motion.c b/src/emc/motion/motion.c
+index 87f1a06205..59f3338c66 100644
+--- a/src/emc/motion/motion.c
++++ b/src/emc/motion/motion.c
+@@ -22,6 +22,7 @@
+ #include "mot_priv.h"
+ #include "homing.h"
+ #include "axis.h"
++#include "../tp/sp_scurve.h"
+ 
+ // Mark strings for translation, but defer translation to userspace
+ #define _(s) (s)
+@@ -407,6 +408,11 @@ int rtapi_app_main(void)
+ 	return -1;
+     }
+ 
++    if (sp_scurve_jog_init(emcmotConfig->servoCycleTime)) {
++        hal_exit(mot_comp_id);
++        return -1;
++    }
++
+     rtapi_print_msg(RTAPI_MSG_INFO, "MOTION: rtapi_app_main() complete\n");
+ 
+     hal_ready(mot_comp_id);
+@@ -429,6 +435,8 @@ void rtapi_app_exit(void)
+ 	rtapi_print_msg(RTAPI_MSG_ERR,
+ 	    _("MOTION: hal_stop_threads() failed, returned %d\n"), retval);
+     }
++    sp_scurve_jog_cleanup();
++    sp_scurve_cleanup();
+     /* free shared memory */
+     retval = rtapi_shmem_delete(emc_shmem_id, mot_comp_id);
+     if (retval < 0) {
+diff --git a/src/emc/motion/motion.h b/src/emc/motion/motion.h
+index fd934976e2..4095c700db 100644
+--- a/src/emc/motion/motion.h
++++ b/src/emc/motion/motion.h
+@@ -187,6 +187,7 @@ extern "C" {
+         EMCMOT_SET_SPINDLE_AVAILABILITY_CONFIG,
+         EMCMOT_SET_JOINT_AVAILABILITY,
+         EMCMOT_SET_SPINDLE_AVAILABILITY,
++        EMCMOT_JOG_POWER,
+ 
+     } cmd_code_t;
+ 
+@@ -240,6 +241,8 @@ extern "C" {
+ 	int joint;		/* which joint index to use for below */
+ 	int axis;		/* which axis index to use for below */
+ 	int spindle; 	/* which spindle to use */
++        int power_x_direction, power_z_direction;
++        double power_feed_per_rev, power_taper_slope;
+ 	double scale;		/* velocity scale or spindle_speed scale arg */
+ 	double offset;		/* input, output, or home offset arg */
+ 	double home;		/* joint home position */
+diff --git a/src/emc/motion/power_jog.c b/src/emc/motion/power_jog.c
+new file mode 100644
+index 0000000000..2303950aac
+--- /dev/null
++++ b/src/emc/motion/power_jog.c
+@@ -0,0 +1,128 @@
++#include <float.h>
++#include <rtapi_math.h>
++#include "power_jog.h"
++#include "mot_priv.h"
++#include "../tp/sp_scurve.h"
++
++void power_jog_abort(power_jog_t *jog, int immediate)
++{
++    if (!power_jog_reserved(jog) ||
++        (jog->phase == POWER_JOG_STOPPING && !immediate)) return;
++    if (jog->phase == POWER_JOG_HELD) jog->neutral_seen = 0;
++    jog->phase = immediate ? POWER_JOG_WAIT_RELEASE : POWER_JOG_STOPPING;
++    if (immediate && jog->neutral_seen) jog->phase = POWER_JOG_IDLE;
++    jog->requested[0] = jog->requested[1] = 0;
++    jog->path.enable = 0;
++    if (immediate) {
++        simple_tp_set_pos(&jog->path, jog->path.curr_pos);
++    }
++}
++
++int power_jog_request(power_jog_t *jog, int x, int z, double feed,
++                      int spindle, double slope)
++{
++    if (!x && !z) {
++        if (jog->phase == POWER_JOG_HELD) power_jog_abort(jog, 0);
++        jog->neutral_seen = 1;
++        if (jog->phase == POWER_JOG_WAIT_RELEASE) jog->phase = POWER_JOG_IDLE;
++        return 0;
++    }
++    if (x < -1 || x > 1 || z < -1 || z > 1 ||
++        !isfinite(slope) || fabs(slope) > 1)
++        return -1;
++    /* A released/cancelled jog must finish stopping before a new press. */
++    if (jog->phase != POWER_JOG_IDLE &&
++        (jog->phase != POWER_JOG_HELD || spindle != jog->spindle ||
++         slope != jog->slope))
++        return -1;
++    if (jog->phase == POWER_JOG_IDLE) {
++        if (!isfinite(feed) || feed <= 0) return -1;
++        jog->feed = feed;
++        jog->slope = slope;
++        jog->spindle = spindle;
++        jog->running[0] = jog->running[1] = 0;
++        simple_tp_set_pos(&jog->path, 0);
++        jog->phase = POWER_JOG_HELD;
++        jog->neutral_seen = 0;
++    }
++    jog->requested[0] = x;
++    jog->requested[1] = z;
++    return 0;
++}
++
++void power_jog_update(power_jog_t *jog, power_jog_axis_t axes[2],
++                     double speed, double override, double period)
++{
++    if (!power_jog_reserved(jog)) return;
++    /* A release can arrive before the first servo update establishes a path. */
++    if (jog->phase == POWER_JOG_STOPPING &&
++        !jog->running[0] && !jog->running[1]) {
++        simple_tp_set_pos(&jog->path, jog->path.curr_pos);
++        jog->phase = jog->neutral_seen ? POWER_JOG_IDLE : POWER_JOG_WAIT_RELEASE;
++        return;
++    }
++    int changed = jog->requested[0] != jog->running[0] ||
++                  jog->requested[1] != jog->running[1];
++    if (changed && jog->path.active) jog->path.enable = 0;
++    if ((changed || !jog->path.enable) && !jog->path.active &&
++        jog->phase == POWER_JOG_HELD) {
++        double x = jog->requested[0], z = jog->requested[1];
++        double norm = sqrt((x*x + z*z) * (1 + jog->slope*jog->slope));
++        jog->direction[0] = (x + jog->slope*z) / norm;
++        jog->direction[1] = (z - jog->slope*x) / norm;
++        for (int i = 0; i < 2; ++i) {
++            jog->origin[i] = axes[i].position;
++            jog->running[i] = jog->requested[i];
++        }
++        simple_tp_set_pos(&jog->path, 0);
++        jog->path.enable = 1;
++    }
++
++    double velocity = DBL_MAX, acceleration = DBL_MAX, jerk = DBL_MAX;
++    double target = DBL_MAX;
++    for (int i = 0; i < 2; ++i) {
++        double d = jog->direction[i], magnitude = fabs(d);
++        if (magnitude < 1e-12) continue;
++        velocity = fmin(velocity, axes[i].velocity / magnitude);
++        acceleration = fmin(acceleration, axes[i].acceleration / magnitude);
++        jerk = fmin(jerk, axes[i].jerk / magnitude);
++        double limit = d > 0 ? axes[i].maximum : axes[i].minimum;
++        target = fmin(target, (limit - jog->origin[i]) / d);
++    }
++    if (!(velocity > 0) || !(acceleration > 0) || target == DBL_MAX) {
++        power_jog_abort(jog, 1);
++        return;
++    }
++    double requested_speed = jog->feed * fabs(speed) * fmax(0, override);
++    if (!isfinite(requested_speed)) {
++        power_jog_abort(jog, 0);
++        requested_speed = 0;
++    }
++    jog->path.max_vel = fmin(velocity, requested_speed);
++    jog->path.max_acc = acceleration;
++    jog->path.max_jerk = jerk;
++    if (jog->path.enable) jog->path.pos_cmd = fmax(0, target);
++    double previous = jog->path.curr_pos;
++    if (GET_TRAJ_PLANNER_TYPE() && jerk > 0.0001) {
++        if (sp_scurve_jog_step(&jog->path, period)) {
++            power_jog_abort(jog, 1);
++            rtapi_print_msg(RTAPI_MSG_ERR, "Power jog: unable to plan scalar path\n");
++        }
++    } else {
++        simple_tp_update_normal(&jog->path, period);
++    }
++    /* An edited limit must never make the planner reverse the held request. */
++    if (jog->path.curr_pos > target || jog->path.curr_pos < previous) {
++        jog->path.curr_pos = fmax(previous, fmin(jog->path.curr_pos, target));
++        power_jog_abort(jog, 1);
++    }
++    for (int i = 0; i < 2; ++i)
++        axes[i].position = jog->origin[i] + jog->direction[i]*jog->path.curr_pos;
++    if (!jog->path.active && (jog->phase == POWER_JOG_STOPPING ||
++        (jog->path.enable && fabs(jog->path.pos_cmd - jog->path.curr_pos) <=
++         TINY_DP(acceleration, period)))) {
++        /* A disabled planner may be stopping to change direction. */
++        jog->phase = (jog->phase == POWER_JOG_STOPPING && jog->neutral_seen) ?
++            POWER_JOG_IDLE : POWER_JOG_WAIT_RELEASE;
++    }
++}
+diff --git a/src/emc/motion/power_jog.h b/src/emc/motion/power_jog.h
+new file mode 100644
+index 0000000000..293e1d0c2e
+--- /dev/null
++++ b/src/emc/motion/power_jog.h
+@@ -0,0 +1,37 @@
++#ifndef POWER_JOG_H
++#define POWER_JOG_H
++
++#include "simple_tp.h"
++
++/* One held X/Z request. Feed and geometry belong to the first press. */
++typedef struct {
++    double position, minimum, maximum, velocity, acceleration, jerk;
++} power_jog_axis_t;
++
++typedef enum {
++    POWER_JOG_IDLE,
++    POWER_JOG_HELD,
++    POWER_JOG_STOPPING,
++    POWER_JOG_WAIT_RELEASE
++} power_jog_phase_t;
++
++typedef struct {
++    simple_tp_t path;
++    power_jog_phase_t phase;
++    int neutral_seen, spindle;
++    int requested[2], running[2];
++    double feed, slope, origin[2], direction[2];
++} power_jog_t;
++
++static inline int power_jog_reserved(const power_jog_t *jog)
++{
++    return jog->phase == POWER_JOG_HELD || jog->phase == POWER_JOG_STOPPING;
++}
++
++int power_jog_request(power_jog_t *jog, int x, int z, double feed,
++                      int spindle, double slope);
++void power_jog_abort(power_jog_t *jog, int immediate);
++void power_jog_update(power_jog_t *jog, power_jog_axis_t axes[2],
++                     double speed, double override, double period);
++
++#endif
+diff --git a/src/emc/nml_intf/emc.cc b/src/emc/nml_intf/emc.cc
+index c40c9dbe5e..aac79f67e7 100644
+--- a/src/emc/nml_intf/emc.cc
++++ b/src/emc/nml_intf/emc.cc
+@@ -67,6 +67,9 @@ int emcFormat(NMLTYPE type, void *buffer, CMS * cms)
+     case EMC_JOG_CONT_TYPE:
+ 	((EMC_JOG_CONT *) buffer)->update(cms);
+ 	break;
++    case EMC_JOG_POWER_TYPE:
++        ((EMC_JOG_POWER *) buffer)->update(cms);
++        break;
+     case EMC_JOG_INCR_TYPE:
+ 	((EMC_JOG_INCR *) buffer)->update(cms);
+ 	break;
+@@ -385,6 +388,8 @@ const char *emc_symbol_lookup(uint32_t type)
+ 	return "EMC_JOINT_SET_AVAILABILITY";
+     case EMC_JOG_CONT_TYPE:
+ 	return "EMC_JOG_CONT";
++    case EMC_JOG_POWER_TYPE:
++        return "EMC_JOG_POWER";
+     case EMC_JOG_INCR_TYPE:
+ 	return "EMC_JOG_INCR";
+     case EMC_JOG_ABS_TYPE:
+@@ -967,6 +972,15 @@ void EMC_STAT::update(CMS * cms)
+     cms->update(debug);
+ }
+ 
++void EMC_JOG_POWER::update(CMS *cms)
++{
++    cms->update(x_direction);
++    cms->update(z_direction);
++    cms->update(feed_per_rev);
++    cms->update(spindle);
++    cms->update(taper_slope);
++}
++
+ /*
+ *	NML/CMS Update function for EMC_JOG_CONT
+ */
+diff --git a/src/emc/nml_intf/emc.hh b/src/emc/nml_intf/emc.hh
+index 32ca6fbaa0..06b99f229c 100644
+--- a/src/emc/nml_intf/emc.hh
++++ b/src/emc/nml_intf/emc.hh
+@@ -75,6 +75,7 @@ struct PM_CARTESIAN;
+ #define EMC_JOINT_UNHOME_TYPE                         ((NMLTYPE) 135)
+ #define EMC_JOG_STOP_TYPE                             ((NMLTYPE) 136)
+ #define EMC_JOINT_SET_AVAILABILITY_TYPE               ((NMLTYPE) 137)
++#define EMC_JOG_POWER_TYPE                            ((NMLTYPE) 138)
+ 
+ #define EMC_JOINT_STAT_TYPE                          ((NMLTYPE) 198)
+ #define EMC_AXIS_STAT_TYPE                           ((NMLTYPE) 199)
+@@ -337,6 +338,7 @@ extern int emcJointOverrideLimits(int joint);
+ extern int emcJointLoadComp(int joint, const char *file, int type);
+ extern int emcJogStop(int nr, int jjogmode);
+ extern int emcJogCont(int nr, double vel, int jjogmode);
++extern int emcJogPower(int x, int z, double feed, int spindle, double slope);
+ extern int emcJogIncr(int nr, double incr, double vel, int jjogmode);
+ extern int emcJogAbs(int nr, double pos, double vel, int jjogmode);
+ 
+diff --git a/src/emc/nml_intf/emc_nml.hh b/src/emc/nml_intf/emc_nml.hh
+index ac4d322a92..4141c12994 100644
+--- a/src/emc/nml_intf/emc_nml.hh
++++ b/src/emc/nml_intf/emc_nml.hh
+@@ -362,6 +362,17 @@ class EMC_JOINT_SET_AVAILABILITY:public EMC_JOINT_CMD_MSG {
+     int available;
+ };
+ 
++class EMC_JOG_POWER:public RCS_CMD_MSG {
++  public:
++    EMC_JOG_POWER() : RCS_CMD_MSG(EMC_JOG_POWER_TYPE, sizeof(EMC_JOG_POWER)) {}
++    void update(CMS *cms);
++    int x_direction = 0;
++    int z_direction = 0;
++    double feed_per_rev = 0;
++    int spindle = 0;
++    double taper_slope = 0;
++};
++
+ class EMC_JOG_CONT:public EMC_JOG_CMD_MSG {
+   public:
+     EMC_JOG_CONT()
+diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
+index 1314163557..8e88fcf1a3 100644
+--- a/src/emc/task/emctaskmain.cc
++++ b/src/emc/task/emctaskmain.cc
+@@ -1310,6 +1310,7 @@ static int emcTaskPlan(void)
+ 	    case EMC_JOINT_HOME_TYPE:
+ 	    case EMC_JOINT_UNHOME_TYPE:
+ 	    case EMC_JOG_CONT_TYPE:
++	    case EMC_JOG_POWER_TYPE:
+ 	    case EMC_JOG_INCR_TYPE:
+ 	    case EMC_JOG_ABS_TYPE:
+ 	    case EMC_JOG_STOP_TYPE:
+@@ -2145,6 +2146,13 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+                             jog_stop_msg->jjogmode);
+ 	break;
+ 
++    case EMC_JOG_POWER_TYPE: {
++        auto *message = reinterpret_cast<EMC_JOG_POWER *>(cmd);
++        retval = emcJogPower(message->x_direction, message->z_direction,
++                            message->feed_per_rev, message->spindle, message->taper_slope);
++        break;
++    }
++
+     case EMC_JOG_INCR_TYPE:
+ 	jog_incr_msg = reinterpret_cast<EMC_JOG_INCR *>(cmd);
+ 	retval = emcJogIncr(jog_incr_msg->joint_or_axis,
+diff --git a/src/emc/task/taskintf.cc b/src/emc/task/taskintf.cc
+index ca5c4dc3a2..672de478c2 100644
+--- a/src/emc/task/taskintf.cc
++++ b/src/emc/task/taskintf.cc
+@@ -844,6 +844,18 @@ int emcJogCont(int nr, double vel, int jjogmode)
+     return usrmotWriteEmcmotCommand(&emcmotCommand);
+ }
+ 
++int emcJogPower(int x, int z, double feed, int spindle, double slope)
++{
++    emcmotCommand.command = EMCMOT_JOG_POWER;
++    emcmotCommand.joint = emcmotCommand.axis = -1;
++    emcmotCommand.power_x_direction = x;
++    emcmotCommand.power_z_direction = z;
++    emcmotCommand.power_feed_per_rev = feed;
++    emcmotCommand.spindle = spindle;
++    emcmotCommand.power_taper_slope = slope;
++    return usrmotWriteEmcmotCommand(&emcmotCommand);
++}
++
+ int emcJogIncr(int nr, double incr, double vel, int jjogmode)
+ {
+     if (jjogmode) {
+diff --git a/src/emc/tp/sp_scurve.c b/src/emc/tp/sp_scurve.c
+index d72caada77..f6fe23bc28 100644
+--- a/src/emc/tp/sp_scurve.c
++++ b/src/emc/tp/sp_scurve.c
+@@ -29,6 +29,7 @@
+  * destruction on every call.
+  */
+ static RuckigPlanner cached_planner = NULL;
++static RuckigPlanner jog_planner = NULL;
+ static double cached_cycle_time = 0.0;  /* cycle time used by the current planner */
+ 
+ /**
+@@ -96,6 +97,57 @@ static RuckigPlanner get_cached_planner(void) {
+     return cached_planner;
+ }
+ 
++int sp_scurve_jog_step(simple_tp_t *tp, double period)
++{
++    RuckigPlanner planner = jog_planner;
++    if (!planner) return -1;
++    ruckig_reset(planner);
++    int moving = tp->enable && tp->max_vel > 0;
++    int result;
++    if (moving) {
++        result = ruckig_plan_position(planner, tp->curr_pos, tp->curr_vel,
++            tp->curr_acc, tp->pos_cmd, 0, 0, 0,
++            tp->max_vel, tp->max_acc, tp->max_jerk);
++    } else {
++        result = ruckig_plan_velocity(planner, tp->curr_vel, tp->curr_acc,
++            0, 0, 0, tp->max_acc, tp->max_jerk);
++    }
++    if (result) return -1;
++    double position, velocity, acceleration, jerk;
++    if (ruckig_at_time(planner, period, &position, &velocity, &acceleration, &jerk))
++        return -1;
++    tp->curr_pos = moving ? position : tp->curr_pos + position;
++    tp->curr_vel = velocity;
++    tp->curr_acc = acceleration;
++    tp->curr_jerk = jerk;
++    tp->active = ruckig_get_duration(planner) > period;
++    return 0;
++}
++
++int sp_scurve_jog_init(double cycle_time)
++{
++    if (jog_planner) return 0;
++    jog_planner = ruckig_create(cycle_time);
++    if (!jog_planner) return -1;
++    ruckig_set_logging(jog_planner, 0);
++    /* Allocate the explicit velocity bound before entering the servo thread. */
++    if (ruckig_plan_velocity(jog_planner, 0, 0, 0, 0, 0, 1, 1)) {
++        ruckig_destroy(jog_planner);
++        jog_planner = NULL;
++        return -1;
++    }
++    ruckig_reset(jog_planner);
++    return 0;
++}
++
++void sp_scurve_jog_cleanup(void)
++{
++    if (jog_planner) {
++        ruckig_destroy(jog_planner);
++        jog_planner = NULL;
++    }
++}
++
+ /* ================================================================
+  * Ruckig-based S-curve functions
+  * ================================================================ */
+diff --git a/src/emc/tp/sp_scurve.h b/src/emc/tp/sp_scurve.h
+index 80b6dca4ce..236828307b 100644
+--- a/src/emc/tp/sp_scurve.h
++++ b/src/emc/tp/sp_scurve.h
+@@ -32,6 +32,13 @@ int sp_scurve_init(double cycle_time);
+  */
+ void sp_scurve_cleanup(void);
+ 
++/* Dedicated servo-rate planner for scalar power jogging. */
++int sp_scurve_jog_init(double cycle_time);
++void sp_scurve_jog_cleanup(void);
++
++/* Advance a scalar jog with live velocity limits; zero speed plans a stop. */
++int sp_scurve_jog_step(simple_tp_t *tp, double period);
++
+ /* Legacy functions kept for simple_tp.c compatibility */
+ double nextAccel(double t, double targetV, double v, double a, double maxA, double maxJ);
+ double sc_distance(double t, double v, double a, double j);
+diff --git a/src/emc/usr_intf/halui.cc b/src/emc/usr_intf/halui.cc
+index bcb62bf9f9..509b9b1af3 100644
+--- a/src/emc/usr_intf/halui.cc
++++ b/src/emc/usr_intf/halui.cc
+@@ -247,6 +247,10 @@ static int num_axes = 0; //number of axes, taken from the INI [TRAJ] section
+ static int num_joints = 3; //number of joints, taken from the INI [KINS] section
+ static int num_spindles = 1; // number of spindles, [TRAJ]SPINDLES
+ 
++#include "halui_power_feed.hh"
++static bool lathe_mode = false;
++static HaluiPowerFeed power_feed_jog;
++
+ static double maxFeedOverride=1;
+ static double maxMaxVelocity=1;
+ static double minSpindleOverride=0.0;
+@@ -913,6 +917,7 @@ int halui_hal_init(void)
+ 
+     retval = halui_export_pin_IN_float(&(halui_data->ajog_speed), "halui.axis.jog-speed");
+     if (retval < 0) return retval;
++    if (lathe_mode && (retval = power_feed_jog.export_pins(comp_id)) < 0) return retval;
+     retval = halui_export_pin_IN_float(&(halui_data->ajog_deadband), "halui.axis.jog-deadband");
+     if (retval < 0) return retval;
+ 
+@@ -1466,6 +1471,11 @@ static int iniLoad(const char *filename)
+         num_axes = EMCMOT_MAX_AXIS;
+         axis_mask = (1 << EMCMOT_MAX_AXIS) - 1;
+     }
++    lathe_mode = inifile.findBoolV("LATHE", "DISPLAY", false);
++    if (lathe_mode && (axis_mask & 5) != 5) {
++        rcs_print_error("halui: lathe power jogging requires X and Z coordinates\n");
++        return -1;
++    }
+ 
+     if (auto inival = inifile.findSInt("JOINTS", "KINS")) {
+         if (*inival > 0) {
+@@ -1624,6 +1634,10 @@ static void check_hal_changes()
+     local_halui_str new_halui_data_mutable;
+     copy_hal_data(*halui_data, new_halui_data_mutable);
+     const local_halui_str &new_halui_data = new_halui_data_mutable;
++    power_feed_jog.update(
++        emcStatus->task.state == EMC_TASK_STATE::ON &&
++        emcStatus->task.mode == EMC_TASK_MODE::MANUAL &&
++        emcStatus->motion.traj.mode == EMC_TRAJ_MODE::TELEOP, emcCommandSend);
+ 
+ 
+     //check if machine_on pin has changed (the rest work exactly the same)
+diff --git a/src/emc/usr_intf/halui_power_feed.hh b/src/emc/usr_intf/halui_power_feed.hh
+new file mode 100644
+index 0000000000..c29dd2bdb9
+--- /dev/null
++++ b/src/emc/usr_intf/halui_power_feed.hh
+@@ -0,0 +1,69 @@
++#pragma once
++
++#include "hal.h"
++#include "nml_intf/emc_nml.hh"
++
++/* HAL sampling and power-feed edges; motion owns the held feed and path. */
++class HaluiPowerFeed {
++    struct Pins {
++        hal_bit_t *xp, *xm, *zp, *zm;
++        hal_float_t *feed, *slope;
++        hal_u32_t *spindle;
++    };
++    Pins *pins = nullptr;
++    bool blocked = false;
++    int previous_x = 0, previous_z = 0;
++    double held_slope = 0;
++    unsigned held_spindle = 0;
++
++public:
++    int export_pins(int id) {
++        pins = static_cast<Pins *>(hal_malloc(sizeof(Pins)));
++        if (!pins) return -1;
++        int result;
++        if ((result = hal_pin_bit_new("halui.power-feed.x.plus", HAL_IN, &pins->xp, id)) < 0 ||
++            (result = hal_pin_bit_new("halui.power-feed.x.minus", HAL_IN, &pins->xm, id)) < 0 ||
++            (result = hal_pin_bit_new("halui.power-feed.z.plus", HAL_IN, &pins->zp, id)) < 0 ||
++            (result = hal_pin_bit_new("halui.power-feed.z.minus", HAL_IN, &pins->zm, id)) < 0 ||
++            (result = hal_pin_float_new("halui.power-feed.per-rev", HAL_IN, &pins->feed, id)) < 0 ||
++            (result = hal_pin_u32_new("halui.power-feed.spindle", HAL_IN, &pins->spindle, id)) < 0 ||
++            (result = hal_pin_float_new("halui.power-feed.taper-slope", HAL_IN, &pins->slope, id)) < 0)
++            return result;
++        *pins->xp = 0;
++        *pins->xm = 0;
++        *pins->zp = 0;
++        *pins->zm = 0;
++        *pins->feed = 0;
++        *pins->slope = 0;
++        *pins->spindle = 0;
++        return 0;
++    }
++
++    void update(bool permitted, int (*send)(RCS_CMD_MSG&)) {
++        if (!pins) return;
++        bool xp = *pins->xp, xm = *pins->xm;
++        bool zp = *pins->zp, zm = *pins->zm;
++        bool held = xp || xm || zp || zm;
++        double slope = *pins->slope;
++        if (!held) blocked = false;
++        if (held && (!permitted || (xp && xm) || (zp && zm) ||
++            ((previous_x || previous_z) &&
++             (slope != held_slope || *pins->spindle != held_spindle))))
++            blocked = true;
++        int x = permitted && !blocked ? int(xp) - int(xm) : 0;
++        int z = permitted && !blocked ? int(zp) - int(zm) : 0;
++        if (x != previous_x || z != previous_z) {
++            EMC_JOG_POWER command;
++            command.x_direction = x;
++            command.z_direction = z;
++            command.feed_per_rev = *pins->feed;
++            command.spindle = *pins->spindle;
++            command.taper_slope = slope;
++            if (send(command) != 0 && (x || z)) blocked = true;
++            held_slope = slope;
++            held_spindle = *pins->spindle;
++        }
++        previous_x = x;
++        previous_z = z;
++    }
++};
+diff --git a/tests/power-jog/.gitignore b/tests/power-jog/.gitignore
+new file mode 100644
+index 0000000000..d070f21698
+--- /dev/null
++++ b/tests/power-jog/.gitignore
+@@ -0,0 +1,3 @@
++nonlathe.ini
++scurve.ini
++sim.var*
+diff --git a/tests/power-jog/checkresult b/tests/power-jog/checkresult
+new file mode 100755
+index 0000000000..305bdc4180
+--- /dev/null
++++ b/tests/power-jog/checkresult
+@@ -0,0 +1,4 @@
++#!/bin/sh
++set -eu
++test "$(grep -c '^native power jog scenarios ok$' "$1")" = 2
++grep -q '^nonlathe pins absent$' "$1"
+diff --git a/tests/power-jog/core_sim.hal b/tests/power-jog/core_sim.hal
+new file mode 100644
+index 0000000000..80225af5a7
+--- /dev/null
++++ b/tests/power-jog/core_sim.hal
+@@ -0,0 +1,11 @@
++loadrt trivkins coordinates=XZ
++loadrt motmod base_period_nsec=0 servo_period_nsec=1000000 traj_period_nsec=2000000 num_joints=2 num_spindles=2
++addf motion-command-handler servo-thread
++addf motion-controller servo-thread
++net x-pos joint.0.motor-pos-cmd => joint.0.motor-pos-fb
++net z-pos joint.1.motor-pos-cmd => joint.1.motor-pos-fb
++net estop iocontrol.0.user-enable-out => iocontrol.0.emc-enable-in
++setp spindle.0.at-speed true
++setp spindle.1.at-speed true
++setp spindle.0.speed-in 10
++setp spindle.1.speed-in -20
+diff --git a/tests/power-jog/test-ui.py b/tests/power-jog/test-ui.py
+new file mode 100755
+index 0000000000..cc119402ba
+--- /dev/null
++++ b/tests/power-jog/test-ui.py
+@@ -0,0 +1,199 @@
++#!/usr/bin/env python3
++"""Exercise HALUI -> NML -> real motion, observing simulated axis positions."""
++import math
++import os
++import sys
++import time
++import hal
++import linuxcnc
++
++c, s, errors = linuxcnc.command(), linuxcnc.stat(), linuxcnc.error_channel()
++h = hal.component('power-jog-test')
++h.ready()
++
++
++def wait(predicate, label, timeout=8):
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        s.poll()
++        if predicate():
++            return
++        time.sleep(.005)
++    raise AssertionError((label, s.position, s.task_state, errors.poll()))
++
++
++def done():
++    assert c.wait_complete(8) == linuxcnc.RCS_DONE, errors.poll()
++
++
++def pin(name, value):
++    hal.set_p(name, str(value))
++
++
++def velocity(axis):
++    return hal.get_value('axis.' + axis + '.teleop-vel-cmd')
++
++
++def position():
++    s.poll()
++    return s.position[0], s.position[2]
++
++
++def release():
++    for axis in ('x', 'z'):
++        for direction in ('plus', 'minus'):
++            pin('halui.power-feed.' + axis + '.' + direction, 0)
++            pin('halui.axis.' + axis + '.' + direction, 0)
++    wait(lambda: abs(velocity('x')) + abs(velocity('z')) < 1e-8, 'stop')
++    time.sleep(.1)  # let HALUI consume the complete release
++
++
++def origin():
++    release()
++    c.mode(linuxcnc.MODE_MDI); done()
++    c.mdi('G21 G90 G94 F120 G1 X0 Z0'); done()
++    c.mode(linuxcnc.MODE_MANUAL); done()
++    c.teleop_enable(1); done()
++
++
++wait(lambda: hal.component_exists('halui'), 'HALUI startup')
++wait(lambda: any(p['NAME'] == 'halui.axis.jog-speed' for p in hal.get_info_pins()), 'HALUI pins')
++if os.environ.get('POWER_JOG_NONLATHE'):
++    assert not any(p['NAME'].startswith('halui.power-feed.') for p in hal.get_info_pins())
++    print('nonlathe pins absent', flush=True)
++    sys.exit(0)
++c.state(linuxcnc.STATE_ESTOP_RESET); done()
++c.state(linuxcnc.STATE_ON); done()
++c.mode(linuxcnc.MODE_MANUAL); done()
++c.home(-1); done()
++wait(lambda: all(s.homed[:2]), 'homing')
++c.teleop_enable(1); done()
++c.spindle(linuxcnc.SPINDLE_FORWARD, 600, 0); done()
++c.spindle(linuxcnc.SPINDLE_REVERSE, 1200, 1); done()
++pin('halui.power-feed.per-rev', .1)
++time.sleep(.1)
++
++# Feed/rev is independent of the interpreter F and is captured until release.
++pin('halui.power-feed.z.plus', 1)
++wait(lambda: abs(velocity('z') - 1) < .01, 'initial feed')
++pin('halui.power-feed.per-rev', .2)
++time.sleep(.15)
++assert abs(velocity('z') - 1) < .01
++c.feedrate(.5)
++wait(lambda: abs(velocity('z') - .5) < .01, 'live override')
++c.feedrate(0)
++wait(lambda: abs(velocity('z')) < 1e-8, 'zero override pauses')
++c.feedrate(.5)
++wait(lambda: abs(velocity('z') - .5) < .01, 'override resumes held feed')
++pin('halui.power-feed.x.plus', 1)
++wait(lambda: abs(velocity('x') - math.sqrt(.125)) < .01 and
++     abs(velocity('z') - math.sqrt(.125)) < .01,
++     'direction change retains captured feed')
++release()
++c.feedrate(1); done()
++pin('halui.power-feed.z.plus', 1)
++wait(lambda: abs(velocity('z') - 2) < .01, 'next press captures feed')
++release()
++pin('halui.power-feed.spindle', 1)
++pin('halui.power-feed.z.minus', 1)
++wait(lambda: abs(velocity('z') + 4) < .01, 'selected reverse spindle magnitude')
++release()
++
++# Unequal X/Z constraints must preserve geometry throughout acceleration/stop.
++pin('halui.power-feed.spindle', 0)
++pin('halui.power-feed.per-rev', 1)
++for axis, slope in [(a, k) for a in ('x', 'z') for k in (-1, -.5, 0, .5, 1)]:
++    origin()
++    pin('halui.power-feed.taper-slope', slope)
++    start_x, start_z = position()
++    pin('halui.power-feed.' + axis + '.plus', 1)
++    wait(lambda: velocity(axis) > .1, 'taper starts')
++    for _ in range(35):
++        x, z = position()
++        error = ((x-start_x) - slope*(z-start_z) if axis == 'z'
++                 else (z-start_z) + slope*(x-start_x))
++        assert abs(error) < .002, (axis, slope, x, z)
++        assert abs(velocity('x')) <= 3.001
++        time.sleep(.005)
++    pin('halui.power-feed.' + axis + '.plus', 0)
++    wait(lambda: abs(velocity(axis)) < 1e-8, 'taper stops')
++    x, z = position()
++    error = ((x-start_x) - slope*(z-start_z) if axis == 'z'
++             else (z-start_z) + slope*(x-start_x))
++    assert abs(error) < .002
++    release()
++
++origin()
++pin('halui.power-feed.taper-slope', 0)
++pin('halui.power-feed.per-rev', .1)
++pin('halui.power-feed.x.plus', 1)
++pin('halui.power-feed.z.plus', 1)
++wait(lambda: abs(velocity('x') - math.sqrt(.5)) < .01 and
++     abs(velocity('z') - math.sqrt(.5)) < .01, 'combined directions')
++c.jog(linuxcnc.JOG_STOP, 0, 0); done()
++wait(lambda: abs(velocity('x')) + abs(velocity('z')) < 1e-8, 'existing stop stops both')
++time.sleep(.1)
++assert abs(velocity('z')) < 1e-8
++release()
++
++origin()
++pin('halui.power-feed.taper-slope', .5)
++pin('halui.power-feed.per-rev', 1)
++pin('halui.power-feed.z.plus', 1)
++wait(lambda: s.position[2] > 9.99, 'coupled travel limit', 10)
++wait(lambda: abs(velocity('x')) + abs(velocity('z')) < 1e-8, 'limit stops both')
++x, z = position()
++assert z <= 10.000001 and abs(x - .5*z) < .002
++release()
++
++origin()
++pin('halui.power-feed.z.plus', 1)
++wait(lambda: velocity('z') > .1, 'jog before inhibit')
++pin('motion.jog-inhibit', 1)
++wait(lambda: abs(velocity('z')) < 1e-8, 'inhibit cancels')
++pin('motion.jog-inhibit', 0)
++time.sleep(.15)
++assert abs(velocity('z')) < 1e-8
++pin('halui.power-feed.x.plus', 1)
++time.sleep(.15)
++assert abs(velocity('x')) + abs(velocity('z')) < 1e-8
++release()
++
++# A new vector must settle before starting in its new direction.
++origin()
++pin('halui.power-feed.taper-slope', 0)
++pin('halui.power-feed.per-rev', .1)
++pin('halui.power-feed.z.plus', 1)
++wait(lambda: abs(velocity('z') - 1) < .01, 'before vector change')
++pin('halui.power-feed.x.plus', 1)
++wait(lambda: abs(velocity('x') - math.sqrt(.5)) < .01 and
++     abs(velocity('z') - math.sqrt(.5)) < .01, 'new combined vector')
++pin('motion.jog-stop-immediate', 1)
++wait(lambda: abs(velocity('x')) + abs(velocity('z')) < 1e-8, 'immediate group stop')
++pin('motion.jog-stop-immediate', 0)
++time.sleep(.15)
++assert abs(velocity('x')) + abs(velocity('z')) < 1e-8
++release()
++
++# The two direction routes are independent. An ordinary jog cannot take over
++# a reserved power-feed path, and a power request cannot steal an ordinary jog.
++origin()
++pin('halui.axis.jog-speed', 30)
++pin('halui.power-feed.z.plus', 1)
++wait(lambda: abs(velocity('z') - 1) < .01, 'power feed before ordinary press')
++pin('halui.axis.z.minus', 1)
++time.sleep(.15)
++assert velocity('z') > 0
++pin('halui.axis.z.minus', 0)
++release()
++
++origin()
++pin('halui.axis.z.minus', 1)
++wait(lambda: abs(velocity('z') + .5) < .01, 'ordinary jog before power press')
++pin('halui.power-feed.z.plus', 1)
++time.sleep(.15)
++assert velocity('z') < 0
++pin('halui.power-feed.z.plus', 0)
++release()
++
++print('native power jog scenarios ok', flush=True)
+diff --git a/tests/power-jog/test.ini b/tests/power-jog/test.ini
+new file mode 100644
+index 0000000000..98afc6f1b2
+--- /dev/null
++++ b/tests/power-jog/test.ini
+@@ -0,0 +1,69 @@
++[EMC]
++VERSION = 1.1
++DEBUG = 0
++[DISPLAY]
++DISPLAY = ./test-ui.py
++LATHE = 1
++[RS274NGC]
++PARAMETER_FILE = sim.var
++[EMCMOT]
++EMCMOT = motmod
++COMM_TIMEOUT = 4
++SERVO_PERIOD = 1000000
++[TASK]
++TASK = milltask
++CYCLE_TIME = 0.001
++[HAL]
++HALFILE = core_sim.hal
++HALUI = halui
++[TRAJ]
++COORDINATES = XZ
++SPINDLES = 2
++LINEAR_UNITS = mm
++ANGULAR_UNITS = degree
++DEFAULT_LINEAR_VELOCITY = 5
++MAX_LINEAR_VELOCITY = 30
++MAX_LINEAR_JERK = 10000
++[EMCIO]
++TOOL_TABLE = tool.tbl
++[KINS]
++KINEMATICS = trivkins coordinates=XZ
++JOINTS = 2
++[AXIS_X]
++MIN_LIMIT = -10
++MAX_LIMIT = 10
++MAX_VELOCITY = 3
++MAX_ACCELERATION = 15
++MAX_JERK = 5000
++[AXIS_Z]
++MIN_LIMIT = -10
++MAX_LIMIT = 10
++MAX_VELOCITY = 10
++MAX_ACCELERATION = 100
++MAX_JERK = 10000
++[JOINT_0]
++TYPE = LINEAR
++MIN_LIMIT = -10
++MAX_LIMIT = 10
++MAX_VELOCITY = 3
++MAX_ACCELERATION = 15
++MAX_JERK = 5000
++FERROR = 1
++MIN_FERROR = 0.25
++HOME = 0
++HOME_SEQUENCE = 0
++HOME_SEARCH_VEL = 0
++HOME_LATCH_VEL = 0
++[JOINT_1]
++TYPE = LINEAR
++MIN_LIMIT = -10
++MAX_LIMIT = 10
++MAX_VELOCITY = 10
++MAX_ACCELERATION = 100
++MAX_JERK = 10000
++FERROR = 1
++MIN_FERROR = 0.25
++HOME = 0
++HOME_SEQUENCE = 0
++HOME_SEARCH_VEL = 0
++HOME_LATCH_VEL = 0
+diff --git a/tests/power-jog/test.sh b/tests/power-jog/test.sh
+new file mode 100755
+index 0000000000..4397029735
+--- /dev/null
++++ b/tests/power-jog/test.sh
+@@ -0,0 +1,7 @@
++#!/bin/sh
++set -eu
++linuxcnc -r test.ini
++sed '/\[TRAJ\]/a PLANNER_TYPE = 1' test.ini > scurve.ini
++linuxcnc -r scurve.ini
++sed 's/LATHE = 1/LATHE = 0/' test.ini > nonlathe.ini
++POWER_JOG_NONLATHE=1 linuxcnc -r nonlathe.ini
+diff --git a/tests/power-jog/tool.tbl b/tests/power-jog/tool.tbl
+new file mode 100644
+index 0000000000..68840ea75c
+--- /dev/null
++++ b/tests/power-jog/tool.tbl
+@@ -0,0 +1 @@
++T1 P1 Z0 D0

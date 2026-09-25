@@ -470,3 +470,12 @@ into an active global sequence. Duplicate requests for an active joint are
 rejected. An abort or homing error affects only that joint during independent
 homing, while sequence-controlled operations preserve their group-wide abort
 behavior. No NML or protobuf interface changes are required.
+
+### 0020 — Native lathe power jogging
+
+Adds lathe-only HALUI power-feed and taper controls backed by native coupled
+X/Z motion. Feed/rev is captured per held request, with live spindle feedback
+and feed override. Both axes share acceleration and travel constraints.
+Dedicated power-feed X/Z direction pins keep ordinary axis jogging separate.
+Cancelled motion requires all direction buttons to release before rearming.
+Includes simulator coverage and HALUI pin documentation.
