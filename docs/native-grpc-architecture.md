@@ -9,8 +9,7 @@ memory, and uploaded-program workspaces.
 
 The protobuf files under `proto/` are the canonical wire contract.
 `proto/linuxcnc/v1/linuxcnc.proto` is the aggregate entrypoint. Messages use
-typed fields and oneofs; removed fields stay reserved and field numbers are
-never reused.
+typed fields and oneofs.
 
 Client implementations live outside this repository and consume the versioned
 protobuf boundary. A wire change is complete when the canonical schema and

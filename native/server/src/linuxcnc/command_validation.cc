@@ -1,6 +1,5 @@
 #include "linuxcnc_grpc/linuxcnc/command_validation.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <string>
@@ -35,11 +34,6 @@ NmlCommandValidation configured_index(std::int32_t index, std::int32_t count,
   if (index < 0 || index >= count)
     return invalid(std::string(field) + " is out of configured range");
   return {};
-}
-
-bool has_axis(const NmlStatusSnapshot& status, std::int32_t index) {
-  const auto& axes = status.motion_stat.traj.available_axes;
-  return std::find(axes.begin(), axes.end(), index) != axes.end();
 }
 
 NmlCommandValidation validate_tool(const NmlToolEntry& tool) {
@@ -140,28 +134,6 @@ NmlCommandValidation validate_nml_command(
       return configured_index(command.integer,
                               configuration->motion_stat.traj.joints,
                               "joint index");
-    case NmlCommandKind::JogStop:
-    case NmlCommandKind::JogContinuous:
-    case NmlCommandKind::JogIncrement: {
-      if (command.kind != NmlCommandKind::JogStop) {
-        auto result = finite(command.number, "jog speed");
-        if (!result) return result;
-      }
-      if (command.kind == NmlCommandKind::JogIncrement) {
-        auto result = finite(command.number2, "jog increment");
-        if (!result) return result;
-        if (command.number2 <= 0.0)
-          return invalid("jog increment must be greater than zero");
-      }
-      if (!configuration) return unavailable();
-      if (command.boolean)
-        return configured_index(command.integer,
-                                configuration->motion_stat.traj.joints,
-                                "joint jog index");
-      if (command.integer < 0 || !has_axis(*configuration, command.integer))
-        return invalid("axis jog index is not configured");
-      return {};
-    }
     case NmlCommandKind::SetMinPositionLimit:
     case NmlCommandKind::SetMaxPositionLimit: {
       auto result = finite(command.number, "position limit");

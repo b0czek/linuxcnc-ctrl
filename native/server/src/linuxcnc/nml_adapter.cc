@@ -852,30 +852,6 @@ CommandSubmission NmlAdapter::submit(
               message = std::move(value);
               break;
             }
-            case NmlCommandKind::JogStop: {
-              auto value = std::make_unique<EMC_JOG_STOP>();
-              value->joint_or_axis = command.integer;
-              value->jjogmode = command.boolean ? 1 : 0;
-              message = std::move(value);
-              break;
-            }
-            case NmlCommandKind::JogContinuous: {
-              auto value = std::make_unique<EMC_JOG_CONT>();
-              value->joint_or_axis = command.integer;
-              value->jjogmode = command.boolean ? 1 : 0;
-              value->vel = command.number;
-              message = std::move(value);
-              break;
-            }
-            case NmlCommandKind::JogIncrement: {
-              auto value = std::make_unique<EMC_JOG_INCR>();
-              value->joint_or_axis = command.integer;
-              value->jjogmode = command.boolean ? 1 : 0;
-              value->vel = command.number;
-              value->incr = command.number2;
-              message = std::move(value);
-              break;
-            }
             case NmlCommandKind::SetMinPositionLimit: {
               auto value = std::make_unique<EMC_JOINT_SET_MIN_POSITION_LIMIT>();
               value->joint = command.integer;

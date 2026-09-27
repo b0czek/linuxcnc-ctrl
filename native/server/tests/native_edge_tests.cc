@@ -250,7 +250,6 @@ void command_validation_test() {
   NmlStatusSnapshot configuration;
   configuration.motion_stat.traj.joints = 3;
   configuration.motion_stat.traj.spindles = 2;
-  configuration.motion_stat.traj.available_axes = {0, 2, 8};
 
   NmlCommand command;
   command.kind = NmlCommandKind::HomeJoint;
@@ -266,18 +265,6 @@ void command_validation_test() {
   command.kind = NmlCommandKind::UnhomeJoint;
   command.integer = -2;
   assert(validate_nml_command(command, &configuration));
-  command.integer = 3;
-  assert(!validate_nml_command(command, &configuration));
-
-  command.kind = NmlCommandKind::JogStop;
-  command.boolean = false;
-  command.integer = 2;
-  assert(validate_nml_command(command, &configuration));
-  command.integer = 1;
-  assert(!validate_nml_command(command, &configuration));
-  command.boolean = true;
-  command.integer = -1;
-  assert(!validate_nml_command(command, &configuration));
   command.integer = 3;
   assert(!validate_nml_command(command, &configuration));
 
@@ -313,11 +300,11 @@ void command_validation_test() {
       std::numeric_limits<double>::quiet_NaN(),
       std::numeric_limits<double>::infinity(),
       -std::numeric_limits<double>::infinity()};
-  const std::array<NmlCommandKind, 8> physical_commands{
-      NmlCommandKind::SetMaxVelocity, NmlCommandKind::SetFeedRate,
-      NmlCommandKind::SetRapidRate,   NmlCommandKind::SetSpindleOverride,
-      NmlCommandKind::JogContinuous,  NmlCommandKind::SetMinPositionLimit,
-      NmlCommandKind::SpindleOn,      NmlCommandKind::SetAnalogOutput};
+  const std::array<NmlCommandKind, 7> physical_commands{
+      NmlCommandKind::SetMaxVelocity,      NmlCommandKind::SetFeedRate,
+      NmlCommandKind::SetRapidRate,        NmlCommandKind::SetSpindleOverride,
+      NmlCommandKind::SetMinPositionLimit, NmlCommandKind::SpindleOn,
+      NmlCommandKind::SetAnalogOutput};
   for (const auto kind : physical_commands) {
     command = {};
     command.kind = kind;
@@ -328,18 +315,6 @@ void command_validation_test() {
       assert(!validate_nml_command(command, &configuration));
     }
   }
-
-  command = {};
-  command.kind = NmlCommandKind::JogIncrement;
-  command.boolean = true;
-  command.integer = 0;
-  command.number = 1.0;
-  command.number2 = 0.0;
-  assert(!validate_nml_command(command, &configuration));
-  command.number2 = 1.0;
-  assert(validate_nml_command(command, &configuration));
-  command.number2 = std::numeric_limits<double>::infinity();
-  assert(!validate_nml_command(command, &configuration));
 
   command = {};
   command.kind = NmlCommandKind::SetTool;

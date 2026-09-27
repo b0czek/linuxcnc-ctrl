@@ -10,7 +10,7 @@ With `LINUXCNC_GRPC_BUILD_WIRE=ON`, `linuxcnc-grpc-server` is a real listener:
 it registers the generated `linuxcnc.v1` Machine, INI, Program, HAL, and Scope
 services, enables standard gRPC health, optionally enables reflection, and
 supports plaintext/TLS/mTLS credentials. The NML adapter mechanically maps all
-51 command oneof cases, including spindle indices, tool offsets/wear, operator
+command oneof cases, including spindle indices, tool offsets/wear, operator
 messages, and immutable-workspace program opens. It publishes the complete
 status surface extracted from the pinned LinuxCNC status structures and emits
 typed task, trajectory, joint/axis/spindle, I/O, and tool-table deltas. Live

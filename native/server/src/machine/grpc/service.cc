@@ -479,24 +479,6 @@ class MachineServiceImpl final : public MachineService::CallbackService,
         command.kind = NmlCommandKind::UnhomeJoint;
         command.integer = request->unhome_joint().joint_index();
         break;
-      case ExecuteCommandRequest::kJogStop:
-        command.kind = NmlCommandKind::JogStop;
-        command.integer = request->jog_stop().axis_or_joint_index();
-        command.boolean = request->jog_stop().is_joint_jog();
-        break;
-      case ExecuteCommandRequest::kJogContinuous:
-        command.kind = NmlCommandKind::JogContinuous;
-        command.integer = request->jog_continuous().axis_or_joint_index();
-        command.boolean = request->jog_continuous().is_joint_jog();
-        command.number = request->jog_continuous().speed();
-        break;
-      case ExecuteCommandRequest::kJogIncrement:
-        command.kind = NmlCommandKind::JogIncrement;
-        command.integer = request->jog_increment().axis_or_joint_index();
-        command.boolean = request->jog_increment().is_joint_jog();
-        command.number = request->jog_increment().speed();
-        command.number2 = request->jog_increment().increment();
-        break;
       case ExecuteCommandRequest::kSetMinPositionLimit:
         command.kind = NmlCommandKind::SetMinPositionLimit;
         command.integer = request->set_min_position_limit().joint_index();

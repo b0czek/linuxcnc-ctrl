@@ -213,11 +213,6 @@ int main(int argc, char** argv) {
            [](auto& request) {
              request.mutable_set_feed_rate()->set_scale(1.0);
            }},
-          {"jog",
-           [](auto& request) {
-             request.mutable_jog_stop()->set_axis_or_joint_index(0);
-             request.mutable_jog_stop()->set_is_joint_jog(false);
-           }},
           {"spindle",
            [](auto& request) {
              request.mutable_spindle_off()->set_spindle_index(0);

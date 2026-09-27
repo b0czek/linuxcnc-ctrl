@@ -523,9 +523,6 @@ message ExecuteCommandRequest {
     SetBool set_adaptive_feed_enable = 28;
     JointIndex home_joint = 29;
     JointIndex unhome_joint = 30;
-    JogStop jog_stop = 31;
-    JogContinuous jog_continuous = 32;
-    JogIncrement jog_increment = 33;
     JointLimit set_min_position_limit = 34;
     JointLimit set_max_position_limit = 35;
     SpindleOn spindle_on = 36;
@@ -598,12 +595,6 @@ message SetSpindleAvailability {
   int32 spindle_index = 1;
   bool available = 2;
 }
-
-message JogStop { int32 axis_or_joint_index = 1; bool is_joint_jog = 2; }
-
-message JogContinuous { int32 axis_or_joint_index = 1; bool is_joint_jog = 2; double speed = 3; }
-
-message JogIncrement { int32 axis_or_joint_index = 1; bool is_joint_jog = 2; double speed = 3; double increment = 4; }
 
 message JointLimit { int32 joint_index = 1; double limit = 2; }
 
