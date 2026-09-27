@@ -4,35 +4,36 @@ Date: Tue, 22 Sep 2026 11:50:09 +0200
 Subject: [PATCH] feat(motion): add native lathe power jogging
 
 ---
- docs/src/man/man1/halui.1.adoc       |  28 ++++
- src/Makefile                         |   1 +
- src/emc/motion-logger/Submakefile    |   1 +
- src/emc/motion/axis.c                |  68 ++++++++-
- src/emc/motion/axis.h                |   5 +-
- src/emc/motion/command.c             |  27 ++++
- src/emc/motion/control.c             |   9 +-
- src/emc/motion/mot_priv.h            |   1 +
- src/emc/motion/motion.c              |   8 ++
- src/emc/motion/motion.h              |   3 +
- src/emc/motion/power_jog.c           | 128 +++++++++++++++++
- src/emc/motion/power_jog.h           |  37 +++++
- src/emc/nml_intf/emc.cc              |  14 ++
- src/emc/nml_intf/emc.hh              |   2 +
- src/emc/nml_intf/emc_nml.hh          |  11 ++
- src/emc/task/emctaskmain.cc          |   8 ++
- src/emc/task/taskintf.cc             |  12 ++
- src/emc/tp/sp_scurve.c               |  52 +++++++
- src/emc/tp/sp_scurve.h               |   7 +
- src/emc/usr_intf/halui.cc            |  14 ++
- src/emc/usr_intf/halui_power_feed.hh |  69 ++++++++++
- tests/power-jog/.gitignore           |   3 +
- tests/power-jog/checkresult          |   4 +
- tests/power-jog/core_sim.hal         |  11 ++
- tests/power-jog/test-ui.py           | 199 +++++++++++++++++++++++++++
- tests/power-jog/test.ini             |  69 ++++++++++
- tests/power-jog/test.sh              |   7 +
- tests/power-jog/tool.tbl             |   1 +
- 28 files changed, 795 insertions(+), 4 deletions(-)
+ docs/src/man/man1/halui.1.adoc        |  28 ++++
+ src/Makefile                          |   1 +
+ src/emc/motion-logger/Submakefile     |   1 +
+ src/emc/motion-logger/motion-logger.c |   6 +
+ src/emc/motion/axis.c                 |  68 ++++++++-
+ src/emc/motion/axis.h                 |   5 +-
+ src/emc/motion/command.c              |  27 ++++
+ src/emc/motion/control.c              |   9 +-
+ src/emc/motion/mot_priv.h             |   1 +
+ src/emc/motion/motion.c               |   8 ++
+ src/emc/motion/motion.h               |   3 +
+ src/emc/motion/power_jog.c            | 128 +++++++++++++++++
+ src/emc/motion/power_jog.h            |  37 +++++
+ src/emc/nml_intf/emc.cc               |  14 ++
+ src/emc/nml_intf/emc.hh               |   2 +
+ src/emc/nml_intf/emc_nml.hh           |  11 ++
+ src/emc/task/emctaskmain.cc           |   8 ++
+ src/emc/task/taskintf.cc              |  12 ++
+ src/emc/tp/sp_scurve.c                |  52 +++++++
+ src/emc/tp/sp_scurve.h                |   7 +
+ src/emc/usr_intf/halui.cc             |  14 ++
+ src/emc/usr_intf/halui_power_feed.hh  |  69 +++++++++
+ tests/power-jog/.gitignore            |   3 +
+ tests/power-jog/checkresult           |   4 +
+ tests/power-jog/core_sim.hal          |  11 ++
+ tests/power-jog/test-ui.py            | 199 ++++++++++++++++++++++++++
+ tests/power-jog/test.ini              |  69 +++++++++
+ tests/power-jog/test.sh               |   7 +
+ tests/power-jog/tool.tbl              |   1 +
+ 29 files changed, 801 insertions(+), 4 deletions(-)
  create mode 100644 src/emc/motion/power_jog.c
  create mode 100644 src/emc/motion/power_jog.h
  create mode 100644 src/emc/usr_intf/halui_power_feed.hh
@@ -107,6 +108,23 @@ index 7b572d7c32..acdd1b532c 100644
  	emc/motion/simple_tp.c \
  	emc/tp/sp_scurve.c \
  	emc/tp/ruckig_wrapper.c
+diff --git a/src/emc/motion-logger/motion-logger.c b/src/emc/motion-logger/motion-logger.c
+index ae7c8d3f6e..65900c1af3 100644
+--- a/src/emc/motion-logger/motion-logger.c
++++ b/src/emc/motion-logger/motion-logger.c
+@@ -667,6 +667,12 @@ int main(int argc, char* argv[]) {
+                           c->spindle, c->available);
+                 break;
+ 
++            case EMCMOT_JOG_POWER:
++                log_print("JOG_POWER x_direction=%d, z_direction=%d, feed_per_rev=%.6g, taper_slope=%.6g\n",
++                          c->power_x_direction, c->power_z_direction,
++                          c->power_feed_per_rev, c->power_taper_slope);
++                break;
++
+             case EMCMOT_SET_SPINDLESYNC:
+                 log_print("SET_SPINDLESYNC sync=%06f, flags=0x%08x\n", c->spindlesync, c->flags);
+                 break;
 diff --git a/src/emc/motion/axis.c b/src/emc/motion/axis.c
 index 1be690a25c..279a577e96 100644
 --- a/src/emc/motion/axis.c
