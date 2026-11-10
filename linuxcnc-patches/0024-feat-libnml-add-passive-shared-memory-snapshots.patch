@@ -1,0 +1,570 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dariusz Majnert <dariusz.majnert@gmail.com>
+Date: Fri, 23 Oct 2026 17:26:35 +0200
+Subject: [PATCH] feat(libnml): add passive shared-memory snapshots
+
+---
+ src/libnml/Submakefile                   |   1 +
+ src/libnml/buffer/shmem.cc               |  12 ++
+ src/libnml/buffer/shmem_snapshot.cc      | 169 +++++++++++++++++++++++
+ src/libnml/buffer/shmem_snapshot.hh      |  48 +++++++
+ src/libnml/buffer/shmem_snapshot_lock.cc | 110 +++++++++++++++
+ src/libnml/buffer/shmem_snapshot_lock.hh |  20 +++
+ src/libnml/cms/cms_cfg.cc                | 123 +++++++++++++++++
+ 7 files changed, 483 insertions(+)
+ create mode 100644 src/libnml/buffer/shmem_snapshot.cc
+ create mode 100644 src/libnml/buffer/shmem_snapshot.hh
+ create mode 100644 src/libnml/buffer/shmem_snapshot_lock.cc
+ create mode 100644 src/libnml/buffer/shmem_snapshot_lock.hh
+
+diff --git a/src/libnml/Submakefile b/src/libnml/Submakefile
+index b49c035029..da24fdcb46 100644
+--- a/src/libnml/Submakefile
++++ b/src/libnml/Submakefile
+@@ -7,6 +7,7 @@ LIBNMLSRCS := $(addprefix libnml/, \
+ \
+ 	buffer/locmem.cc buffer/memsem.cc buffer/phantom.cc buffer/physmem.cc \
+ 	buffer/recvn.c buffer/sendn.c buffer/shmem.cc buffer/tcpmem.cc \
++	buffer/shmem_snapshot.cc buffer/shmem_snapshot_lock.cc \
+ \
+ 	cms/cms.cc cms/cms_aup.cc cms/cms_cfg.cc cms/cms_in.cc cms/cms_dup.cc \
+ 	cms/cms_pm.cc cms/cms_srv.cc cms/cms_up.cc cms/cms_xup.cc \
+diff --git a/src/libnml/buffer/shmem.cc b/src/libnml/buffer/shmem.cc
+index 00406f9cc9..afe6f97433 100644
+--- a/src/libnml/buffer/shmem.cc
++++ b/src/libnml/buffer/shmem.cc
+@@ -29,6 +29,7 @@
+ #include <rtapi_string.h>	/* rtapi_strlcpy */
+ #include "libnml/rcs/rcs_print.hh"		/* rcs_print_error() */
+ #include "libnml/cms/cms.hh"		/* class CMS */
++#include "shmem_snapshot_lock.hh"
+ #include "shmem.hh"		/* class SHMEM */
+ #include "libnml/os_intf/shm.hh"		/* class RCS_SHAREDMEM */
+ //#include "sem.hh"             /* class RCS_SEMAPHORE */
+@@ -151,6 +152,11 @@ SHMEM::SHMEM(const char *bufline, const char *procline, int set_to_server, int s
+ 	use_os_sem_only = 0;
+     }
+ 
++    NML_SNAPSHOT_LEASE initialization;
++    if (master && !initialization.acquire(bufline, false, true, 2.0)) {
++        status = CMS_CONFIG_ERROR;
++        return;
++    }
+     /* Open the shared memory buffer and create mutual exclusion semaphore. */
+     open();
+ }
+@@ -402,6 +408,12 @@ int SHMEM::close()
+ {
+     int nattch = 0;
+     second_read = 0;
++    // Passive snapshot readers stay attached only while holding the shared
++    // lease. Holding the exclusive lease while counting attachments keeps a
++    // reader from making the last process leave the segment and semaphore
++    // behind. Without a usable lease, teardown proceeds as before.
++    NML_SNAPSHOT_LEASE teardown;
++    if (NULL != shm) teardown.acquire(BufferLine, false, true, 2.0);
+ 
+ /*! \todo Another #if 0 */
+ #if 0				// PC Do we need to use autokey ?
+diff --git a/src/libnml/buffer/shmem_snapshot.cc b/src/libnml/buffer/shmem_snapshot.cc
+new file mode 100644
+index 0000000000..12b535ab62
+--- /dev/null
++++ b/src/libnml/buffer/shmem_snapshot.cc
+@@ -0,0 +1,169 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "shmem_snapshot.hh"
++
++#include <cerrno>
++#include <cmath>
++#include <cstring>
++#include <cstdio>
++#include <sys/ipc.h>
++#include <sys/sem.h>
++#include <sys/shm.h>
++#include <unistd.h>
++
++namespace {
++constexpr long name_bytes = 32;
++}
++
++CMS_SHMEM_SNAPSHOT::CMS_SHMEM_SNAPSHOT(const char *buffer_line,
++                                     const char *process_line)
++    : CMS(buffer_line, process_line, -1)
++{
++    // These checks belong to the access owner, independently of any caller's
++    // config admission. Only the current raw, single-message OS_SEM layout is
++    // supported. Never enter the legacy SHMEM constructor/open/close paths.
++    if (status < 0 || BufferType != CMS_SHMEM_TYPE || ProcessType != CMS_LOCAL_TYPE ||
++        neutral || queuing_enabled || split_buffer || enable_diagnostics ||
++        total_subdivisions != 1 || is_local_master || spawn_server ||
++        !read_permission_flag || write_permission_flag ||
++        std::strlen(BufferName) >= name_bytes || size <= name_bytes + total_connections +
++            static_cast<long>(sizeof(CMS_HEADER)) || total_connections <= 0 ||
++        std::strstr(buflineupper, "MUTEX=") ||
++        std::strstr(buflineupper, "BSEM=") ||
++        std::strstr(buflineupper, "AUTOCNUM") ||
++        std::strstr(buflineupper, "VERSION=") ||
++        std::strstr(buflineupper, "SUBDIV=") ||
++        std::strstr(proclineupper, "SEMDELAY=")) {
++        status = CMS_CONFIG_ERROR;
++        return;
++    }
++    if (!lifecycle_.acquire(buffer_line, true, false, 0.05)) {
++        status = CMS_CONFIG_ERROR;
++        return;
++    }
++    // open() has already admitted canonical bounded decimal fields.
++    int key = 0;
++    if (std::sscanf(buffer_line, "%*s %*s %*s %*s %*s %*s %*s %*s %*s %d", &key) != 1 || key <= 0) {
++        status = CMS_CONFIG_ERROR;
++        return;
++    }
++    shared_id_ = ::shmget(static_cast<key_t>(key), static_cast<size_t>(size), 0);
++    if (shared_id_ < 0) { status = CMS_NO_MASTER_ERROR; return; }
++    struct shmid_ds details{};
++    if (::shmctl(shared_id_, IPC_STAT, &details) != 0 ||
++        details.shm_segsz != static_cast<size_t>(size) || (details.shm_perm.mode & SHM_DEST)) {
++        status = CMS_CONFIG_ERROR;
++        return;
++    }
++    mapping_ = ::shmat(shared_id_, nullptr, SHM_RDONLY);
++    // NOLINTNEXTLINE(performance-no-int-to-ptr): SysV shmat failure sentinel.
++    if (mapping_ == reinterpret_cast<void *>(-1)) {
++        mapping_ = nullptr;
++        status = CMS_PERMISSIONS_ERROR;
++        return;
++    }
++    if (!identity_valid()) { status = CMS_CONFIG_ERROR; return; }
++    semaphore_id_ = ::semget(static_cast<key_t>(key), 1, 0);
++    if (semaphore_id_ < 0) { status = CMS_NO_MASTER_ERROR; return; }
++    skip_area = static_cast<int>(name_bytes + total_connections);
++    max_message_size = size - skip_area - static_cast<long>(sizeof(CMS_HEADER));
++    status = CMS_STATUS_NOT_SET;
++}
++
++CMS_SHMEM_SNAPSHOT::~CMS_SHMEM_SNAPSHOT()
++{
++    if (!release()) {
++        // No safe manual repair exists. Keep the attachment and lease until
++        // process exit applies kernel undo, detaches SHM, then closes files.
++        lifecycle_.retain_until_process_exit();
++        return;
++    }
++    if (mapping_ && ::shmdt(mapping_) != 0) lifecycle_.retain_until_process_exit();
++}
++
++bool CMS_SHMEM_SNAPSHOT::identity_valid() const
++{
++    if (!mapping_) return false;
++    struct shmid_ds details{};
++    if (::shmctl(shared_id_, IPC_STAT, &details) != 0 ||
++        details.shm_segsz != static_cast<size_t>(size) || (details.shm_perm.mode & SHM_DEST)) return false;
++    char expected[name_bytes]{};
++    std::memcpy(expected, BufferName, std::strlen(BufferName));
++    return std::memcmp(mapping_, expected, sizeof(expected)) == 0;
++}
++
++bool CMS_SHMEM_SNAPSHOT::take()
++{
++    // Atomic second operation refuses a non-binary value without retaining any
++    // adjustment. A failed/timed-out/removed-ID attempt never grants ownership.
++    struct sembuf operations[2]{{0, -1, SEM_UNDO}, {0, 0, IPC_NOWAIT}};
++    struct timespec budget{};
++    budget.tv_sec = static_cast<time_t>(wait_seconds_);
++    budget.tv_nsec = static_cast<long>((wait_seconds_ - static_cast<double>(budget.tv_sec)) * 1e9);
++    if (::semtimedop(semaphore_id_, operations, 2, &budget) != 0) return false;
++    acquired_ = true;
++    return true;
++}
++
++bool CMS_SHMEM_SNAPSHOT::release()
++{
++    if (!acquired_) return true;
++    if (semaphore_id_ < 0) return false;
++    // Fault detection only: this is not atomic with an external SETVAL.
++    // Supported initializers hold the exclusive lifecycle lease, so cannot
++    // reset while this reader owns its shared lease.
++    if (::semctl(semaphore_id_, 0, GETPID) != ::getpid()) {
++        semaphore_id_ = -1;
++        return false;
++    }
++    // Post only while the value is still zero, atomically, so an external
++    // SETVAL after the check above can never leave a non-binary value.
++    struct sembuf operations[2]{{0, 0, IPC_NOWAIT},
++                                {0, 1, static_cast<short>(SEM_UNDO | IPC_NOWAIT)}};
++    int result;
++    do { result = ::semop(semaphore_id_, operations, 2); } while (result != 0 && errno == EINTR);
++    // Removal clears kernel undo state. Never recreate/reset/compensate against
++    // a fresh ID; on any release failure the caller reports a fault and exits.
++    if (result == 0 || errno == EIDRM || errno == EINVAL) acquired_ = false;
++    if (result != 0 && acquired_) semaphore_id_ = -1;
++    return result == 0;
++}
++
++CMS_STATUS CMS_SHMEM_SNAPSHOT::main_access(void *local, int *serial_number)
++{
++    if (internal_access_type != CMS_PEEK_ACCESS || serial_number || !mapping_ ||
++        semaphore_id_ < 0 || destination_capacity_ <= 0 || acquired_) return status = CMS_PERMISSIONS_ERROR;
++    if (!take()) return status = errno == EAGAIN ? CMS_TIMED_OUT : CMS_MISC_ERROR;
++    CMS_STATUS result = CMS_CONFIG_ERROR;
++    // Identity and size are checked again under this reader's own hold. The
++    // kernel mapping stays read-only even if a future CMS implementation tries
++    // to write. CMS owns and executes the actual message decoding.
++    if (::semctl(semaphore_id_, 0, GETPID) == ::getpid() && identity_valid()) {
++        CMS_HEADER observed{};
++        std::memcpy(&observed, static_cast<const char *>(mapping_) + skip_area, sizeof(observed));
++        if (observed.in_buffer_size > 0 && observed.in_buffer_size <= max_message_size &&
++            observed.in_buffer_size <= destination_capacity_) {
++            result = internal_access(const_cast<void *>(mapping_), size, local, nullptr);
++        }
++    }
++    if (!release()) result = CMS_MISC_ERROR;
++    return status = result;
++}
++
++CMS_STATUS CMS_SHMEM_SNAPSHOT::peek(void *destination, long capacity,
++                                   long &message_size, double timeout_seconds)
++{
++    message_size = 0;
++    if (!destination || capacity <= 0 || !std::isfinite(timeout_seconds) ||
++        timeout_seconds < 0 || timeout_seconds > 1 || !mapping_ || semaphore_id_ < 0) return CMS_CONFIG_ERROR;
++    destination_capacity_ = capacity;
++    wait_seconds_ = timeout_seconds;
++    // Re-read each snapshot through the canonical CMS decoder, including when
++    // the writer's ID is unchanged. No shared read flags are changed by PEEK.
++    in_buffer_id = -1;
++    const auto result = CMS::peek();
++    if (result == CMS_READ_OK) {
++        message_size = header.in_buffer_size;
++        std::memcpy(destination, data, static_cast<size_t>(message_size));
++    }
++    return result;
++}
+diff --git a/src/libnml/buffer/shmem_snapshot.hh b/src/libnml/buffer/shmem_snapshot.hh
+new file mode 100644
+index 0000000000..3fd547a32d
+--- /dev/null
++++ b/src/libnml/buffer/shmem_snapshot.hh
+@@ -0,0 +1,48 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#ifndef CMS_SHMEM_SNAPSHOT_HH
++#define CMS_SHMEM_SNAPSHOT_HH
++
++#include <memory>
++#include "libnml/cms/cms.hh"
++#include "shmem_snapshot_lock.hh"
++
++// Explicit passive access to an existing raw OS-semaphore SHMEM buffer.
++// No IPC creation/removal, shared-memory writes, diagnostics, queueing or tool
++// data. The writer must use the same OS semaphore for its complete update.
++// Every successful hold is paired with SEM_UNDO on both take and release, so
++// process termination restores only this observer's outstanding adjustment.
++class CMS_SHMEM_SNAPSHOT final : private CMS {
++public:
++    using CMS::operator new;
++    using CMS::operator delete;
++    static std::unique_ptr<CMS_SHMEM_SNAPSHOT> open(const char *buffer,
++        const char *process, const char *configuration);
++    ~CMS_SHMEM_SNAPSHOT();
++    CMS_SHMEM_SNAPSHOT(const CMS_SHMEM_SNAPSHOT &) = delete;
++    CMS_SHMEM_SNAPSHOT &operator=(const CMS_SHMEM_SNAPSHOT &) = delete;
++
++    // Copies one consistent message into caller-owned storage. Zero/negative,
++    // oversized and incompatible headers are faults before CMS decoding. Old
++    // messages may be returned again; freshness is the message owner's duty.
++    CMS_STATUS peek(void *destination, long capacity, long &message_size,
++                    double timeout_seconds = 0.05);
++
++private:
++    using CMS::peek;
++    CMS_SHMEM_SNAPSHOT(const char *buffer_line, const char *process_line);
++    CMS_STATUS main_access(void *local, int *serial_number = nullptr) override;
++    bool identity_valid() const;
++    bool take();
++    bool release();
++
++    // Destroyed after the destructor releases its semaphore and detaches.
++    NML_SNAPSHOT_LEASE lifecycle_;
++    int shared_id_ = -1;
++    int semaphore_id_ = -1;
++    const void *mapping_ = nullptr;
++    bool acquired_ = false;
++    double wait_seconds_ = 0;
++    long destination_capacity_ = 0;
++};
++
++#endif
+diff --git a/src/libnml/buffer/shmem_snapshot_lock.cc b/src/libnml/buffer/shmem_snapshot_lock.cc
+new file mode 100644
+index 0000000000..af28f56f6d
+--- /dev/null
++++ b/src/libnml/buffer/shmem_snapshot_lock.cc
+@@ -0,0 +1,110 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "shmem_snapshot_lock.hh"
++
++#include <cctype>
++#include <cerrno>
++#include <chrono>
++#include <cmath>
++#include <fcntl.h>
++#include <linux/magic.h>
++#include <sstream>
++#include <string>
++#include <sys/file.h>
++#include <sys/stat.h>
++#include <sys/vfs.h>
++#include <thread>
++#include <unistd.h>
++
++namespace {
++class Descriptor {
++public:
++    explicit Descriptor(int value = -1) : value_(value) {}
++    ~Descriptor() { if (value_ >= 0) ::close(value_); }
++    Descriptor(const Descriptor &) = delete;
++    Descriptor &operator=(const Descriptor &) = delete;
++    int get() const { return value_; }
++    int release() { const int result = value_; value_ = -1; return result; }
++    void replace(int value) { if (value_ >= 0) ::close(value_); value_ = value; }
++private:
++    int value_;
++};
++}
++
++NML_SNAPSHOT_LEASE::~NML_SNAPSHOT_LEASE()
++{
++    if (descriptor_ >= 0) ::close(descriptor_);
++}
++
++bool NML_SNAPSHOT_LEASE::acquire(const char *buffer_line, bool required,
++                                bool initializer, double timeout_seconds)
++{
++    if (descriptor_ >= 0 || !buffer_line || !std::isfinite(timeout_seconds) ||
++        timeout_seconds < 0 || timeout_seconds > 5) return false;
++    std::istringstream words(buffer_line);
++    std::string word, path;
++    unsigned int index = 0;
++    bool present = false;
++    while (words >> word) {
++        if (index++ < 10 || word.compare(0, 14, "SNAPSHOT_LOCK=")) continue;
++        if (present) return false;
++        present = true;
++        path = word.substr(14);
++    }
++    if (!present) return !required;
++    if (path.empty()) return false;
++    if (path[0] != '/' || path.size() > 200 || path.back() == '/') return false;
++    // Legacy CMS/SHMEM options are matched as substrings of the whole
++    // buffer line, so the path must not spell one of them.
++    std::string upper;
++    for (const char c : path) {
++        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '/' && c != '.' &&
++            c != '_' && c != '-') return false;
++        upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
++    }
++    if (upper.find("MAO_W_OS_SEM") != std::string::npos ||
++        upper.find("AUTOCNUM") != std::string::npos) return false;
++    Descriptor directory(::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
++    if (directory.get() < 0) return false;
++    std::string leaf;
++    size_t position = 1;
++    while (position < path.size()) {
++        const auto slash = path.find('/', position);
++        const auto component = path.substr(position, slash - position);
++        if (component.empty() || component == "." || component == "..") return false;
++        if (slash == std::string::npos) { leaf = component; break; }
++        Descriptor next(::openat(directory.get(), component.c_str(),
++                                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
++        struct stat details{};
++        if (next.get() < 0 || ::fstat(next.get(), &details) != 0 ||
++            ((details.st_mode & 0022) && !(details.st_mode & S_ISVTX))) return false;
++        directory.replace(next.release());
++        position = slash + 1;
++    }
++    Descriptor candidate(::openat(directory.get(), leaf.c_str(), O_PATH | O_NOFOLLOW | O_CLOEXEC));
++    struct stat details{};
++    struct statfs filesystem{};
++    if (candidate.get() < 0 || ::fstat(candidate.get(), &details) != 0 || !S_ISREG(details.st_mode) ||
++        details.st_nlink != 1 || details.st_size != 0 || (details.st_mode & 0022) ||
++        (details.st_uid != 0 && details.st_uid != ::geteuid()) ||
++        ::fstatfs(candidate.get(), &filesystem) != 0 || filesystem.f_type != TMPFS_MAGIC) return false;
++    // O_PATH validates type before opening: substituted FIFOs/devices must not
++    // block or have open side effects. This proc descriptor pins that inode.
++    const auto pinned = std::string("/proc/self/fd/") + std::to_string(candidate.get());
++    Descriptor file(::open(pinned.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK));
++    struct stat opened{};
++    if (file.get() < 0 || ::fstat(file.get(), &opened) != 0 ||
++        opened.st_dev != details.st_dev || opened.st_ino != details.st_ino) return false;
++    const auto deadline = std::chrono::steady_clock::now() +
++        std::chrono::duration<double>(timeout_seconds);
++    const int operation = (initializer ? LOCK_EX : LOCK_SH) | LOCK_NB;
++    while (::flock(file.get(), operation) != 0) {
++        if ((errno != EWOULDBLOCK && errno != EINTR) || std::chrono::steady_clock::now() >= deadline) return false;
++        std::this_thread::sleep_for(std::chrono::milliseconds(2));
++    }
++    struct stat selected{};
++    if (::fstatat(directory.get(), leaf.c_str(), &selected, AT_SYMLINK_NOFOLLOW) != 0 ||
++        selected.st_dev != details.st_dev || selected.st_ino != details.st_ino ||
++        selected.st_nlink != 1 || !S_ISREG(selected.st_mode)) return false;
++    descriptor_ = file.release();
++    return true;
++}
+diff --git a/src/libnml/buffer/shmem_snapshot_lock.hh b/src/libnml/buffer/shmem_snapshot_lock.hh
+new file mode 100644
+index 0000000000..b38ac3b44b
+--- /dev/null
++++ b/src/libnml/buffer/shmem_snapshot_lock.hh
+@@ -0,0 +1,20 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#ifndef NML_SNAPSHOT_LEASE_HH
++#define NML_SNAPSHOT_LEASE_HH
++
++// Opt-in initialization/observation lifetime coordination on a stable local
++// tmpfs inode. No file creation, replacement or permission repair occurs here.
++class NML_SNAPSHOT_LEASE {
++public:
++    NML_SNAPSHOT_LEASE() = default;
++    ~NML_SNAPSHOT_LEASE();
++    NML_SNAPSHOT_LEASE(const NML_SNAPSHOT_LEASE &) = delete;
++    NML_SNAPSHOT_LEASE &operator=(const NML_SNAPSHOT_LEASE &) = delete;
++    bool acquire(const char *buffer_line, bool required, bool initializer,
++                 double timeout_seconds);
++    // On a terminal release fault keep the inode leased until process death.
++    void retain_until_process_exit() { descriptor_ = -1; }
++private:
++    int descriptor_ = -1;
++};
++#endif
+diff --git a/src/libnml/cms/cms_cfg.cc b/src/libnml/cms/cms_cfg.cc
+index 96c4234627..4db9f5ab61 100644
+--- a/src/libnml/cms/cms_cfg.cc
++++ b/src/libnml/cms/cms_cfg.cc
+@@ -883,3 +883,126 @@ int cms_create(CMS ** cms, const char *buffer_line, const char *proc_line,
+     }
+     return (0);
+ }
++
++
++#include "libnml/buffer/shmem_snapshot.hh"
++#include <climits>
++#include <cstring>
++#include <cmath>
++#include <fstream>
++#include <sstream>
++#include <string>
++#include <vector>
++
++namespace {
++bool snapshot_decimal(const std::string &word, long &value)
++{
++    if (word.empty() || (word.size() > 1 && word[0] == '0')) return false;
++    value = 0;
++    for (char digit : word) {
++        if (digit < '0' || digit > '9' || value > (INT_MAX - (digit - '0')) / 10) return false;
++        value = value * 10 + digit - '0';
++    }
++    return true;
++}
++
++bool snapshot_host(const std::string &host)
++{
++    char local[256]{};
++    if (::gethostname(local, sizeof(local) - 1) != 0) return false;
++    return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == local;
++}
++}
++
++std::unique_ptr<CMS_SHMEM_SNAPSHOT> CMS_SHMEM_SNAPSHOT::open(
++    const char *buffer, const char *process, const char *configuration)
++{
++    if (!buffer || !process || !configuration || !*buffer || !*process ||
++        std::strlen(buffer) >= 32) return nullptr;
++    // Closed, explicit subset at the config owner: one immutable read, native
++    // tokenizer, no AUTO/defaults/first-character aliases or optional modes.
++    // The selected copies below are exactly what the CMS decoder receives.
++    std::ifstream input(configuration, std::ios::binary);
++    if (!input) return nullptr;
++    std::string contents(65537, '\0');
++    input.read(&contents[0], static_cast<std::streamsize>(contents.size()));
++    const auto count_read = input.gcount();
++    if (input.bad() || count_read > 65536) return nullptr;
++    contents.resize(static_cast<size_t>(count_read));
++    std::istringstream lines(contents);
++    std::string selected_buffer, selected_process, line;
++    std::vector<std::string> buffer_words, process_words;
++    unsigned int buffers = 0, processes = 0;
++    size_t bytes = 0;
++    while (std::getline(lines, line)) {
++        bytes += line.size() + 1;
++        if (bytes > 65536 || line.size() > 254) return nullptr;
++        for (unsigned char c : line) {
++            if ((c < 32 && c != '\t' && c != '\r') || c > 126 || c == '\\') return nullptr;
++        }
++        const auto cr = line.find('\r');
++        if (cr != std::string::npos && cr != line.size() - 1) return nullptr;
++        if (!line.empty() && line.back() == '\r') line.pop_back();
++        if (line.empty() || line.find_first_not_of(" \t") == std::string::npos || line[0] == '#') continue;
++        if (line[0] == ' ' || line[0] == '\t' || line.find('#') != std::string::npos) return nullptr;
++        char *words[32]{};
++        std::string tokenized = line;
++        int count = separate_words(words, 32, &tokenized[0]);
++        if (count > 0 && count <= 32 && words[count - 1] == nullptr) --count;
++        if (count < 4 || count >= 32) return nullptr;
++        std::vector<std::string> fields;
++        fields.reserve(static_cast<size_t>(count));
++        for (int i = 0; i < count; ++i) fields.emplace_back(words[i]);
++        if (fields[0] != "B" && fields[0] != "P") return nullptr;
++        if (fields[0] == "B" && fields[1] == buffer) {
++            ++buffers;
++            selected_buffer = line;
++            buffer_words = fields;
++        }
++        if (fields[0] == "P" && (fields[1] == process || fields[1] == "default") &&
++            (fields[2] == buffer || fields[2] == "default")) {
++            ++processes;
++            selected_process = line;
++            process_words = fields;
++        }
++    }
++    if (!lines.eof() || buffers != 1 || processes != 1 || buffer_words.size() < 10 ||
++        process_words.size() != 10 || buffer_words[2] != "SHMEM" ||
++        !snapshot_host(buffer_words[3]) || process_words[1] != process ||
++        process_words[2] != buffer || process_words[3] != "LOCAL" ||
++        !snapshot_host(process_words[4]) || process_words[5] != "R" ||
++        process_words[6] != "0" || process_words[8] != "0" || buffer_words[5] != "0") return nullptr;
++    long values[7]{};
++    for (int i = 0; i < 6; ++i) {
++        if (!snapshot_decimal(buffer_words[i + 4], values[i])) return nullptr;
++    }
++    if (!snapshot_decimal(process_words[9], values[6]) || values[0] <= 0 ||
++        values[0] > 4L * 1024 * 1024 || values[4] <= 0 || values[5] <= 0 || values[6] >= values[4] ||
++        values[4] >= values[0] - 32 - static_cast<long>(sizeof(CMS_HEADER))) return nullptr;
++    const auto native_key = static_cast<key_t>(values[5]);
++    if (native_key <= 0 || static_cast<long>(native_key) != values[5]) return nullptr;
++    const auto &timeout = process_words[7];
++    if (timeout.empty() || timeout.front() < '0' || timeout.front() > '9' ||
++        timeout.back() < '0' || timeout.back() > '9' || timeout.find_first_not_of("0123456789.") != std::string::npos ||
++        (timeout[0] == '0' && timeout.size() > 1 && timeout[1] != '.')) return nullptr;
++    char *end = nullptr;
++    const double parsed = std::strtod(timeout.c_str(), &end);
++    if (end != timeout.c_str() + timeout.size() || !std::isfinite(parsed) || parsed < 0) return nullptr;
++    unsigned int ports = 0, leases = 0;
++    for (size_t i = 10; i < buffer_words.size(); ++i) {
++        const auto &option = buffer_words[i];
++        if (option == "xdr" || option == "XDR") continue;
++        if (option.compare(0, 14, "SNAPSHOT_LOCK=") == 0) {
++            if (++leases > 1 || option.size() <= 14 || option[14] != '/') return nullptr;
++            continue;
++        }
++        long port = 0;
++        if (option.compare(0, 4, "TCP=") || ++ports > 1 ||
++            !snapshot_decimal(option.substr(4), port) || port < 1 || port > 65535) return nullptr;
++    }
++    if (leases != 1) return nullptr;
++    auto result = std::unique_ptr<CMS_SHMEM_SNAPSHOT>(
++        new CMS_SHMEM_SNAPSHOT(selected_buffer.c_str(), selected_process.c_str()));
++    if (result->status < 0 || !result->mapping_ || result->semaphore_id_ < 0) return nullptr;
++    return result;
++}

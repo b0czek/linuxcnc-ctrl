@@ -542,3 +542,22 @@ are not supported.
 
 Known limitation, shared with the existing thread `tmax` and `time` handling:
 a failure while creating the parameters leaves a partially created thread.
+
+### 0024 — Passive shared-memory snapshots
+
+Adds the separate opt-in `CMS_SHMEM_SNAPSHOT` API to libnml. Existing message layouts and default client/writer locking are unchanged.
+Configured masters may opt in to bounded exclusive initialization using a
+stable `SNAPSHOT_LOCK` inode, and SHMEM teardown takes the same exclusive lease
+while counting attachments; passive readers require the matching shared
+lifecycle lease through release/undo and detach.
+The new API attaches existing SysV storage with kernel read-only permissions,
+rejects foreign names/sizes and unsupported modes, and delegates supported PEEK
+decoding to CMS under its own balanced `SEM_UNDO` hold. Forced termination
+therefore cannot strand the observer's hold. It creates, resets and removes no
+IPC and uses no tool-data mappings. Within the coordinated lifecycle, failed
+acquisitions never release another owner's hold; external uncoordinated SETVAL
+is unsupported.
+
+The [passive status reader contract](../docs/passive-status.md) documents the
+canonical configuration subset, bounded native executable and real IPC effect
+checks.
