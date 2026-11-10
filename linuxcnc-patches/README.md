@@ -505,28 +505,34 @@ compiler and standard `ld` and `objdump` behavior. The accompanying regression
 test checks option handling at a fake make boundary, compiles a real HAL
 component with paths containing spaces, and exercises the kbuild make recipe.
 
-### 0022 — Native HAL thread period statistics
+### 0022 — Raise HAL_NAME_LEN to 55
+
+Raises the HAL name length from 47 to 55, the value LinuxCNC 2.10 uses, so
+thread names with statistic suffixes and other long names fit. The name length
+is part of the HAL shared-memory layout, so `HAL_VER` is bumped and mixed builds
+refuse to attach. This patch is dropped when the series moves to a LinuxCNC base
+that already has the longer names.
+
+### 0023 — Native HAL thread period statistics
 
 Each HAL thread measures its actual start-to-start interval inside the
-LinuxCNC scheduler and exports target, last, minimum, maximum, mean, absolute
-jitter, average and maximum thread execution time, 25/50-percent outlier
-counts, latest 25-percent outlier sample,
-intervals longer than two target periods, and sample count as read-only HAL
-parameters. A writable `thread-name.period-stats-reset` parameter requests a
-counter reset on the next cycle; like `tmax`, it appears in `halcmd save`
-output. Initialization and stopped intervals are not
-counted. Counts use signed 64-bit HAL parameters so their decimal output can be
-read by existing statistics consumers.
+LinuxCNC scheduler and publishes read-only HAL parameters. All times are in
+nanoseconds:
 
-For thread names longer than 14 characters, the descriptive suffixes would
-exceed HAL's name limit. Those threads keep their full names and use `.p00`
-through `.p14` for the statistics, and `.pr` for the reset parameter. The usual
-descriptive suffixes remain for shorter names.
+| Parameter | Meaning |
+| --- | --- |
+| `period-target` | configured period |
+| `period-last`, `period-min`, `period-max`, `period-avg` | measured start-to-start interval |
+| `jitter`, `jitter-avg`, `jitter-max` | absolute deviation from the configured period |
+| `exec-avg`, `exec-max` | thread execution time |
+| `outlier-q`, `outlier-h` | samples with jitter of at least a quarter or half period |
+| `outlier-at` | sample number of the latest quarter-period outlier |
+| `missed` | intervals longer than two periods |
+| `samples` | measured intervals |
 
-| Compact | Statistic | Compact | Statistic | Compact | Statistic |
-| --- | --- | --- | --- | --- | --- |
-| `p00` | target period | `p05` | average period | `p10` | quarter-period outliers |
-| `p01` | last period | `p06` | average jitter | `p11` | half-period outliers |
-| `p02` | minimum period | `p07` | maximum jitter | `p12` | last quarter outlier sample |
-| `p03` | maximum period | `p08` | average execution | `p13` | deadline misses |
-| `p04` | current jitter | `p09` | maximum execution | `p14` | sample count |
+A writable `<thread>.stats-reset` parameter clears the statistics on the next
+cycle; like `tmax`, it appears in `halcmd save` output. Initialization and
+stopped intervals are not counted. Counts use signed 64-bit HAL parameters so
+their decimal output can be read by existing statistics consumers. Thread names
+of up to 41 characters receive statistics; a longer valid thread name still
+creates its thread, without them, and logs a warning.
