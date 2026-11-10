@@ -95,6 +95,66 @@ if(LINUXCNC_GRPC_ENABLE_NML)
     endif()
 endif()
 
+# A separate status-only process may be cancelled at any instruction. It must
+# use the opt-in passive libnml API; unsupported builds fail explicitly.
+add_library(linuxcnc-passive-status STATIC src/linuxcnc/status_snapshot.cc)
+target_compile_features(linuxcnc-passive-status PUBLIC cxx_std_20)
+target_include_directories(linuxcnc-passive-status PUBLIC include)
+target_compile_options(linuxcnc-passive-status PRIVATE -Wall -Wextra -Wpedantic)
+set(LINUXCNC_PASSIVE_INCLUDE_DIRS
+    "${LINUXCNC_ROOT}/include" "${LINUXCNC_ROOT}/src"
+    "${LINUXCNC_ROOT}/src/rtapi" "${LINUXCNC_ROOT}/src/emc"
+    "${LINUXCNC_ROOT}/src/emc/nml_intf" "${LINUXCNC_ROOT}/src/emc/rs274ngc"
+    "${LINUXCNC_ROOT}/src/emc/kinematics" "${LINUXCNC_ROOT}/src/libnml/nml"
+    "${LINUXCNC_ROOT}/src/libnml/rcs" "${LINUXCNC_ROOT}/src/libnml/cms"
+    "${LINUXCNC_ROOT}/src/libnml/posemath")
+if(LINUXCNC_GRPC_ENABLE_NML AND
+   EXISTS "${LINUXCNC_ROOT}/src/libnml/buffer/shmem_snapshot.hh")
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_INCLUDES ${LINUXCNC_PASSIVE_INCLUDE_DIRS})
+    set(CMAKE_REQUIRED_LIBRARIES "${LINUXCNC_NML_LIBRARY}")
+    set(LINUXCNC_SAVED_TRY_COMPILE_TYPE "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
+    unset(LINUXCNC_PASSIVE_API_LINKS CACHE)
+    check_cxx_source_compiles("#include <libnml/buffer/shmem_snapshot.hh>
+        int main() { auto p = CMS_SHMEM_SNAPSHOT::open(\"a\",\"b\",\"c\");
+        char data[16]; long size=0; return p ? p->peek(data,16,size,0.01) : 0; }"
+        LINUXCNC_PASSIVE_API_LINKS)
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE "${LINUXCNC_SAVED_TRY_COMPILE_TYPE}")
+    unset(CMAKE_REQUIRED_INCLUDES)
+    unset(CMAKE_REQUIRED_LIBRARIES)
+    if(NOT LINUXCNC_PASSIVE_API_LINKS)
+        message(FATAL_ERROR "Passive status header/library mismatch: matching passive libnml API is required")
+    endif()
+    target_compile_definitions(linuxcnc-passive-status PRIVATE LINUXCNC_HAS_PASSIVE_STATUS=1)
+    target_sources(linuxcnc-passive-status PRIVATE src/linuxcnc/emc_ops.cc src/linuxcnc/modal_state_wrapper.cc)
+    target_include_directories(linuxcnc-passive-status SYSTEM PRIVATE ${LINUXCNC_PASSIVE_INCLUDE_DIRS})
+    target_link_libraries(linuxcnc-passive-status PRIVATE "${LINUXCNC_NML_LIBRARY}" "${LINUXCNC_TOOLDATA_LIBRARY}")
+    if(LINUXCNC_GRPC_BUILD_TESTS)
+        add_executable(linuxcnc-passive-status-fixture tests/passive_status_fixture.cc
+            src/linuxcnc/emc_format.cc src/linuxcnc/emc_globals.cc)
+        target_compile_features(linuxcnc-passive-status-fixture PRIVATE cxx_std_20)
+        target_include_directories(linuxcnc-passive-status-fixture SYSTEM PRIVATE ${LINUXCNC_PASSIVE_INCLUDE_DIRS})
+        target_link_libraries(linuxcnc-passive-status-fixture PRIVATE linuxcnc-passive-status)
+        if(NOT CMAKE_CROSSCOMPILING)
+            find_package(Python3 QUIET COMPONENTS Interpreter)
+            if(Python3_Interpreter_FOUND)
+                add_test(NAME linuxcnc-passive-status-effects COMMAND "${Python3_EXECUTABLE}" -B
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_passive_status.py" --suite
+                    "$<TARGET_FILE:linuxcnc-status-snapshot>" "$<TARGET_FILE:linuxcnc-passive-status-fixture>")
+                set_tests_properties(linuxcnc-passive-status-effects PROPERTIES SKIP_RETURN_CODE 77)
+            endif()
+        endif()
+    endif()
+else()
+    message(STATUS "Passive status API unavailable; snapshot executable will report unavailable")
+endif()
+add_executable(linuxcnc-status-snapshot src/daemon/status_snapshot_main.cc)
+target_compile_features(linuxcnc-status-snapshot PRIVATE cxx_std_20)
+target_compile_options(linuxcnc-status-snapshot PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(linuxcnc-status-snapshot PRIVATE linuxcnc-passive-status Threads::Threads)
+install(TARGETS linuxcnc-status-snapshot RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR} COMPONENT passive-status)
+
 # The rs274 interpreter and HAL adapter are native LinuxCNC boundaries,
 # built only when the pinned checkout and its development libraries exist.
 # Their public domain headers remain independent of protobuf, gRPC, and Node.
