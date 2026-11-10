@@ -479,3 +479,54 @@ and feed override. Both axes share acceleration and travel constraints.
 Dedicated power-feed X/Z direction pins keep ordinary axis jogging separate.
 Cancelled motion requires all direction buttons to release before rearming.
 Includes simulator coverage and HALUI pin documentation.
+
+### 0021 — Cross-compile external HAL components
+
+Adds explicit `halcompile` options for selecting a cross-tool prefix, sysroot,
+compiler, relocatable linker, objdump, make executable, and
+`Makefile.modinc`. Tool invocation uses an argument vector rather than a shell
+command, so build paths are not interpreted as shell syntax. Explicit
+compiler, linker, and objdump selections override the corresponding tools
+derived from the cross prefix.
+
+`Makefile.modinc` now uses configurable linker and objdump variables, uses
+the configured include directory for native external components and the
+corresponding directory in the supplied sysroot for cross builds. The sysroot
+applies to realtime and userspace compilation and linking. With `--install`,
+the sysroot also becomes the install root for modules and userspace programs.
+Compiler paths, sysroot paths, and `Makefile.modinc` paths may contain spaces.
+When cross-compiling from a run-in-place LinuxCNC checkout, pass `--modinc`
+pointing to a `Makefile.modinc` configured for the installed target LinuxCNC;
+the run-in-place file contains host checkout paths and is rejected with
+`--sysroot`. The kbuild recipe preserves paths containing spaces when passing
+the compiler, kernel directory, module directory, and symbol file to make.
+With no new options, native compilation retains the existing configured
+compiler and standard `ld` and `objdump` behavior. The accompanying regression
+test checks option handling at a fake make boundary, compiles a real HAL
+component with paths containing spaces, and exercises the kbuild make recipe.
+
+### 0022 — Native HAL thread period statistics
+
+Each HAL thread measures its actual start-to-start interval inside the
+LinuxCNC scheduler and exports target, last, minimum, maximum, mean, absolute
+jitter, average and maximum thread execution time, 25/50-percent outlier
+counts, latest 25-percent outlier sample,
+intervals longer than two target periods, and sample count as read-only HAL
+parameters. A writable `thread-name.period-stats-reset` parameter requests a
+counter reset on the next cycle; like `tmax`, it appears in `halcmd save`
+output. Initialization and stopped intervals are not
+counted. Counts use signed 64-bit HAL parameters so their decimal output can be
+read by existing statistics consumers.
+
+For thread names longer than 14 characters, the descriptive suffixes would
+exceed HAL's name limit. Those threads keep their full names and use `.p00`
+through `.p14` for the statistics, and `.pr` for the reset parameter. The usual
+descriptive suffixes remain for shorter names.
+
+| Compact | Statistic | Compact | Statistic | Compact | Statistic |
+| --- | --- | --- | --- | --- | --- |
+| `p00` | target period | `p05` | average period | `p10` | quarter-period outliers |
+| `p01` | last period | `p06` | average jitter | `p11` | half-period outliers |
+| `p02` | minimum period | `p07` | maximum jitter | `p12` | last quarter outlier sample |
+| `p03` | maximum period | `p08` | average execution | `p13` | deadline misses |
+| `p04` | current jitter | `p09` | maximum execution | `p14` | sample count |

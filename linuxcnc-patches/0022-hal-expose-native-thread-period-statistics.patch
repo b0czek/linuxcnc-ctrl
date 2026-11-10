@@ -1,0 +1,462 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dariusz Majnert <dariusz.majnert@gmail.com>
+Date: Tue, 22 Sep 2026 21:15:00 +0200
+Subject: [PATCH] hal: expose native thread period statistics
+
+---
+ src/hal/hal_lib.c                             | 71 +++++++++++++++
+ src/hal/hal_period_stats.h                    | 89 +++++++++++++++++++
+ src/hal/hal_priv.h                            | 22 ++++-
+ tests/save.0/expected                         |  1 +
+ .../arithmetic.c                              | 81 +++++++++++++++++
+ tests/thread-period-stats-arithmetic/expected |  0
+ tests/thread-period-stats-arithmetic/test.sh  |  9 ++
+ tests/thread-period-stats/README              |  3 +
+ tests/thread-period-stats/checkresult         | 20 +++++
+ tests/thread-period-stats/test.hal            | 10 +++
+ 10 files changed, 305 insertions(+), 1 deletion(-)
+ create mode 100644 src/hal/hal_period_stats.h
+ create mode 100644 tests/thread-period-stats-arithmetic/arithmetic.c
+ create mode 100644 tests/thread-period-stats-arithmetic/expected
+ create mode 100644 tests/thread-period-stats-arithmetic/test.sh
+ create mode 100644 tests/thread-period-stats/README
+ create mode 100755 tests/thread-period-stats/checkresult
+ create mode 100644 tests/thread-period-stats/test.hal
+
+diff --git a/src/hal/hal_lib.c b/src/hal/hal_lib.c
+index 653fa53f0c..513b9ab6b2 100644
+--- a/src/hal/hal_lib.c
++++ b/src/hal/hal_lib.c
+@@ -56,9 +56,11 @@
+ #include <rtapi.h>		/* RTAPI realtime OS API */
+ #include "hal.h"		/* HAL public API decls */
+ #include "hal_priv.h"		/* HAL private decls */
++#include "hal_period_stats.h"
+ 
+ #include <rtapi_string.h>
+ #include <rtapi_atomic.h>
++#include <limits.h>
+ 
+ #ifdef RTAPI
+ #include <rtapi_app.h>
+@@ -2074,6 +2076,17 @@ int hal_create_thread(const char *name, unsigned long period_nsec, int uses_fp)
+     hal_thread_t *new, *tptr;
+     long prev_period, curr_period;
+     char buf[HAL_NAME_LEN + 1];
++    unsigned int stat_index;
++    int compact_stat_names;
++    char compact_name[4];
++    struct period_stat_param {
++        const char *name;
++        hal_u32_t *value;
++    } period_stats[10];
++    struct period_count_param {
++        const char *name;
++        hal_s64_t *value;
++    } period_counts[5];
+ 
+     rtapi_print_msg(RTAPI_MSG_DBG,
+ 	"HAL: creating thread %s, %ld nsec\n", name, period_nsec);
+@@ -2234,6 +2247,54 @@ int hal_create_thread(const char *name, unsigned long period_nsec, int uses_fp)
+         return -EINVAL;
+     }
+     *(new->runtime) = 0;
++    /* The longest descriptive suffix needs 33 characters with its separator. */
++    compact_stat_names = strlen(new->name) + 33 > HAL_NAME_LEN;
++    new->target_period_ns = new->period > UINT_MAX ? UINT_MAX : new->period;
++    period_stats[0] = (struct period_stat_param){"target-period-ns", &new->target_period_ns};
++    period_stats[1] = (struct period_stat_param){"last-period-ns", &new->last_period_ns};
++    period_stats[2] = (struct period_stat_param){"minimum-period-ns", &new->minimum_period_ns};
++    period_stats[3] = (struct period_stat_param){"maximum-period-ns", &new->maximum_period_ns};
++    period_stats[4] = (struct period_stat_param){"current-jitter-ns", &new->current_jitter_ns};
++    period_stats[5] = (struct period_stat_param){"average-period-ns", &new->average_period_ns};
++    period_stats[6] = (struct period_stat_param){"average-jitter-ns", &new->average_jitter_ns};
++    period_stats[7] = (struct period_stat_param){"maximum-jitter-ns", &new->maximum_jitter_ns};
++    period_stats[8] = (struct period_stat_param){"average-execution-ns", &new->average_execution_ns};
++    period_stats[9] = (struct period_stat_param){"maximum-execution-ns", &new->maximum_execution_ns};
++    period_counts[0] = (struct period_count_param){"jitter-over-quarter-period-count", &new->jitter_over_quarter_period_count};
++    period_counts[1] = (struct period_count_param){"jitter-over-half-period-count", &new->jitter_over_half_period_count};
++    period_counts[2] = (struct period_count_param){"last-quarter-outlier-sample", &new->last_jitter_over_quarter_period_sample};
++    period_counts[3] = (struct period_count_param){"deadline-misses", &new->deadline_misses};
++    period_counts[4] = (struct period_count_param){"sample-count", &new->sample_count};
++    for (stat_index = 0; stat_index < 10; stat_index++) {
++        rtapi_snprintf(compact_name, sizeof(compact_name), "p%02u", stat_index);
++        const char *stat_name = compact_stat_names ? compact_name : period_stats[stat_index].name;
++        if (hal_param_u32_newf(HAL_RO, period_stats[stat_index].value,
++                new->comp_id, "%s.%s", new->name, stat_name)) {
++            rtapi_print_msg(RTAPI_MSG_ERR,
++                "HAL: ERROR: fail to create period stat '%s.%s'\n",
++                new->name, stat_name);
++            return -EINVAL;
++        }
++    }
++    for (stat_index = 0; stat_index < 5; stat_index++) {
++        rtapi_snprintf(compact_name, sizeof(compact_name), "p%02u", stat_index + 10);
++        const char *stat_name = compact_stat_names ? compact_name : period_counts[stat_index].name;
++        if (hal_param_s64_newf(HAL_RO, period_counts[stat_index].value,
++                new->comp_id, "%s.%s", new->name, stat_name)) {
++            rtapi_print_msg(RTAPI_MSG_ERR,
++                "HAL: ERROR: fail to create period count '%s.%s'\n",
++                new->name, stat_name);
++            return -EINVAL;
++        }
++    }
++    if (hal_param_bit_newf(HAL_RW, &new->period_stats_reset,
++            new->comp_id, "%s.%s", new->name,
++            compact_stat_names ? "pr" : "period-stats-reset")) {
++        rtapi_print_msg(RTAPI_MSG_ERR,
++            "HAL: ERROR: fail to create period reset for thread '%s'\n",
++            new->name);
++        return -EINVAL;
++    }
+     hal_ready(new->comp_id);
+ 
+     rtapi_print_msg(RTAPI_MSG_DBG, "HAL: thread created\n");
+@@ -3150,6 +3211,7 @@ static void thread_task(void *arg)
+     hal_funct_entry_t *funct_root, *funct_entry;
+     long long int start_time, end_time;
+     long long int thread_start_time;
++    int recorded_sample;
+ 
+     thread = arg;
+     while (1) {
+@@ -3173,6 +3235,7 @@ static void thread_task(void *arg)
+                 funct_entry = SHMPTR(funct_entry->links.next);
+             }
+             rtapi_task_self_resync();
++            thread->previous_period_start_ns = 0;
+             thread->init_done = 1;
+             /* drain the list now that the init pass is complete */
+             funct_entry = SHMPTR(funct_root->links.next);
+@@ -3190,6 +3253,7 @@ static void thread_task(void *arg)
+ 	    start_time = rtapi_get_time();
+ 	    end_time = start_time;
+ 	    thread_start_time = start_time;
++	    recorded_sample = hal_period_stats_record_start(thread, thread_start_time);
+ 	    /* run thru function list */
+ 	    while (funct_entry != funct_root) {
+ 		/* call the function */
+@@ -3216,6 +3280,12 @@ static void thread_task(void *arg)
+ 	    if ( *(thread->runtime) > thread->maxtime) {
+ 	        thread->maxtime = *(thread->runtime);
+ 	    }
++	    if (recorded_sample) {
++	        unsigned long long execution_ns = end_time - thread_start_time;
++	        hal_period_stats_record_execution(thread, execution_ns);
++	    }
++	} else {
++	    thread->previous_period_start_ns = 0;
+ 	}
+ 	/* wait until next period */
+ 	rtapi_wait();
+@@ -3570,6 +3640,7 @@ static hal_thread_t *alloc_thread_struct(void)
+     }
+     if (p) {
+ 	/* make sure it's empty */
++	memset(p, 0, sizeof(*p));
+ 	p->next_ptr = 0;
+ 	p->uses_fp = 0;
+ 	p->period = 0;
+diff --git a/src/hal/hal_period_stats.h b/src/hal/hal_period_stats.h
+new file mode 100644
+index 0000000000..e5200a454d
+--- /dev/null
++++ b/src/hal/hal_period_stats.h
+@@ -0,0 +1,89 @@
++#ifndef HAL_PERIOD_STATS_H
++#define HAL_PERIOD_STATS_H
++
++#include <limits.h>
++#include "hal.h"
++#include "hal_priv.h"
++
++static inline void hal_period_stats_clear(hal_thread_t *thread)
++{
++    thread->last_period_ns = 0;
++    thread->minimum_period_ns = 0;
++    thread->maximum_period_ns = 0;
++    thread->current_jitter_ns = 0;
++    thread->average_period_ns = 0;
++    thread->average_jitter_ns = 0;
++    thread->maximum_jitter_ns = 0;
++    thread->average_execution_ns = 0;
++    thread->maximum_execution_ns = 0;
++    thread->jitter_over_quarter_period_count = 0;
++    thread->jitter_over_half_period_count = 0;
++    thread->last_jitter_over_quarter_period_sample = 0;
++    thread->deadline_misses = 0;
++    thread->sample_count = 0;
++    thread->period_sum_ns = 0;
++    thread->jitter_sum_ns = 0;
++    thread->execution_sum_ns = 0;
++    thread->previous_period_start_ns = 0;
++    thread->period_stats_reset = 0;
++}
++
++static inline int hal_period_stats_record_start(hal_thread_t *thread,
++                                                 long long start_ns)
++{
++    unsigned long long actual_period, jitter, average;
++    int recorded = 0;
++
++    if (thread->period_stats_reset) hal_period_stats_clear(thread);
++    if (thread->previous_period_start_ns > 0 &&
++            start_ns >= thread->previous_period_start_ns) {
++        actual_period = start_ns - thread->previous_period_start_ns;
++        jitter = actual_period > (unsigned long long)thread->period
++            ? actual_period - thread->period : thread->period - actual_period;
++        thread->last_period_ns = actual_period > UINT_MAX ? UINT_MAX : actual_period;
++        thread->current_jitter_ns = jitter > UINT_MAX ? UINT_MAX : jitter;
++        if (thread->minimum_period_ns == 0 ||
++                actual_period < thread->minimum_period_ns)
++            thread->minimum_period_ns = thread->last_period_ns;
++        if (actual_period > thread->maximum_period_ns)
++            thread->maximum_period_ns = thread->last_period_ns;
++        if (jitter > thread->maximum_jitter_ns)
++            thread->maximum_jitter_ns = thread->current_jitter_ns;
++        if (thread->sample_count < LLONG_MAX)
++            thread->sample_count++;
++        recorded = 1;
++        thread->period_sum_ns += actual_period;
++        thread->jitter_sum_ns += jitter;
++        average = thread->period_sum_ns / thread->sample_count;
++        thread->average_period_ns = average > UINT_MAX ? UINT_MAX : average;
++        average = thread->jitter_sum_ns / thread->sample_count;
++        thread->average_jitter_ns = average > UINT_MAX ? UINT_MAX : average;
++        if (jitter >= ((unsigned long long)thread->period + 3) / 4) {
++            if (thread->jitter_over_quarter_period_count < LLONG_MAX)
++                thread->jitter_over_quarter_period_count++;
++            thread->last_jitter_over_quarter_period_sample = thread->sample_count;
++        }
++        if (jitter >= ((unsigned long long)thread->period + 1) / 2 &&
++                thread->jitter_over_half_period_count < LLONG_MAX)
++            thread->jitter_over_half_period_count++;
++        if (actual_period > (unsigned long long)thread->period * 2 &&
++                thread->deadline_misses < LLONG_MAX)
++            thread->deadline_misses++;
++    }
++    thread->previous_period_start_ns = start_ns;
++    return recorded;
++}
++
++static inline void hal_period_stats_record_execution(hal_thread_t *thread,
++                                                     unsigned long long execution_ns)
++{
++    unsigned long long average;
++
++    if (execution_ns > thread->maximum_execution_ns)
++        thread->maximum_execution_ns = execution_ns > UINT_MAX ? UINT_MAX : execution_ns;
++    thread->execution_sum_ns += execution_ns;
++    average = thread->execution_sum_ns / thread->sample_count;
++    thread->average_execution_ns = average > UINT_MAX ? UINT_MAX : average;
++}
++
++#endif
+diff --git a/src/hal/hal_priv.h b/src/hal/hal_priv.h
+index 1bb7d08044..422a769e73 100644
+--- a/src/hal/hal_priv.h
++++ b/src/hal/hal_priv.h
+@@ -118,7 +118,7 @@
+ */
+ 
+ #define HAL_KEY   0x48414C32	/* key used to open HAL shared memory */
+-#define HAL_VER   0x00000010	/* version code */
++#define HAL_VER   0x00000011	/* version code */
+ #define HAL_SIZE  (256*4096)
+ #define HAL_PSEUDO_COMP_PREFIX "__" /* prefix to identify a pseudo component */
+ 
+@@ -394,6 +394,26 @@ struct hal_thread_t {
+     int task_id;		/* ID of the task that runs this thread */
+     hal_s32_t* runtime;	/* (pin) duration of last run, in ns */
+     hal_s32_t maxtime;	/* (param) duration of longest run, in ns */
++    hal_u32_t target_period_ns;
++    hal_u32_t last_period_ns;
++    hal_u32_t minimum_period_ns;
++    hal_u32_t maximum_period_ns;
++    hal_u32_t current_jitter_ns;
++    hal_u32_t average_period_ns;
++    hal_u32_t average_jitter_ns;
++    hal_u32_t maximum_jitter_ns;
++    hal_u32_t average_execution_ns;
++    hal_u32_t maximum_execution_ns;
++    hal_s64_t jitter_over_quarter_period_count;
++    hal_s64_t jitter_over_half_period_count;
++    hal_s64_t last_jitter_over_quarter_period_sample;
++    hal_s64_t deadline_misses;
++    hal_s64_t sample_count;
++    hal_bit_t period_stats_reset;
++    long long previous_period_start_ns;
++    unsigned long long period_sum_ns;
++    unsigned long long jitter_sum_ns;
++    unsigned long long execution_sum_ns;
+     hal_list_t funct_list;	/* list of functions to run */
+     hal_list_t init_funct_list;	/* list of init functions, run once before first cyclic cycle */
+     int init_done;		/* 0 = init pending, 1 = init cycle has executed */
+diff --git a/tests/save.0/expected b/tests/save.0/expected
+index 1ad2895953..1c0bbe6be4 100644
+--- a/tests/save.0/expected
++++ b/tests/save.0/expected
+@@ -11,6 +11,7 @@ newsig unlinked bit
+ net dir stepgen.0.dir => sampler.0.pin.0
+ net step stepgen.0.step => sampler.0.pin.1
+ # parameter values
++setp fast.period-stats-reset                FALSE
+ setp fast.tmax                    0
+ setp sampler.0.tmax                    0
+ setp stepgen.0.dirhold           0x00000001
+diff --git a/tests/thread-period-stats-arithmetic/arithmetic.c b/tests/thread-period-stats-arithmetic/arithmetic.c
+new file mode 100644
+index 0000000000..b424f911f7
+--- /dev/null
++++ b/tests/thread-period-stats-arithmetic/arithmetic.c
+@@ -0,0 +1,81 @@
++#include <assert.h>
++#include <limits.h>
++#include <string.h>
++
++#include "hal_period_stats.h"
++
++int main(void)
++{
++    hal_thread_t thread;
++
++    memset(&thread, 0, sizeof(thread));
++    thread.period = 1000000;
++    thread.target_period_ns = 1000000;
++
++    assert(!hal_period_stats_record_start(&thread, 1000000));
++    assert(thread.sample_count == 0);
++
++    assert(hal_period_stats_record_start(&thread, 2100000));
++    hal_period_stats_record_execution(&thread, 80000);
++    assert(thread.last_period_ns == 1100000);
++    assert(thread.current_jitter_ns == 100000);
++    assert(thread.minimum_period_ns == 1100000);
++    assert(thread.maximum_period_ns == 1100000);
++    assert(thread.jitter_over_quarter_period_count == 0);
++    assert(thread.deadline_misses == 0);
++
++    assert(hal_period_stats_record_start(&thread, 3700000));
++    hal_period_stats_record_execution(&thread, 120000);
++    assert(thread.sample_count == 2);
++    assert(thread.average_period_ns == 1350000);
++    assert(thread.average_jitter_ns == 350000);
++    assert(thread.maximum_jitter_ns == 600000);
++    assert(thread.jitter_over_quarter_period_count == 1);
++    assert(thread.jitter_over_half_period_count == 1);
++    assert(thread.last_jitter_over_quarter_period_sample == 2);
++    assert(thread.average_execution_ns == 100000);
++    assert(thread.maximum_execution_ns == 120000);
++
++    assert(hal_period_stats_record_start(&thread, 6800000));
++    hal_period_stats_record_execution(&thread, 40000);
++    assert(thread.sample_count == 3);
++    assert(thread.last_period_ns == 3100000);
++    assert(thread.minimum_period_ns == 1100000);
++    assert(thread.maximum_period_ns == 3100000);
++    assert(thread.current_jitter_ns == 2100000);
++    assert(thread.average_period_ns == 1933333);
++    assert(thread.average_jitter_ns == 933333);
++    assert(thread.maximum_jitter_ns == 2100000);
++    assert(thread.jitter_over_quarter_period_count == 2);
++    assert(thread.jitter_over_half_period_count == 2);
++    assert(thread.last_jitter_over_quarter_period_sample == 3);
++    assert(thread.deadline_misses == 1);
++    assert(thread.average_execution_ns == 80000);
++    assert(thread.maximum_execution_ns == 120000);
++
++    thread.period_stats_reset = 1;
++    assert(!hal_period_stats_record_start(&thread, 7800000));
++    assert(!thread.period_stats_reset);
++    assert(thread.sample_count == 0);
++    assert(thread.maximum_period_ns == 0);
++    assert(thread.maximum_jitter_ns == 0);
++    assert(thread.maximum_execution_ns == 0);
++    assert(thread.jitter_over_quarter_period_count == 0);
++    assert(thread.deadline_misses == 0);
++    assert(thread.target_period_ns == 1000000);
++
++    assert(hal_period_stats_record_start(&thread, 8800000));
++    hal_period_stats_record_execution(&thread, 60000);
++    assert(thread.sample_count == 1);
++    assert(thread.average_period_ns == 1000000);
++    assert(thread.average_jitter_ns == 0);
++    assert(thread.average_execution_ns == 60000);
++
++    thread.sample_count = UINT_MAX;
++    assert(hal_period_stats_record_start(&thread, 9800000));
++    hal_period_stats_record_execution(&thread, 200000);
++    assert(thread.sample_count == (long long)UINT_MAX + 1);
++    assert(thread.maximum_execution_ns == 200000);
++
++    return 0;
++}
+diff --git a/tests/thread-period-stats-arithmetic/expected b/tests/thread-period-stats-arithmetic/expected
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/tests/thread-period-stats-arithmetic/test.sh b/tests/thread-period-stats-arithmetic/test.sh
+new file mode 100644
+index 0000000000..fa95744a0b
+--- /dev/null
++++ b/tests/thread-period-stats-arithmetic/test.sh
+@@ -0,0 +1,9 @@
++#!/bin/sh
++set -eu
++
++test_dir=$(mktemp -d)
++trap 'rm -rf -- "$test_dir"' EXIT
++cc -std=gnu11 -DULAPI -I"$EMC2_HOME/src/hal" -I"$EMC2_HOME/src/rtapi" \
++    -I"$EMC2_HOME/src" -I"$EMC2_HOME/src/include" \
++    -o "$test_dir/arithmetic" arithmetic.c
++"$test_dir/arithmetic"
+diff --git a/tests/thread-period-stats/README b/tests/thread-period-stats/README
+new file mode 100644
+index 0000000000..635e1f6edf
+--- /dev/null
++++ b/tests/thread-period-stats/README
+@@ -0,0 +1,3 @@
++The period statistics must not prevent a valid 15-character thread name from
++starting. Long thread names use stable, compact suffixes. The sample counter
++is a 64-bit decimal HAL parameter and advances after the thread starts.
+diff --git a/tests/thread-period-stats/checkresult b/tests/thread-period-stats/checkresult
+new file mode 100755
+index 0000000000..52606ccb7b
+--- /dev/null
++++ b/tests/thread-period-stats/checkresult
+@@ -0,0 +1,20 @@
++#!/usr/bin/env python3
++import sys
++
++samples = {"servo-thread.sample-count": [], "long-thread-123.p14": []}
++resets = {"servo-thread.period-stats-reset": False, "long-thread-123.pr": False}
++with open(sys.argv[1], encoding="utf-8") as output:
++    for line in output:
++        fields = line.split()
++        if len(fields) >= 5 and fields[-1] in samples:
++            if fields[1] != "s64" or fields[2] != "RO":
++                raise SystemExit("sample counter has an unexpected type")
++            samples[fields[-1]].append(int(fields[-2], 0))
++        if len(fields) >= 5 and fields[-1] in resets:
++            resets[fields[-1]] = fields[1] == "bit" and fields[2] == "RW"
++
++if not all(resets.values()):
++    raise SystemExit("thread reset parameter was not published")
++for name, observed in samples.items():
++    if len(observed) != 2 or observed[0] != 0 or observed[1] <= 0:
++        raise SystemExit("sample counter did not advance after thread start: " + name)
+diff --git a/tests/thread-period-stats/test.hal b/tests/thread-period-stats/test.hal
+new file mode 100644
+index 0000000000..daae466ddc
+--- /dev/null
++++ b/tests/thread-period-stats/test.hal
+@@ -0,0 +1,10 @@
++setexact_for_test_suite_only
++loadrt threads name1=servo-thread period1=1000000 name2=long-thread-123 period2=2000000
++show param servo-thread.sample-count
++show param servo-thread.period-stats-reset
++show param long-thread-123.p14
++show param long-thread-123.pr
++start
++loadusr -w sleep 0.05
++show param servo-thread.sample-count
++show param long-thread-123.p14
