@@ -9,6 +9,7 @@
 
 #include "config.h"
 #include "hal/query.hpp"
+#include "scope/delta_count.hpp"
 #include "scope/sample_codec.hpp"
 #include "scope/shm_abi.h"
 
@@ -458,20 +459,17 @@ std::optional<ScopeCaptureDelta> copy_delta_unlocked(
       elapsed >= static_cast<std::int64_t>(capacity) * period;
 
   bool reset = !impl.delta_initialized ||
-               sample_length != impl.delta_sample_len ||
-               samples < impl.delta_samples || ambiguous_wrap;
-  int count = reset ? samples : 0;
-  if (!reset && samples > impl.delta_samples) {
-    count = samples - impl.delta_samples;
-  } else if (!reset && start != impl.delta_start) {
-    const int cells =
-        (start - impl.delta_start + buffer_length) % buffer_length;
-    if (cells % sample_length != 0)
-      reset = true;
+               sample_length != impl.delta_sample_len || ambiguous_wrap;
+  int count = samples;
+  if (!reset) {
+    const auto recorded = scope_new_sample_count(
+        ScopeRecordPosition{impl.delta_start, impl.delta_samples},
+        ScopeRecordPosition{start, samples}, sample_length, buffer_length);
+    if (recorded)
+      count = *recorded;
     else
-      count = cells / sample_length;
+      reset = true;
   }
-  if (reset) count = samples;
   if (count > samples || count >= capacity) {
     reset = true;
     count = samples;
