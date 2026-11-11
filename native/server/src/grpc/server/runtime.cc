@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "grpc/server/local_health.hpp"
 #include "grpc/server/service.hpp"
 #include "linuxcnc_grpc/callback_runtime.hpp"
 #include "linuxcnc_grpc/hal/value_telemetry.hpp"
@@ -69,6 +70,16 @@ ServerRuntime::~ServerRuntime() noexcept {
   finalize();
 }
 
+void ServerRuntime::start_local_health(const std::string& endpoint) {
+  if (endpoint.empty()) return;
+  if (!server_ || local_health_ || shutdown_requested_.load() ||
+      control_thread_.joinable())
+    throw std::logic_error(
+        "local health must start once after public startup and before the "
+        "control thread");
+  local_health_ = std::make_unique<LocalHealthServer>(endpoint);
+}
+
 void ServerRuntime::start_control_thread(const sigset_t& shutdown_signals) {
   if (control_thread_.joinable()) {
     throw std::logic_error("gRPC server control thread already started");
@@ -96,6 +107,9 @@ void ServerRuntime::request_shutdown() noexcept {
   // stop auxiliary transport activity, close telemetry, then end callbacks,
   // and finally ask gRPC to leave Wait(). Every step is attempted even when a
   // user-provided/native implementation reports an exception.
+  invoke_shutdown("local-health", [this] {
+    if (local_health_) local_health_->shutdown();
+  });
   invoke_shutdown("health-check", [this] {
     if (server_) {
       if (auto* health = server_->GetHealthCheckService()) health->Shutdown();
@@ -192,6 +206,7 @@ void ServerRuntime::finalize() noexcept {
   invoke_shutdown("blocking-shutdown", [this] { blocking_.shutdown(); });
 
   server_.reset();
+  local_health_.reset();
 }
 
 }  // namespace linuxcnc::server::detail

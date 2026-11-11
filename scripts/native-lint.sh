@@ -12,7 +12,7 @@ readonly BUILD_DIR="$1"
 readonly CLANG_TIDY="${CLANG_TIDY:-clang-tidy-21}"
 readonly RUN_CLANG_TIDY="${RUN_CLANG_TIDY:-run-clang-tidy-21}"
 readonly COMPILE_COMMANDS="${BUILD_DIR}/compile_commands.json"
-readonly NATIVE_SOURCE_FILTER="^${REPO_ROOT}/native/server/.*[.](cc|hpp|h)$"
+readonly NATIVE_SOURCE_FILTER="^${REPO_ROOT}/native/(server|transport)/.*[.](cc|hpp|h)$"
 
 if ! command -v "${CLANG_TIDY}" >/dev/null 2>&1; then
   echo "error: ${CLANG_TIDY} is required (install Clang 21 tooling)" >&2

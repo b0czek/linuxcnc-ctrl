@@ -2,6 +2,10 @@
 
 #include <memory>
 
+namespace linuxcnc::transport {
+class ServerIdentity;
+}
+
 namespace linuxcnc::server {
 
 struct DaemonConfig;
@@ -20,7 +24,8 @@ class TelemetryWebSocketServer {
       std::shared_ptr<HalValueTelemetry> hal_telemetry,
       std::shared_ptr<ScopeTelemetry> scope_telemetry,
       std::shared_ptr<ProgramWorkspaceStore> workspaces,
-      BoundedExecutor& parser_worker, AdmissionCounter& preview_admission);
+      BoundedExecutor& parser_worker, AdmissionCounter& preview_admission,
+      const std::shared_ptr<transport::ServerIdentity>& identity = nullptr);
   ~TelemetryWebSocketServer();
 
   TelemetryWebSocketServer(const TelemetryWebSocketServer&) = delete;

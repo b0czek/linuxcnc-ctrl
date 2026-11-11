@@ -14,6 +14,7 @@ inline constexpr std::chrono::seconds kMaxWorkspaceTtl =
 struct DaemonConfig {
   std::string endpoint = "127.0.0.1:50051";
   std::string telemetry_endpoint = "127.0.0.1:50052";
+  std::string health_endpoint;  // Optional health-only unix:/absolute/path.
   std::filesystem::path ini_file;
   std::filesystem::path nml_file;
   std::filesystem::path workspace_root = "/var/lib/linuxcnc-grpc/workspaces";
@@ -22,6 +23,8 @@ struct DaemonConfig {
   std::filesystem::path tls_certificate;
   std::filesystem::path tls_private_key;
   std::filesystem::path tls_client_ca;
+  std::filesystem::path tls_external_key_reference;
+  std::filesystem::path tls_provider_module;
   std::size_t workspace_quota_bytes = std::size_t{256} * 1024U * 1024U;
   std::size_t total_quota_bytes = std::size_t{1024} * 1024U * 1024U;
   std::size_t max_workspaces = 64;
@@ -48,16 +51,18 @@ struct DaemonConfig {
   std::chrono::milliseconds component_default_sampling_period{20};
   std::chrono::milliseconds component_min_sampling_period{5};
   std::chrono::milliseconds component_max_sampling_period{1000};
+  bool allow_plaintext = false;
   bool tls = false;
   bool mtls = false;
   bool reflection = false;
   bool allow_plaintext_non_loopback = false;
+  bool allow_anonymous = false;
 };
 
-// Parses the daemon's intentionally small process-level configuration. gRPC
-// credentials are loaded by the control-plane adapter; telemetry is
-// always plaintext WebSocket. This object validates both endpoint policies
-// before either socket can be bound.
+// Validates both listener policies before either socket can be bound. TLS
+// identity loading is owned by the listener credential composition module.
+bool validate_health_endpoint(const std::string& endpoint,
+                              std::string* error = nullptr);
 bool validate_config(const DaemonConfig& config, std::string* error = nullptr);
 bool validate_program_prefix(const std::filesystem::path& ini_file,
                              const std::filesystem::path& active_directory,

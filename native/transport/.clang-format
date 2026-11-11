@@ -1,0 +1,9 @@
+BasedOnStyle: Google
+Standard: c++17
+IndentWidth: 2
+ColumnLimit: 80
+PointerAlignment: Left
+DerivePointerAlignment: false
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+LineEnding: LF
