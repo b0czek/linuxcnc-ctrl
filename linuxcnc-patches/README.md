@@ -17,6 +17,20 @@ they are materialized into LinuxCNC as a linear Git history with exactly one
 commit per patch. Changing the baseline requires rebasing and validating the
 complete series.
 
+## Migration to v2.10.0-pre2 (in progress)
+
+This branch moves the series from the previous base (`888cb941fbf23ee32fc8e15ca180997d99a39117`) to the
+`v2.10.0-pre2` tag.
+
+- Patches in this directory have been ported and apply to the new base.
+- Patches still waiting to be ported are kept unchanged under
+  [`pending-pre2/`](./pending-pre2). They apply only to the previous base and
+  the tooling ignores them.
+- A patch leaves `pending-pre2/` when its port is accepted. It keeps its number
+  and filename.
+
+Remove this section and the directory once `pending-pre2/` is empty.
+
 ## Continuous integration
 
 Changes under `linuxcnc-patches/` trigger the
@@ -387,7 +401,12 @@ runtime feature.
 function with deterministic kinematics and the real cubic implementation. It
 covers late invalid targets, interpolation failure, and no partial commitment.
 
-### 0017 — Runtime joint and spindle availability
+### ~~0017 — Runtime joint and spindle availability~~
+
+> **Removed** with the move to LinuxCNC v2.10.0-pre2. Upstream added `G28.2`, which homes joints from G-code.
+> Runtime availability is being redesigned around it and will return as a new
+> patch with a new number.
+> The description below records what the patch did.
 
 Adds runtime acquisition and release of individual joints and spindles, allowing
 external hardware to hand physical resources to LinuxCNC and take them back.
@@ -432,7 +451,12 @@ motion. Resources are managed independently, with no automatic pairing or
 switching sequence. Patch 0018 adds the M54/M55 G-code interface to these
 operations.
 
-### 0018 — Standalone M54/M55 interface
+### ~~0018 — Standalone M54/M55 interface~~
+
+> **Removed** with the move to LinuxCNC v2.10.0-pre2. Upstream added `G28.2`, which homes joints from G-code.
+> Runtime availability is being redesigned around it and will return as a new
+> patch with a new number.
+> The description below records what the patch did.
 
 Adds G-code commands for the runtime availability operations in patch 0017.
 `M54` acquires a joint or spindle, and `M55` releases it. Programs can explicitly
@@ -523,7 +547,10 @@ tool wrappers and checks that the target sysroot reaches compilation and
 linking, and that installation honours `DESTDIR`. It also covers paths with
 spaces and a kbuild build that rereads the component Makefile.
 
-### 0022 — Raise HAL_NAME_LEN to 55
+### ~~0022 — Raise HAL_NAME_LEN to 55~~
+
+> **Removed** with the move to LinuxCNC v2.10.0-pre2. Upstream defines `HAL_NAME_LEN` as 55 there.
+> The description below records what the patch did.
 
 Raises the HAL name length from 47 to 55, the value LinuxCNC 2.10 uses, so
 thread names with statistic suffixes and other long names fit. The name length
