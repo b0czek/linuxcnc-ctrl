@@ -74,15 +74,23 @@ commit on the managed branch and export commits with the repository tooling:
 ```
 
 `refresh.sh` requires a linear history rooted at `base-revision`, preserves
-existing filenames by ordinal, names newly appended patches from their commit
+existing filenames by position, names newly appended patches from their commit
 subjects, and replays the generated series before replacing any patch file. It
 then normalizes the checked-out branch to those deterministic replayed commit
 IDs, retaining its prior tip under `linuxcnc-ctrl/backups/` when the IDs
 change. It refuses to remove patches implicitly.
 
-Patch filenames begin with a sequence number. New patches must use the next
-number so their application order remains explicit. The filename order and
-commit order must match.
+Patch filenames begin with a four-digit sequence number. The filename order
+and commit order must match. Numbers are permanent:
+
+- A patch keeps its number for its whole life. The series is never renumbered.
+- Removing a patch leaves a gap. Delete the patch file, and keep its entry in
+  the patch inventory below with the heading struck through and a note saying
+  when and why it was removed, so the inventory still records what was there.
+- A removed patch's number is never reused. New patches take the number after
+  the highest number the series has ever used, including removed patches.
+  `refresh.sh` numbers an appended patch after the highest existing file, so
+  check the inventory when the removed patch was the last one.
 
 ## Patch inventory
 
