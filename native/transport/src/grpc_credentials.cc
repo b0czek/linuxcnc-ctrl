@@ -70,6 +70,10 @@ std::shared_ptr<grpc::ServerCredentials> MakeGrpcServerCredentials(
   if (!identity->client_roots_pem().empty())
     options.set_root_certificate_provider(certificates);
 #else
+  // This gRPC sets TLS 1.2 as the minimum on its own SSL_CTX, overriding the
+  // process default, and offers no option to raise it. File keys can therefore
+  // negotiate TLS 1.2; external keys cannot, as the provider signs only a TLS
+  // 1.3 server CertificateVerify.
   std::vector<grpc::experimental::IdentityKeyCertPair> pairs{
       {identity->key_pem(), identity->certificate_chain_pem()}};
   auto certificates =

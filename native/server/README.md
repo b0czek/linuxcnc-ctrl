@@ -137,6 +137,8 @@ Provide `--tls --tls-certificate=PATH` with exactly one key source:
   interpreted as a file private key, and failed provider loading or signing
   never falls back to file keys or plaintext.
 
+Built against gRPC older than 1.80, a gRPC listener with a file key also
+accepts TLS 1.2 (see [`native/transport`](../transport/README.md)).
 The certificate chain and client trust roots (`--tls-client-ca=PATH`) are PEM
 files. `--mtls` requires both `--tls` and client roots, and client roots require
 `--mtls`. Non-loopback listeners require `--mtls`; server-authenticated TLS
@@ -156,10 +158,11 @@ releasing SSL contexts, then releases gRPC and credentials.
 Telemetry admits at most 16 connections, including pending handshakes. Both
 listeners abandon handshakes after `kServerHandshakeTimeout` (five seconds);
 for telemetry this covers TLS and the WebSocket upgrade. Sessions run on an
-isolated four-thread pool, so blocking signer calls never run on the accept
-thread. The transport's signer deadline limits how long a slow signer can hold pool
-threads. Established writes retain their five-second deadline and
-route-specific bounded queues. TLS authentication supplements the existing
+isolated pool with one thread per admitted connection, so blocking signer calls
+never run on the accept thread and handshakes waiting for a signer cannot stall
+sessions that are streaming. The transport's signer deadline limits how long a
+slow signer can hold a pool thread. Established writes retain their five-second
+deadline and route-specific bounded queues. TLS authentication supplements the existing
 HAL/scope attachment tokens; it does not replace their checks.
 
 Plaintext is an explicit development choice: `--allow-plaintext` permits loopback
