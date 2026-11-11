@@ -1,12 +1,9 @@
 #include "grpc/server/local_health.hpp"
 
 #include <fcntl.h>
-#include <grpcpp/ext/health_check_service_server_builder_option.h>
-#include <grpcpp/grpcpp.h>
-#include <grpcpp/impl/server_builder_plugin.h>
-#include <grpcpp/server_posix.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -16,12 +13,12 @@
 #include <chrono>
 #include <filesystem>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
-#include <vector>
 
-#include "grpc/health/v1/health.grpc.pb.h"
 #include "linuxcnc_grpc/daemon/config.hpp"
+#include "linuxcnc_grpc/linuxcnc/machine_health.hpp"
 
 namespace linuxcnc::server::detail {
 namespace {
@@ -86,8 +83,8 @@ class HealthEndpoint {
 
   void listen() {
     listener_.reset(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
-    // bind never removes an occupied path. Keep path cleanup outside gRPC,
-    // whose Unix listener would unlink a replacement socket on shutdown.
+    // bind never removes an occupied path, so a live socket at this path is
+    // never replaced.
     if (listener_.get() < 0 ||
         bind(listener_.get(), reinterpret_cast<const sockaddr*>(&address_),
              sizeof(address_)) != 0)
@@ -144,83 +141,81 @@ class HealthEndpoint {
   bool owned_{false};
 };
 
-class NoGlobalPlugins final : public ::grpc::ServerBuilderOption {
-  void UpdateArguments(::grpc::ChannelArguments*) override {}
-  void UpdatePlugins(std::vector<std::unique_ptr<::grpc::ServerBuilderPlugin>>*
-                         plugins) override {
-    plugins->clear();
-  }
-};
+constexpr std::size_t kMaxRequestBytes = 1024;
+constexpr auto kClientTimeout = std::chrono::seconds(1);
 
-class HealthService final : public ::grpc::health::v1::Health::Service {
- public:
-  std::atomic<bool> serving{false};
+void set_timeouts(int fd) {
+  timeval timeout{};
+  timeout.tv_sec =
+      std::chrono::duration_cast<std::chrono::seconds>(kClientTimeout).count();
+  // NOLINTNEXTLINE(bugprone-unused-return-value): reads stay bounded by size
+  (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  // NOLINTNEXTLINE(bugprone-unused-return-value): best-effort send bound
+  (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+}
 
- private:
-  ::grpc::Status Check(
-      ::grpc::ServerContext*,
-      const ::grpc::health::v1::HealthCheckRequest* request,
-      ::grpc::health::v1::HealthCheckResponse* response) override {
-    if (!request->service().empty())
-      return {::grpc::StatusCode::NOT_FOUND, "unknown health service"};
-    response->set_status(
-        serving.load(std::memory_order_acquire)
-            ? ::grpc::health::v1::HealthCheckResponse::SERVING
-            : ::grpc::health::v1::HealthCheckResponse::NOT_SERVING);
-    return ::grpc::Status::OK;
+// Reads the request head. Returns its request line, or an empty string for a
+// malformed, oversized or timed-out request.
+std::string read_request_line(int fd) {
+  std::string request;
+  char buffer[256];
+  while (request.find("\r\n\r\n") == std::string::npos) {
+    if (request.size() >= kMaxRequestBytes) return {};
+    const auto count = recv(fd, buffer, sizeof(buffer), 0);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) return {};
+    request.append(buffer, static_cast<std::size_t>(count));
   }
-};
+  return request.substr(0, request.find("\r\n"));
+}
+
+void send_all(int fd, const std::string& data) {
+  std::size_t sent = 0;
+  while (sent < data.size()) {
+    const auto count =
+        send(fd, data.data() + sent, data.size() - sent, MSG_NOSIGNAL);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) return;
+    sent += static_cast<std::size_t>(count);
+  }
+}
+
+std::string response(const char* status, const std::string& body) {
+  return std::string("HTTP/1.1 ") + status +
+         "\r\nContent-Type: application/json\r\nContent-Length: " +
+         std::to_string(body.size()) +
+         "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n" + body;
+}
 
 }  // namespace
 
 class LocalHealthServer::Impl {
  public:
-  explicit Impl(const std::string& endpoint) : endpoint_(endpoint) {
+  Impl(const std::string& endpoint,
+       std::shared_ptr<const MachineHealthCache> machine)
+      : endpoint_(endpoint), machine_(std::move(machine)) {
     endpoint_.listen();
-    ::grpc::ServerBuilder builder;
-    builder.SetOption(std::make_unique<NoGlobalPlugins>());
-    builder.SetOption(
-        std::make_unique<::grpc::HealthCheckServiceServerBuilderOption>(
-            nullptr));
-    builder.RegisterService(&service_);
-    ::grpc::ResourceQuota quota;
-    quota.SetMaxThreads(4);
-    quota.Resize(std::size_t{4} * 1024U * 1024U);
-    builder.SetResourceQuota(quota);
-    builder.SetMaxReceiveMessageSize(4096);
-    builder.SetMaxSendMessageSize(4096);
-    server_ = builder.BuildAndStart();
-    if (!server_) throw std::runtime_error("cannot bind local health endpoint");
-    service_.serving.store(true, std::memory_order_release);
-    try {
-      accept_thread_ = std::thread([this] { accept_connections(); });
-    } catch (...) {
-      server_->Shutdown();
-      server_->Wait();
-      throw;
-    }
+    serving_.store(true, std::memory_order_release);
+    accept_thread_ = std::thread([this] { accept_connections(); });
   }
 
-  ~Impl() {
-    shutdown();
-    server_->Wait();
-    server_.reset();
-  }
+  ~Impl() { shutdown(); }
 
   void shutdown() {
-    service_.serving.store(false, std::memory_order_release);
+    serving_.store(false, std::memory_order_release);
     if (stopped_.exchange(true)) return;
     endpoint_.stop_accepting();
-    accept_thread_.join();
-    server_->Shutdown(std::chrono::system_clock::now() +
-                      std::chrono::seconds(2));
+    if (accept_thread_.joinable()) accept_thread_.join();
   }
 
  private:
+  // Requests are answered one at a time; each is bounded by size and by the
+  // client socket timeouts, so a stalled client delays others by at most
+  // about a second.
   void accept_connections() {
     while (!stopped_.load()) {
-      FileDescriptor client(accept4(endpoint_.fd(), nullptr, nullptr,
-                                    SOCK_CLOEXEC | SOCK_NONBLOCK));
+      FileDescriptor client(
+          accept4(endpoint_.fd(), nullptr, nullptr, SOCK_CLOEXEC));
       if (client.get() < 0) {
         if (errno == EINTR || errno == ECONNABORTED) continue;
         if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS ||
@@ -229,23 +224,54 @@ class LocalHealthServer::Impl {
           std::this_thread::sleep_for(std::chrono::milliseconds(100));
           continue;
         }
-        service_.serving.store(false, std::memory_order_release);
+        serving_.store(false, std::memory_order_release);
         return;
       }
-      if (!stopped_.load())
-        ::grpc::AddInsecureChannelFromFd(server_.get(), client.release());
+      if (stopped_.load()) return;
+      serve(client.get());
     }
   }
 
+  void serve(int fd) const {
+    set_timeouts(fd);
+    const auto line = read_request_line(fd);
+    if (line.empty()) {
+      send_all(fd, response("400 Bad Request", R"({"error":"bad request"})"));
+      return;
+    }
+    const auto method_end = line.find(' ');
+    const auto method = line.substr(0, method_end);
+    const auto target_end = line.find(' ', method_end + 1);
+    const auto target =
+        method_end == std::string::npos
+            ? std::string{}
+            : line.substr(method_end + 1, target_end - method_end - 1);
+    if (target != "/health") {
+      send_all(fd, response("404 Not Found", R"({"error":"not found"})"));
+      return;
+    }
+    if (method != "GET") {
+      send_all(fd, response("405 Method Not Allowed",
+                            R"({"error":"method not allowed"})"));
+      return;
+    }
+    const bool serving = serving_.load(std::memory_order_acquire);
+    const auto machine = machine_ ? machine_->read() : MachineHealth{};
+    send_all(fd, response(serving ? "200 OK" : "503 Service Unavailable",
+                          format_health_json(serving, machine)));
+  }
+
   HealthEndpoint endpoint_;
-  HealthService service_;
-  std::unique_ptr<::grpc::Server> server_;
+  std::shared_ptr<const MachineHealthCache> machine_;
+  std::atomic<bool> serving_{false};
   std::atomic<bool> stopped_{false};
   std::thread accept_thread_;
 };
 
-LocalHealthServer::LocalHealthServer(const std::string& endpoint)
-    : impl_(std::make_unique<Impl>(endpoint)) {}
+LocalHealthServer::LocalHealthServer(
+    const std::string& endpoint,
+    std::shared_ptr<const MachineHealthCache> machine)
+    : impl_(std::make_unique<Impl>(endpoint, std::move(machine))) {}
 LocalHealthServer::~LocalHealthServer() = default;
 void LocalHealthServer::shutdown() { impl_->shutdown(); }
 

@@ -12,6 +12,7 @@ class PositionTelemetry;
 class HalValueTelemetry;
 class ScopeTelemetry;
 class ActiveIni;
+class MachineHealthCache;
 class ProgramWorkspaceStore;
 struct DaemonConfig;
 
@@ -26,7 +27,8 @@ std::unique_ptr<ManagedGrpcService> make_machine_service(
     const DaemonConfig& config,
     std::shared_ptr<ProgramWorkspaceStore> workspaces,
     std::shared_ptr<PositionTelemetry> positions, BoundedExecutor& blocking,
-    AdmissionCounter& stream_admission);
+    AdmissionCounter& stream_admission,
+    std::shared_ptr<MachineHealthCache> health);
 
 std::unique_ptr<ManagedGrpcService> make_program_service(
     const DaemonConfig& config, std::shared_ptr<ProgramWorkspaceStore> store,

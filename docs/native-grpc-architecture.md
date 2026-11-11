@@ -64,9 +64,10 @@ identity; telemetry then uses `wss://`. `--mtls` requires verified client
 certificates before every connection reaches route or attachment-token checks,
 and is required for non-loopback listeners unless explicitly waived.
 Plaintext requires the explicit development options described in the credential
-contract. Optional `--health-endpoint=unix:/absolute/path` exposes only local
-health checks in a private directory, after public startup, and is owned by the
-same runtime shutdown boundary. It exposes no application services and does not
+contract. Optional `--health-endpoint=unix:/absolute/path` serves an HTTP
+`GET /health` in a private directory, after public startup, reporting readiness
+and the status poller's cached task state. It is owned by the same runtime
+shutdown boundary. It exposes no application services and does not
 change public TLS admission. The daemon has no machine lease or application
 authorization layer; application policy belongs outside this repository.
 

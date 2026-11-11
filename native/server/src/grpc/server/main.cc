@@ -20,6 +20,7 @@
 #include "linuxcnc_grpc/grpc/server.hpp"
 #include "linuxcnc_grpc/hal/value_telemetry.hpp"
 #include "linuxcnc_grpc/linuxcnc/active_ini.hpp"
+#include "linuxcnc_grpc/linuxcnc/machine_health.hpp"
 #include "linuxcnc_grpc/listener_credentials.hpp"
 #include "linuxcnc_grpc/position/telemetry.hpp"
 #include "linuxcnc_grpc/program/workspace.hpp"
@@ -84,8 +85,10 @@ int run_grpc_server(const DaemonConfig& config) {
     auto position_telemetry = std::make_shared<PositionTelemetry>(10000);
     auto hal_telemetry = std::make_shared<HalValueTelemetry>(128);
     auto scope_telemetry = std::make_shared<ScopeTelemetry>();
+    auto machine_health = std::make_shared<MachineHealthCache>();
     auto machine = detail::make_machine_service(
-        config, workspaces, position_telemetry, blocking, stream_admission);
+        config, workspaces, position_telemetry, blocking, stream_admission,
+        machine_health);
     auto ini = detail::make_ini_service(active_ini);
     auto program =
         detail::make_program_service(config, workspaces, upload_admission);
@@ -125,7 +128,8 @@ int run_grpc_server(const DaemonConfig& config) {
         std::move(telemetry_websocket), std::move(position_telemetry),
         std::move(hal_telemetry), stream_admission, upload_admission,
         component_admission, blocking, parser_worker, hal_worker, scope_worker);
-    runtime.start_local_health(config.health_endpoint);
+    runtime.start_local_health(config.health_endpoint,
+                               std::move(machine_health));
     std::cout << "linuxcnc-grpc-server listening on " << config.endpoint
               << " and telemetry on " << (config.tls ? "wss://" : "ws://")
               << config.telemetry_endpoint << '\n'

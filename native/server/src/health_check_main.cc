@@ -1,5 +1,11 @@
 #include <grpcpp/grpcpp.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/un.h>
+#include <unistd.h>
 
+#include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -25,6 +31,52 @@ std::optional<std::string> read_file(const std::string& path) {
   std::ostringstream contents;
   contents << input.rdbuf();
   return contents.str();
+}
+
+// The daemon's local Unix health endpoint speaks HTTP/1.1: GET /health
+// answers 200 while serving, with a JSON body.
+bool check_local_health(const std::string& path, std::string* error) {
+  sockaddr_un address{};
+  if (path.empty() || path.size() >= sizeof(address.sun_path)) {
+    *error = "invalid Unix socket path";
+    return false;
+  }
+  address.sun_family = AF_UNIX;
+  std::copy(path.begin(), path.end(), address.sun_path);
+  const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) {
+    *error = "cannot create socket";
+    return false;
+  }
+  timeval timeout{2, 0};
+  // NOLINTNEXTLINE(bugprone-unused-return-value): reads stay bounded by size
+  (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  // NOLINTNEXTLINE(bugprone-unused-return-value): best-effort send bound
+  (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  std::string reply;
+  const std::string request =
+      "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+  if (connect(fd, reinterpret_cast<const sockaddr*>(&address),
+              sizeof(address)) != 0 ||
+      send(fd, request.data(), request.size(), MSG_NOSIGNAL) !=
+          static_cast<ssize_t>(request.size())) {
+    *error = "cannot connect";
+  } else {
+    char buffer[512];
+    for (;;) {
+      const auto count = recv(fd, buffer, sizeof(buffer), 0);
+      if (count < 0 && errno == EINTR) continue;
+      if (count <= 0 || reply.size() > 16384) break;
+      reply.append(buffer, static_cast<std::size_t>(count));
+    }
+  }
+  close(fd);
+  if (!error->empty()) return false;
+  if (reply.rfind("HTTP/1.1 200 ", 0) != 0) {
+    *error = "server is not serving";
+    return false;
+  }
+  return true;
 }
 
 bool option_value(const std::string& argument, const char* name,
@@ -65,6 +117,16 @@ int main(int argc, char** argv) {
     std::cerr << "linuxcnc-grpc-health-check: unknown option " << argument
               << '\n';
     return 2;
+  }
+
+  if (endpoint.rfind("unix:", 0) == 0) {
+    std::string error;
+    if (!check_local_health(endpoint.substr(5), &error)) {
+      std::cerr << "linuxcnc-grpc-health-check: " << error << " on " << endpoint
+                << '\n';
+      return 1;
+    }
+    return 0;
   }
 
   if ((certificate_path.empty() != private_key_path.empty()) ||

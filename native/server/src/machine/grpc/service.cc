@@ -28,6 +28,7 @@
 #include "linuxcnc_grpc/command_coordinator.hpp"
 #include "linuxcnc_grpc/daemon/config.hpp"
 #include "linuxcnc_grpc/linuxcnc/command_validation.hpp"
+#include "linuxcnc_grpc/linuxcnc/machine_health.hpp"
 #include "linuxcnc_grpc/linuxcnc/nml_adapter.hpp"
 #include "linuxcnc_grpc/position/telemetry.hpp"
 #include "linuxcnc_grpc/program/workspace.hpp"
@@ -199,7 +200,8 @@ class MachineServiceImpl final : public MachineService::CallbackService,
                               std::shared_ptr<ProgramWorkspaceStore> workspaces,
                               std::shared_ptr<PositionTelemetry> positions,
                               BoundedExecutor& blocking,
-                              AdmissionCounter& stream_admission)
+                              AdmissionCounter& stream_admission,
+                              std::shared_ptr<MachineHealthCache> health)
       : nml_(config.nml_file, config.command_queue_capacity,
              config.command_completion_timeout),
         filesystem_(1, 16, 4),
@@ -209,6 +211,7 @@ class MachineServiceImpl final : public MachineService::CallbackService,
         workspace_activation_(
             std::make_shared<WorkspaceActivation>(workspaces_)),
         positions_(std::move(positions)),
+        health_(std::move(health)),
         status_period_(config.status_period),
         error_period_(config.error_period),
         position_period_(config.position_period),
@@ -1080,7 +1083,10 @@ class MachineServiceImpl final : public MachineService::CallbackService,
               positions_->append(sample);
             }
           }
-          if (status_due) observe_status(std::move(snapshot), recovered);
+          if (status_due) {
+            if (health_) health_->observe(snapshot);
+            observe_status(std::move(snapshot), recovered);
+          }
         } else if (status_poll == NmlStatusPoll::Stale ||
                    status_poll == NmlStatusPoll::Disconnected) {
           if (status_due) {
@@ -1090,6 +1096,7 @@ class MachineServiceImpl final : public MachineService::CallbackService,
               was_available = status_available_;
             }
             if (was_available) positions_->clear();
+            if (health_) health_->mark_unavailable();
             mark_status_unavailable();
           } else {
             // Position telemetry has its own NML reader. Its failure must not
@@ -1208,6 +1215,7 @@ class MachineServiceImpl final : public MachineService::CallbackService,
   std::shared_ptr<ProgramWorkspaceStore> workspaces_;
   std::shared_ptr<WorkspaceActivation> workspace_activation_;
   std::shared_ptr<PositionTelemetry> positions_;
+  const std::shared_ptr<MachineHealthCache> health_;
   const std::chrono::milliseconds status_period_;
   const std::chrono::milliseconds error_period_;
   std::chrono::milliseconds position_period_;
@@ -1236,10 +1244,11 @@ std::unique_ptr<ManagedGrpcService> make_machine_service(
     const DaemonConfig& config,
     std::shared_ptr<ProgramWorkspaceStore> workspaces,
     std::shared_ptr<PositionTelemetry> positions, BoundedExecutor& blocking,
-    AdmissionCounter& stream_admission) {
-  return std::make_unique<MachineServiceImpl>(config, std::move(workspaces),
-                                              std::move(positions), blocking,
-                                              stream_admission);
+    AdmissionCounter& stream_admission,
+    std::shared_ptr<MachineHealthCache> health) {
+  return std::make_unique<MachineServiceImpl>(
+      config, std::move(workspaces), std::move(positions), blocking,
+      stream_admission, std::move(health));
 }
 
 }  // namespace linuxcnc::server::detail

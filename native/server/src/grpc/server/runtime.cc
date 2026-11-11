@@ -70,14 +70,17 @@ ServerRuntime::~ServerRuntime() noexcept {
   finalize();
 }
 
-void ServerRuntime::start_local_health(const std::string& endpoint) {
+void ServerRuntime::start_local_health(
+    const std::string& endpoint,
+    std::shared_ptr<const MachineHealthCache> machine) {
   if (endpoint.empty()) return;
   if (!server_ || local_health_ || shutdown_requested_.load() ||
       control_thread_.joinable())
     throw std::logic_error(
         "local health must start once after public startup and before the "
         "control thread");
-  local_health_ = std::make_unique<LocalHealthServer>(endpoint);
+  local_health_ =
+      std::make_unique<LocalHealthServer>(endpoint, std::move(machine));
 }
 
 void ServerRuntime::start_control_thread(const sigset_t& shutdown_signals) {

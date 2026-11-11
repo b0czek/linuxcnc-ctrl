@@ -173,8 +173,8 @@ linuxcnc-grpc-server --ini=/etc/linuxcnc/machine.ini --nml=/etc/linuxcnc/machine
   --tls-private-key=/etc/linuxcnc/server-key.pem --tls-client-ca=/etc/linuxcnc/client-roots.pem
 ```
 
-For local process readiness, `--health-endpoint=unix:/absolute/path` enables a
-separate plaintext Unix-domain gRPC listener, disabled by default. TCP, abstract
+For local process readiness and machine state, `--health-endpoint=unix:/absolute/path`
+enables a separate plaintext Unix-domain HTTP/1.1 listener, disabled by default. TCP, abstract
 Unix sockets, relative paths, URI queries/escapes, and non-normalized paths are
 rejected. Create its parent directory first, owned by the daemon user with no
 group/other permissions (for example, mode 0700), and run one daemon per
@@ -183,25 +183,39 @@ probe returns `ECONNREFUSED`, recovering a socket left by a crash or forced
 termination. Live listeners, symlinks, non-sockets, and unsafe parents cause
 startup to fail without removing the occupied path.
 
-This listener registers only the standard `grpc.health.v1.Health/Check` RPC for
-the empty service name. Machine commands and all application services return
-`UNIMPLEMENTED` there; global builder plugins, including reflection, are excluded.
-`ServerRuntime` starts local health only after the public listeners are ready,
-marks it non-serving and stops admission at the start of shutdown, and retains
-its server/service until callbacks have finished. The listener owns the Unix
-socket and passes accepted connections to gRPC; gRPC cannot unlink its path.
-Normal finalization removes only the originally bound socket inode, preserving
-any replacement path and permitting restart. Public gRPC health retains its existing
-TLS/mTLS admission. Local checks use the existing client without a TLS identity:
+The listener answers only `GET /health`; other paths return 404 and other
+methods 405. It serves no gRPC and no application services. The reply is one
+JSON object, sent with `200` while the server is serving and `503` once
+shutdown has started:
+
+```json
+{"version":1,"serving":true,"machine":{"available":true,"age_ms":7,
+ "task_state":4,"interp_state":1,"in_position":true,"ini":"/etc/linuxcnc/machine.ini"}}
+```
+
+`machine` comes from the status poller's cache, so a request never touches
+NML. `available` is false, with no other machine fields, until the first status
+arrives and whenever the NML status channel is stale or disconnected. `age_ms`
+is the time since the last new `EMC_STAT`; task publishes every cycle, so a
+growing age means task has stopped. `task_state` and `interp_state` are the
+LinuxCNC `EMC_TASK_STATE` (1 ESTOP to 4 ON) and `EMC_TASK_INTERP` (1 IDLE to 4
+WAITING) values.
+
+Requests are served one at a time, each bounded to 1 KiB and a one-second
+socket timeout. `ServerRuntime` starts local health only after the public
+listeners are ready and marks it non-serving and stops admission at the start
+of shutdown. Normal finalization removes only the originally bound socket
+inode, preserving any replacement path and permitting restart. Public gRPC
+health retains its existing TLS/mTLS admission. For `unix:` endpoints,
+`linuxcnc-grpc-health-check` sends `GET /health` and succeeds on `200`:
 
 ```sh
 linuxcnc-grpc-health-check unix:/run/linuxcnc-grpc/health.sock
+curl --unix-socket /run/linuxcnc-grpc/health.sock http://localhost/health
 ```
 
-The local client must have no TLS client credentials configured through flags
-or environment. The server identity is solely a server identity and is never
-used as a local client credential. The socket's private directory supplies local
-access control; local health does not authorize access to application services.
+The socket's private directory supplies local access control; local health
+does not authorize access to application services.
 
 CMake prefers `find_package(linuxcnc-transport CONFIG)` and the installed
 `linuxcnc::transport-grpc` target. Standalone source builds fall back to the

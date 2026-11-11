@@ -106,8 +106,8 @@ if [[ ! -x "$linuxcnc_root/scripts/rip-environment" ]]; then
   exit 77
 fi
 
-mkdir -p "$root/active" "$root/workspaces"
-chmod 700 "$root/workspaces"
+mkdir -p "$root/active" "$root/workspaces" "$root/health"
+chmod 700 "$root/workspaces" "$root/health"
 cp "$fixture_dir/sim_mm.var" "$root/sim_mm.var"
 cp "$fixture_dir/sim_mm.tbl" "$root/sim_mm.tbl"
 cp "$linuxcnc_root/configs/common/linuxcnc.nml" "$root/live.nml"
@@ -149,6 +149,7 @@ start_server() {
     --allow-plaintext \
     "--endpoint=127.0.0.1:${grpc_port}" \
     "--telemetry-endpoint=127.0.0.1:${telemetry_port}" \
+    "--health-endpoint=unix:$root/health/health.sock" \
     "--ini=$root/live.ini" \
     "--nml=$root/live.nml" \
     "--workspace-root=$root/workspaces" \
@@ -218,6 +219,39 @@ if ! timeout 60s "$integration" "127.0.0.1:${grpc_port}" \
     "$fixture_dir/simple_linear.ngc" "127.0.0.1:${telemetry_port}" \
     --batch-size=8; then
   cat "$root/linuxcnc.log" "$root/server.log" >&2
+  exit 1
+fi
+
+# The local health endpoint reports the running simulator's task state from
+# the status poller's cache.
+if ! python3 - "$root/health/health.sock" "$root/live.ini" <<'PY'; then
+import json, os, socket, sys, time
+
+deadline = time.monotonic() + 10
+while True:
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(2)
+        client.connect(sys.argv[1])
+        client.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
+        reply = b""
+        while chunk := client.recv(4096):
+            reply += chunk
+    head, _, body = reply.partition(b"\r\n\r\n")
+    health = json.loads(body)
+    machine = health["machine"]
+    if machine["available"] or time.monotonic() > deadline:
+        break
+    time.sleep(0.1)
+assert head.startswith(b"HTTP/1.1 200 "), head
+assert health["serving"] is True, health
+assert machine["available"] is True, health
+assert 0 <= machine["age_ms"] < 1000, health
+assert machine["task_state"] in (1, 2, 3, 4), health
+assert machine["interp_state"] in (1, 2, 3, 4), health
+assert isinstance(machine["in_position"], bool), health
+assert os.path.realpath(machine["ini"]) == os.path.realpath(sys.argv[2]), health
+PY
+  cat "$root/server.log" >&2
   exit 1
 fi
 
