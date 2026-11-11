@@ -13,6 +13,7 @@ class Server;
 namespace linuxcnc::server {
 
 class AdmissionCounter;
+class MachineHealthCache;
 class BoundedExecutor;
 class PositionTelemetry;
 class HalValueTelemetry;
@@ -51,8 +52,11 @@ class ServerRuntime {
   ServerRuntime& operator=(const ServerRuntime&) = delete;
 
   // Call on the owner thread after public startup, before the control thread.
-  // Empty endpoints disable local health.
-  void start_local_health(const std::string& endpoint);
+  // Empty endpoints disable local health. The cache supplies machine state
+  // for GET /health; null reports the machine as unavailable.
+  void start_local_health(
+      const std::string& endpoint,
+      std::shared_ptr<const MachineHealthCache> machine = nullptr);
 
   // Starts the dedicated signal waiter. The caller must block the same
   // signal set in the thread that calls this method before starting it.

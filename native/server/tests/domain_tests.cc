@@ -9,6 +9,7 @@
 #include "linuxcnc_grpc/callback_runtime.hpp"
 #include "linuxcnc_grpc/command_coordinator.hpp"
 #include "linuxcnc_grpc/daemon/config.hpp"
+#include "linuxcnc_grpc/linuxcnc/machine_health.hpp"
 #include "linuxcnc_grpc/linuxcnc/nml_adapter.hpp"
 #include "linuxcnc_grpc/position/history.hpp"
 #include "linuxcnc_grpc/program/workspace.hpp"
@@ -387,8 +388,39 @@ void workspace_test() {
   fs::remove_all(base, error);
 }
 
+void machine_health_test() {
+  MachineHealthCache cache;
+  const auto start = MachineHealthCache::Clock::now();
+  expect(!cache.read(start).available);
+  expect(format_health_json(true, cache.read(start)) ==
+         R"({"version":1,"serving":true,"machine":{"available":false}})");
+
+  NmlStatusSnapshot snapshot;
+  snapshot.task_state = 3;
+  snapshot.interp_state = 2;
+  snapshot.motion_stat.traj.in_position = false;
+  snapshot.ini_filename = std::string("a\"b\\c\n\x01");
+  cache.observe(snapshot, start);
+  const auto health = cache.read(start + std::chrono::milliseconds(42));
+  expect(health.available && health.age.count() == 42);
+  expect(format_health_json(false, health) ==
+         R"({"version":1,"serving":false,"machine":{"available":true,)"
+         R"("age_ms":42,"task_state":3,"interp_state":2,"in_position":false,)"
+         R"("ini":"a\"b\\c\u000a\u0001"}})");
+
+  cache.mark_unavailable();
+  expect(!cache.read(start).available);
+
+  MachineHealthCache bounded(std::chrono::milliseconds(100));
+  bounded.observe(snapshot, start);
+  expect(bounded.read(start + std::chrono::milliseconds(100)).available);
+  const auto stale = bounded.read(start + std::chrono::milliseconds(101));
+  expect(!stale.available && stale.ini_filename.empty());
+}
+
 int main() {
   callback_runtime_test();
+  machine_health_test();
   cleanup_reserve_saturation_test();
   command_coordinator_test();
   daemon_config_test();

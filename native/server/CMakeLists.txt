@@ -30,6 +30,7 @@ set(LINUXCNC_GRPC_DOMAIN_SOURCES
     src/program/workspace_archive.cc
     src/scope/telemetry.cc
     src/linuxcnc/command_validation.cc
+    src/linuxcnc/machine_health.cc
     src/linuxcnc/nml_adapter.cc
 )
 
@@ -364,7 +365,8 @@ if(LINUXCNC_GRPC_BUILD_WIRE)
             COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_grpc_live_integration.sh"
                     "$<TARGET_FILE:linuxcnc-grpc-server>"
                     "$<TARGET_FILE:linuxcnc-grpc-live-integration>"
-                    "${LINUXCNC_ROOT}")
+                    "${LINUXCNC_ROOT}"
+                    "$<TARGET_FILE:linuxcnc-grpc-health-check>")
         set_tests_properties(linuxcnc-grpc-live-integration PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 120)
