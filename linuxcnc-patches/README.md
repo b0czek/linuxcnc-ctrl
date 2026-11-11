@@ -171,6 +171,11 @@ This patch:
   `settings->spindle_mode[s] = SPINDLE_MODE::CONSTANT_RPM` after calling
   `SET_SPINDLE_MODE(s, 0)`, keeping the interpreter model consistent with
   canon when a program ends.
+- Treats the interpreter's `css_maximum[s]` (the G96 `D` limit, which the
+  G33/G76 pitch check reads) the same way: initialized in `Interp::init()`,
+  preserved across `Interp::synch()`, and cleared by M2/M30. Canon keeps its
+  own CSS limit across a mode switch, so resetting only the interpreter's copy
+  would leave the two models disagreeing about the limit.
 
 No new `EMC_STAT` fields or public transport fields are added.
 
