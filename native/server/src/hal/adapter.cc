@@ -6,90 +6,100 @@
 
 #include <hal.h>
 #include <rtapi.h>
-#include <rtapi_mutex.h>
 
-// halpr_find_* and the linked-list roots are intentionally private LinuxCNC
-// APIs. This adapter is the one narrow native boundary that needs them to
-// reproduce halcmd/_hal topology semantics without adding a Node binding layer.
-// daemon.
+// All HAL access goes through LinuxCNC's public API: the query API
+// (hal_list_*, hal_get_*, hal_set_*, hal_comp_by_name) for inspecting and
+// writing items by name, and the typed getters/setters for the pins and
+// parameters of components this adapter owns.
+#include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <map>
 #include <mutex>
+#include <unordered_map>
 #include <utility>
 
-#include "hal_priv.h"
+#include "hal/query.hpp"
 
 namespace linuxcnc::server {
 namespace {
 
-class HalMutex final {
- public:
-  HalMutex() {
-    if (!hal_data) throw HalAdapterError("HAL is not initialized", -ENODEV);
-    rtapi_mutex_get(&hal_data->mutex);
-  }
-  ~HalMutex() { rtapi_mutex_give(&hal_data->mutex); }
-  HalMutex(const HalMutex&) = delete;
-  HalMutex& operator=(const HalMutex&) = delete;
-};
+// A thread counts as running for this long beyond twice its period after its
+// threadbeat pin was last seen to advance (see observe_thread_beats()).
+constexpr auto kThreadRunningGrace = std::chrono::milliseconds(250);
+
+[[noreturn]] void throw_hal_error(const std::string& operation, int code) {
+  // The query API reports -EFAULT only when HAL shared memory is not mapped.
+  if (code == -EFAULT) throw HalAdapterError("HAL is not initialized", -ENODEV);
+  throw HalAdapterError(operation + " failed", code);
+}
+
+int checked(int result, const char* operation) {
+  if (result < 0) throw_hal_error(operation, result);
+  return result;
+}
+
+// Runs `fn` while holding HAL's mutex, so all queries it makes observe one
+// consistent HAL state, as the previous direct shared-memory walk did.
+template <typename Fn>
+void run_locked(Fn&& fn) {
+  checked(hal_query::with_lock(std::forward<Fn>(fn)), "HAL lock");
+}
 
 hal_type_t native_type(HalAdapterType type) {
   switch (type) {
     case HalAdapterType::Bit:
-      return HAL_BIT;
+      return HAL_BOOL;
     case HalAdapterType::Float:
-      return HAL_FLOAT;
+      return HAL_REAL;
     case HalAdapterType::S32:
-      return HAL_S32;
-    case HalAdapterType::U32:
-      return HAL_U32;
     case HalAdapterType::S64:
-      return HAL_S64;
+      return HAL_SINT;
+    case HalAdapterType::U32:
     case HalAdapterType::U64:
-      return HAL_U64;
+      return HAL_UINT;
   }
   return HAL_TYPE_UNSPECIFIED;
 }
 
+// HAL integers are 64-bit only, so HAL items are always reported as S64/U64.
 std::optional<HalAdapterType> adapter_type(hal_type_t type) {
   switch (type) {
-    case HAL_BIT:
+    case HAL_BOOL:
       return HalAdapterType::Bit;
-    case HAL_FLOAT:
+    case HAL_REAL:
       return HalAdapterType::Float;
-    case HAL_S32:
-      return HalAdapterType::S32;
-    case HAL_U32:
-      return HalAdapterType::U32;
-    case HAL_S64:
+    case HAL_SINT:
       return HalAdapterType::S64;
-    case HAL_U64:
+    case HAL_UINT:
       return HalAdapterType::U64;
     default:
+      // HAL_PORT is an implementation-specific internal type; it is not part
+      // of the scalar values exposed by the gRPC HAL oneof.
       return std::nullopt;
   }
 }
 
-HalAdapterPinDirection pin_direction(hal_pin_dir_t direction) {
+HalAdapterPinDirection pin_direction(hal_pdir_t direction) {
   if (direction == HAL_OUT) return HalAdapterPinDirection::Out;
   if (direction == HAL_IO) return HalAdapterPinDirection::Io;
   return HalAdapterPinDirection::In;
 }
 
-HalAdapterParamDirection param_direction(hal_param_dir_t direction) {
+HalAdapterParamDirection param_direction(hal_pdir_t direction) {
   return direction == HAL_RW ? HalAdapterParamDirection::ReadWrite
                              : HalAdapterParamDirection::ReadOnly;
 }
 
-HalAdapterComponentKind component_kind(component_type_t type) {
+HalAdapterComponentKind component_kind(hal_comp_type_t type) {
   switch (type) {
-    case COMPONENT_TYPE_USER:
+    case HAL_COMP_TYPE_USER:
       return HalAdapterComponentKind::User;
-    case COMPONENT_TYPE_REALTIME:
+    case HAL_COMP_TYPE_REALTIME:
       return HalAdapterComponentKind::Realtime;
-    case COMPONENT_TYPE_OTHER:
+    case HAL_COMP_TYPE_OTHER:
       return HalAdapterComponentKind::Other;
     default:
       return HalAdapterComponentKind::Unknown;
@@ -114,113 +124,201 @@ bool same_type(HalAdapterType type, const HalAdapterValue& value) {
   return false;
 }
 
-HalAdapterValue read_value(HalAdapterType type, const void* pointer) {
-  if (!pointer) throw HalAdapterError("HAL item has no data pointer", -EFAULT);
+std::int32_t clamp_s32(rtapi_sint value) {
+  return static_cast<std::int32_t>(
+      std::clamp<rtapi_sint>(value, std::numeric_limits<std::int32_t>::min(),
+                             std::numeric_limits<std::int32_t>::max()));
+}
+
+HalAdapterValue from_hal(hal_type_t type, const hal_query_value_u& value) {
   switch (type) {
-    case HalAdapterType::Bit:
-      return *static_cast<const hal_bit_t*>(pointer);
-    case HalAdapterType::Float:
-      return static_cast<double>(*static_cast<const hal_float_t*>(pointer));
-    case HalAdapterType::S32:
-      return static_cast<std::int32_t>(*static_cast<const hal_s32_t*>(pointer));
-    case HalAdapterType::U32:
-      return static_cast<std::uint32_t>(
-          *static_cast<const hal_u32_t*>(pointer));
-    case HalAdapterType::S64:
-      return static_cast<std::int64_t>(*static_cast<const hal_s64_t*>(pointer));
-    case HalAdapterType::U64:
-      return static_cast<std::uint64_t>(
-          *static_cast<const hal_u64_t*>(pointer));
+    case HAL_BOOL:
+      return static_cast<bool>(value.b);
+    case HAL_REAL:
+      return static_cast<double>(value.r);
+    case HAL_SINT:
+      return static_cast<std::int64_t>(value.s);
+    case HAL_UINT:
+      return static_cast<std::uint64_t>(value.u);
+    default:
+      throw HalAdapterError("Unsupported HAL scalar type", -EINVAL);
   }
-  throw HalAdapterError("Unsupported HAL scalar type", -EINVAL);
 }
 
-bool write_value(HalAdapterType type, void* pointer,
-                 const HalAdapterValue& value) {
-  if (!pointer || !same_type(type, value)) return false;
+// Converts a client value for an item of HAL type `type`. Integer values must
+// match the item's signedness; 32-bit values are widened to HAL's 64-bit
+// storage, which cannot go out of range. Cross-signedness writes are refused,
+// as mismatched types were before.
+std::optional<hal_query_value_u> to_hal(hal_type_t type,
+                                        const HalAdapterValue& value) {
+  hal_query_value_u result{};
   switch (type) {
-    case HalAdapterType::Bit:
-      *static_cast<hal_bit_t*>(pointer) = std::get<bool>(value);
+    case HAL_BOOL:
+      if (const auto* typed = std::get_if<bool>(&value)) {
+        result.b = *typed;
+        return result;
+      }
       break;
-    case HalAdapterType::Float:
-      *static_cast<hal_float_t*>(pointer) = std::get<double>(value);
+    case HAL_REAL:
+      if (const auto* typed = std::get_if<double>(&value)) {
+        result.r = *typed;
+        return result;
+      }
       break;
-    case HalAdapterType::S32:
-      *static_cast<hal_s32_t*>(pointer) = std::get<std::int32_t>(value);
+    case HAL_SINT:
+      if (const auto* typed = std::get_if<std::int64_t>(&value)) {
+        result.s = *typed;
+        return result;
+      }
+      if (const auto* typed = std::get_if<std::int32_t>(&value)) {
+        result.s = *typed;
+        return result;
+      }
       break;
-    case HalAdapterType::U32:
-      *static_cast<hal_u32_t*>(pointer) = std::get<std::uint32_t>(value);
+    case HAL_UINT:
+      if (const auto* typed = std::get_if<std::uint64_t>(&value)) {
+        result.u = *typed;
+        return result;
+      }
+      if (const auto* typed = std::get_if<std::uint32_t>(&value)) {
+        result.u = *typed;
+        return result;
+      }
       break;
-    case HalAdapterType::S64:
-      *static_cast<hal_s64_t*>(pointer) = std::get<std::int64_t>(value);
-      break;
-    case HalAdapterType::U64:
-      *static_cast<hal_u64_t*>(pointer) = std::get<std::uint64_t>(value);
+    default:
       break;
   }
-  return true;
+  return std::nullopt;
 }
 
-void* pin_data(hal_pin_t* pin) {
-  if (!pin) return nullptr;
-  if (pin->signal) {
-    auto* signal = static_cast<hal_sig_t*>(SHMPTR(pin->signal));
-    return signal ? reinterpret_cast<void*>(SHMPTR(signal->data_ptr)) : nullptr;
+// Looks up a pin (HAL_QTYPE_PIN) or parameter (HAL_QTYPE_PARAM) by name.
+// The returned query's strings are valid only while HAL's mutex is held.
+std::optional<hal_query_t> find_pp(const std::string& name, hal_qtype_t qtype) {
+  if (name.empty() || name.size() > HAL_NAME_LEN) return std::nullopt;
+  hal_query_t query{};
+  query.name = name.c_str();
+  query.qtype = qtype;
+  const int result = hal_get_p(&query, nullptr, nullptr);
+  if (result == -ENOENT) return std::nullopt;
+  checked(result, "hal_get_p");
+  return query;
+}
+
+std::optional<hal_query_t> find_signal(const std::string& name) {
+  if (name.empty() || name.size() > HAL_NAME_LEN) return std::nullopt;
+  hal_query_t query{};
+  query.name = name.c_str();
+  const int result = hal_get_s(&query, nullptr, nullptr);
+  if (result == -ENOENT) return std::nullopt;
+  checked(result, "hal_get_s");
+  return query;
+}
+
+// Reads a signed statistics item such as <function>.time (pin) or
+// <thread>.tmax (parameter). HAL writes them with 32-bit setters.
+std::optional<std::int32_t> statistic_value(const std::string& name,
+                                            hal_qtype_t qtype) {
+  const auto query = find_pp(name, qtype);
+  if (!query || query->pp.type != HAL_SINT) return std::nullopt;
+  return clamp_s32(query->pp.value.s);
+}
+
+std::optional<bool> statistic_flag(const std::string& name, hal_qtype_t qtype) {
+  const auto query = find_pp(name, qtype);
+  if (!query || query->pp.type != HAL_BOOL) return std::nullopt;
+  return static_cast<bool>(query->pp.value.b);
+}
+
+hal_qtype_t pp_qtype(HalAdapterItemKind kind) {
+  return kind == HalAdapterItemKind::Param ? HAL_QTYPE_PARAM : HAL_QTYPE_PIN;
+}
+
+// Must run under run_locked().
+std::optional<HalAdapterValue> read_unlocked(
+    const HalAdapterReference& reference) {
+  hal_type_t type = HAL_TYPE_UNINITIALIZED;
+  hal_query_value_u value{};
+  if (reference.kind == HalAdapterItemKind::Signal) {
+    const auto query = find_signal(reference.name);
+    if (!query) return std::nullopt;
+    type = query->sig.type;
+    value = query->sig.value;
+  } else {
+    const auto query = find_pp(reference.name, pp_qtype(reference.kind));
+    if (!query) return std::nullopt;
+    type = query->pp.type;
+    value = query->pp.value;
   }
-  return &pin->dummysig;
+  if (!adapter_type(type)) return std::nullopt;
+  return from_hal(type, value);
 }
 
-std::optional<std::int32_t> runtime_pin_value(const char* owner_name) {
-  if (!owner_name) return std::nullopt;
-  const std::string pin_name = std::string(owner_name) + ".time";
-  if (pin_name.size() > HAL_NAME_LEN) return std::nullopt;
-  auto* pin = halpr_find_pin_by_name(pin_name.c_str());
-  if (!pin || pin->type != HAL_S32) return std::nullopt;
-  const auto* data = static_cast<const hal_s32_t*>(pin_data(pin));
-  if (!data) return std::nullopt;
-  return static_cast<std::int32_t>(*data);
-}
-
-struct ResolvedItem {
-  HalAdapterType type = HalAdapterType::Bit;
-  void* data = nullptr;
-  hal_pin_t* pin = nullptr;
-  hal_param_t* param = nullptr;
-  hal_sig_t* signal = nullptr;
+struct PreparedWrite {
+  const HalAdapterReference* reference = nullptr;
+  hal_type_t type = HAL_TYPE_UNINITIALIZED;
+  hal_query_value_u value{};
 };
 
-std::optional<ResolvedItem> resolve_unlocked(
-    const HalAdapterReference& reference) {
-  ResolvedItem resolved;
-  if (reference.name.empty()) return std::nullopt;
-  switch (reference.kind) {
-    case HalAdapterItemKind::Pin: {
-      resolved.pin = halpr_find_pin_by_name(reference.name.c_str());
-      if (!resolved.pin) return std::nullopt;
-      resolved.data = pin_data(resolved.pin);
-      break;
+// Checks that `reference` exists and accepts `value` from outside HAL. Must
+// run under run_locked() together with apply_unlocked(). The rules are those
+// of the previous direct implementation: unlinked non-output pins, HAL_RW
+// parameters and signals without a writer pin.
+std::optional<PreparedWrite> prepare_unlocked(
+    const HalAdapterReference& reference, const HalAdapterValue& value) {
+  PreparedWrite prepared;
+  prepared.reference = &reference;
+  try {
+    if (reference.kind == HalAdapterItemKind::Signal) {
+      const auto query = find_signal(reference.name);
+      if (!query || query->sig.writers > 0) return std::nullopt;
+      prepared.type = query->sig.type;
+    } else {
+      const auto query = find_pp(reference.name, pp_qtype(reference.kind));
+      if (!query) return std::nullopt;
+      if (reference.kind == HalAdapterItemKind::Pin &&
+          (query->pp.dir == HAL_OUT || query->pp.signal != nullptr))
+        return std::nullopt;
+      if (reference.kind == HalAdapterItemKind::Param &&
+          query->pp.dir != HAL_RW)
+        return std::nullopt;
+      prepared.type = query->pp.type;
     }
-    case HalAdapterItemKind::Param: {
-      resolved.param = halpr_find_param_by_name(reference.name.c_str());
-      if (!resolved.param) return std::nullopt;
-      resolved.data = reinterpret_cast<void*>(SHMPTR(resolved.param->data_ptr));
-      break;
-    }
-    case HalAdapterItemKind::Signal: {
-      resolved.signal = halpr_find_sig_by_name(reference.name.c_str());
-      if (!resolved.signal) return std::nullopt;
-      resolved.data =
-          reinterpret_cast<void*>(SHMPTR(resolved.signal->data_ptr));
-      break;
-    }
+  } catch (const HalAdapterError& error) {
+    // An item without a data target (-EIO) is not writable, as before.
+    if (error.code() == -EIO) return std::nullopt;
+    throw;
   }
-  hal_type_t type = resolved.pin     ? resolved.pin->type
-                    : resolved.param ? resolved.param->type
-                                     : resolved.signal->type;
-  const auto converted = adapter_type(type);
+  const auto converted = to_hal(prepared.type, value);
   if (!converted) return std::nullopt;
-  resolved.type = *converted;
-  return resolved;
+  prepared.value = *converted;
+  return prepared;
+}
+
+bool apply_unlocked(const PreparedWrite& prepared) {
+  const auto& reference = *prepared.reference;
+  hal_query_t query{};
+  query.name = reference.name.c_str();
+  int result = 0;
+  if (reference.kind == HalAdapterItemKind::Signal) {
+    query.sig.type = prepared.type;
+    query.sig.value = prepared.value;
+    result = hal_set_s(&query, nullptr, nullptr);
+  } else {
+    query.qtype = pp_qtype(reference.kind);
+    query.pp.type = prepared.type;
+    query.pp.value = prepared.value;
+    result = hal_set_p(&query, nullptr, nullptr);
+  }
+  if (result == -EFAULT) throw_hal_error("HAL write", result);
+  return result == 0;
+}
+
+HalAdapterValue read_back_unlocked(const HalAdapterReference& reference) {
+  auto value = read_unlocked(reference);
+  if (!value)
+    throw HalAdapterError("HAL item '" + reference.name + "' vanished",
+                          -ENOENT);
+  return *value;
 }
 
 std::string full_name(const std::string& prefix, const std::string& suffix) {
@@ -230,15 +328,123 @@ std::string full_name(const std::string& prefix, const std::string& suffix) {
   return result;
 }
 
+int create_pin(int component_id, hal_pdir_t direction, HalAdapterType type,
+               hal_refs_u* ref, const char* name) {
+  switch (type) {
+    case HalAdapterType::Bit:
+      return hal_pin_new_bool(component_id, direction, &ref->b, false, "%s",
+                              name);
+    case HalAdapterType::Float:
+      return hal_pin_new_real(component_id, direction, &ref->r, 0.0, "%s",
+                              name);
+    case HalAdapterType::S32:
+      return hal_pin_new_si32(component_id, direction, &ref->s, 0, "%s", name);
+    case HalAdapterType::U32:
+      return hal_pin_new_ui32(component_id, direction, &ref->u, 0, "%s", name);
+    case HalAdapterType::S64:
+      return hal_pin_new_sint(component_id, direction, &ref->s, 0, "%s", name);
+    case HalAdapterType::U64:
+      return hal_pin_new_uint(component_id, direction, &ref->u, 0, "%s", name);
+  }
+  return -EINVAL;
+}
+
+int create_param(int component_id, hal_pdir_t direction, HalAdapterType type,
+                 hal_refs_u* ref, const char* name) {
+  switch (type) {
+    case HalAdapterType::Bit:
+      return hal_param_new_bool(component_id, direction, &ref->b, false, "%s",
+                                name);
+    case HalAdapterType::Float:
+      return hal_param_new_real(component_id, direction, &ref->r, 0.0, "%s",
+                                name);
+    case HalAdapterType::S32:
+      return hal_param_new_si32(component_id, direction, &ref->s, 0, "%s",
+                                name);
+    case HalAdapterType::U32:
+      return hal_param_new_ui32(component_id, direction, &ref->u, 0, "%s",
+                                name);
+    case HalAdapterType::S64:
+      return hal_param_new_sint(component_id, direction, &ref->s, 0, "%s",
+                                name);
+    case HalAdapterType::U64:
+      return hal_param_new_uint(component_id, direction, &ref->u, 0, "%s",
+                                name);
+  }
+  return -EINVAL;
+}
+
+// Reads an owned item through its handle. Items declared with a 32-bit type
+// keep that type for their owner; HAL stores 64 bits, so a value outside the
+// 32-bit range (set from outside, or by a linked 64-bit writer) is clamped.
+std::optional<HalAdapterValue> read_owned(HalAdapterType type,
+                                          const hal_refs_u& ref) {
+  switch (type) {
+    case HalAdapterType::Bit:
+      if (!ref.b) return std::nullopt;
+      return static_cast<bool>(hal_get_bool(ref.b));
+    case HalAdapterType::Float:
+      if (!ref.r) return std::nullopt;
+      return static_cast<double>(hal_get_real(ref.r));
+    case HalAdapterType::S32:
+      if (!ref.s) return std::nullopt;
+      return static_cast<std::int32_t>(hal_get_si32_clamped(ref.s));
+    case HalAdapterType::U32:
+      if (!ref.u) return std::nullopt;
+      return static_cast<std::uint32_t>(hal_get_ui32_clamped(ref.u));
+    case HalAdapterType::S64:
+      if (!ref.s) return std::nullopt;
+      return static_cast<std::int64_t>(hal_get_sint(ref.s));
+    case HalAdapterType::U64:
+      if (!ref.u) return std::nullopt;
+      return static_cast<std::uint64_t>(hal_get_uint(ref.u));
+  }
+  return std::nullopt;
+}
+
+bool write_owned(HalAdapterType type, const hal_refs_u& ref,
+                 const HalAdapterValue& value) {
+  if (!same_type(type, value)) return false;
+  switch (type) {
+    case HalAdapterType::Bit:
+      if (!ref.b) return false;
+      hal_set_bool(ref.b, std::get<bool>(value));
+      return true;
+    case HalAdapterType::Float:
+      if (!ref.r) return false;
+      hal_set_real(ref.r, std::get<double>(value));
+      return true;
+    case HalAdapterType::S32:
+      if (!ref.s) return false;
+      hal_set_si32(ref.s, std::get<std::int32_t>(value));
+      return true;
+    case HalAdapterType::U32:
+      if (!ref.u) return false;
+      hal_set_ui32(ref.u, std::get<std::uint32_t>(value));
+      return true;
+    case HalAdapterType::S64:
+      if (!ref.s) return false;
+      hal_set_sint(ref.s, std::get<std::int64_t>(value));
+      return true;
+    case HalAdapterType::U64:
+      if (!ref.u) return false;
+      hal_set_uint(ref.u, std::get<std::uint64_t>(value));
+      return true;
+  }
+  return false;
+}
+
+// Holds the pin and parameter handles of owned components. HAL requires the
+// handle storage to come from hal_malloc(), which cannot be freed, so slots
+// are recycled across components.
 class HalAllocationSlab final {
  public:
   explicit HalAllocationSlab(std::size_t capacity) : capacity_(capacity) {
-    static_assert(sizeof(hal_data_u) >= sizeof(void*));
-    const auto bytes = static_cast<long>(capacity * sizeof(hal_data_u));
-    slots_ = static_cast<hal_data_u*>(hal_malloc(bytes));
+    const auto bytes = static_cast<long>(capacity * sizeof(hal_refs_u));
+    slots_ = static_cast<hal_refs_u*>(hal_malloc(bytes));
     if (!slots_)
       throw HalAdapterError("HAL dynamic item slab allocation failed", -EBUSY);
-    std::memset(slots_, 0, capacity * sizeof(hal_data_u));
+    std::memset(slots_, 0, capacity * sizeof(hal_refs_u));
     free_.reserve(capacity);
     for (std::size_t index = capacity; index > 0; --index)
       free_.push_back(index - 1);
@@ -249,22 +455,22 @@ class HalAllocationSlab final {
     if (free_.empty()) return std::nullopt;
     const auto index = free_.back();
     free_.pop_back();
-    std::memset(slots_ + index, 0, sizeof(hal_data_u));
+    std::memset(slots_ + index, 0, sizeof(hal_refs_u));
     return index;
   }
 
   void release(std::size_t index) {
     std::lock_guard lock(mutex_);
     if (index >= capacity_) return;
-    std::memset(slots_ + index, 0, sizeof(hal_data_u));
+    std::memset(slots_ + index, 0, sizeof(hal_refs_u));
     free_.push_back(index);
   }
 
-  void* data(std::size_t index) { return slots_ + index; }
+  hal_refs_u* data(std::size_t index) { return slots_ + index; }
 
  private:
   const std::size_t capacity_;
-  hal_data_u* slots_ = nullptr;
+  hal_refs_u* slots_ = nullptr;
   std::mutex mutex_;
   std::vector<std::size_t> free_;
 };
@@ -282,9 +488,8 @@ struct LinuxCncHalComponent::Impl {
     std::string full_name;
     HalAdapterType type = HalAdapterType::Bit;
     bool pin = false;
-    hal_pin_dir_t pin_direction = HAL_DIR_UNSPECIFIED;
-    hal_param_dir_t param_direction = HAL_RO;
-    void* data_location = nullptr;
+    hal_pdir_t direction = HAL_DIR_UNSPECIFIED;
+    hal_refs_u* ref = nullptr;
     std::size_t slab_slot = 0;
   };
 
@@ -308,12 +513,88 @@ struct LinuxCncHalComponent::Impl {
     }
     items.clear();
   }
+
+  bool add(const std::string& suffix, HalAdapterType type, bool pin,
+           hal_pdir_t direction) {
+    if (id <= 0 || ready || suffix.empty() || items.find(suffix) != items.end())
+      return false;
+    const auto full = full_name(prefix, suffix);
+    if (full.empty()) return false;
+    const auto slot = slab->acquire();
+    if (!slot)
+      throw HalAdapterError("global HAL dynamic item quota reached", -EBUSY);
+    auto [it, inserted] = items.emplace(
+        suffix,
+        Item{suffix, full, type, pin, direction, slab->data(*slot), *slot});
+    if (!inserted) {
+      slab->release(*slot);
+      return false;
+    }
+    const auto& item = it->second;
+    const int result =
+        pin ? create_pin(id, direction, type, item.ref, item.full_name.c_str())
+            : create_param(id, direction, type, item.ref,
+                           item.full_name.c_str());
+    if (result != 0) {
+      items.erase(it);
+      slab->release(*slot);
+      throw HalAdapterError(std::string(pin ? "hal_pin_new" : "hal_param_new") +
+                                " failed for '" + full + "'",
+                            result);
+    }
+    return true;
+  }
 };
 
 struct LinuxCncHalAdapter::Impl {
+  struct BeatState {
+    rtapi_sint beat = 0;
+    std::optional<std::chrono::steady_clock::time_point> last_change;
+  };
+
   int component_id = 0;
   std::string component_name;
   std::shared_ptr<HalAllocationSlab> slab;
+  std::mutex beat_mutex;
+  std::unordered_map<std::string, BeatState> beats;
+
+  // HAL no longer publishes its global "threads running" flag. Each thread's
+  // <thread>.threadbeat pin advances once per cycle only while threads run,
+  // so threads are reported as running when any beat advanced within twice
+  // its thread's period plus a grace interval since an earlier topology()
+  // call. A non-zero beat seen for the first time counts as an advance.
+  bool observe_thread_beats(
+      const std::vector<HalAdapterThreadInfo>& threads,
+      const std::vector<std::optional<rtapi_sint>>& thread_beats) {
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard lock(beat_mutex);
+    std::unordered_map<std::string, BeatState> next;
+    bool running = false;
+    for (std::size_t index = 0; index < threads.size(); ++index) {
+      const auto& observed = thread_beats[index];
+      if (!observed) continue;
+      const auto& thread = threads[index];
+      const auto beat = *observed;
+      BeatState state;
+      if (const auto found = beats.find(thread.name); found != beats.end()) {
+        state = found->second;
+        if (state.beat != beat) {
+          state.beat = beat;
+          state.last_change = now;
+        }
+      } else {
+        state.beat = beat;
+        if (beat != 0) state.last_change = now;
+      }
+      const auto window =
+          std::chrono::nanoseconds(thread.period_ns) * 2 + kThreadRunningGrace;
+      if (state.last_change && now - *state.last_change <= window)
+        running = true;
+      next.emplace(thread.name, state);
+    }
+    beats = std::move(next);
+    return running;
+  }
 };
 
 LinuxCncHalComponent::LinuxCncHalComponent(std::unique_ptr<Impl> impl)
@@ -351,75 +632,20 @@ bool LinuxCncHalComponent::ready() const noexcept {
 bool LinuxCncHalComponent::add_pin(const std::string& suffix,
                                    HalAdapterType type,
                                    HalAdapterPinDirection direction) {
-  if (!impl_ || impl_->id <= 0 || impl_->ready || suffix.empty() ||
-      impl_->items.find(suffix) != impl_->items.end())
-    return false;
-  const auto full = full_name(impl_->prefix, suffix);
-  if (full.empty()) return false;
-  const auto slot = impl_->slab->acquire();
-  if (!slot)
-    throw HalAdapterError("global HAL dynamic item quota reached", -EBUSY);
-  auto item = Impl::Item{suffix,
-                         full,
-                         type,
-                         true,
-                         HAL_DIR_UNSPECIFIED,
-                         HAL_RO,
-                         impl_->slab->data(*slot),
-                         *slot};
-  item.pin_direction = direction == HalAdapterPinDirection::Out  ? HAL_OUT
-                       : direction == HalAdapterPinDirection::Io ? HAL_IO
-                                                                 : HAL_IN;
-  auto [it, inserted] = impl_->items.emplace(suffix, std::move(item));
-  if (!inserted) {
-    impl_->slab->release(*slot);
-    return false;
-  }
-  const int result = hal_pin_new(
-      it->second.full_name.c_str(), native_type(type), it->second.pin_direction,
-      static_cast<void**>(it->second.data_location), impl_->id);
-  if (result != 0) {
-    impl_->items.erase(it);
-    impl_->slab->release(*slot);
-    throw HalAdapterError("hal_pin_new failed for '" + full + "'", result);
-  }
-  return true;
+  if (!impl_) return false;
+  const hal_pdir_t native = direction == HalAdapterPinDirection::Out  ? HAL_OUT
+                            : direction == HalAdapterPinDirection::Io ? HAL_IO
+                                                                      : HAL_IN;
+  return impl_->add(suffix, type, true, native);
 }
 
 bool LinuxCncHalComponent::add_param(const std::string& suffix,
                                      HalAdapterType type,
                                      HalAdapterParamDirection direction) {
-  if (!impl_ || impl_->id <= 0 || impl_->ready || suffix.empty() ||
-      impl_->items.find(suffix) != impl_->items.end())
-    return false;
-  const auto full = full_name(impl_->prefix, suffix);
-  if (full.empty()) return false;
-  const auto slot = impl_->slab->acquire();
-  if (!slot)
-    throw HalAdapterError("global HAL dynamic item quota reached", -EBUSY);
-  auto item = Impl::Item{
-      suffix,
-      full,
-      type,
-      false,
-      HAL_DIR_UNSPECIFIED,
-      direction == HalAdapterParamDirection::ReadWrite ? HAL_RW : HAL_RO,
-      impl_->slab->data(*slot),
-      *slot};
-  auto [it, inserted] = impl_->items.emplace(suffix, std::move(item));
-  if (!inserted) {
-    impl_->slab->release(*slot);
-    return false;
-  }
-  const int result = hal_param_new(
-      it->second.full_name.c_str(), native_type(type),
-      it->second.param_direction, it->second.data_location, impl_->id);
-  if (result != 0) {
-    impl_->items.erase(it);
-    impl_->slab->release(*slot);
-    throw HalAdapterError("hal_param_new failed for '" + full + "'", result);
-  }
-  return true;
+  if (!impl_) return false;
+  return impl_->add(
+      suffix, type, false,
+      direction == HalAdapterParamDirection::ReadWrite ? HAL_RW : HAL_RO);
 }
 
 void LinuxCncHalComponent::set_ready() {
@@ -442,31 +668,18 @@ std::optional<HalAdapterValue> LinuxCncHalComponent::read(
     const std::string& suffix) const {
   if (!impl_) return std::nullopt;
   const auto found = impl_->items.find(suffix);
-  if (found == impl_->items.end()) return std::nullopt;
-  const auto& item = found->second;
-  void* data =
-      item.pin ? item.data_location && *static_cast<void**>(item.data_location)
-                     ? *static_cast<void**>(item.data_location)
-                     : nullptr
-               : item.data_location;
-  if (!data) return std::nullopt;
-  return read_value(item.type, data);
+  if (found == impl_->items.end() || !found->second.ref) return std::nullopt;
+  return read_owned(found->second.type, *found->second.ref);
 }
 
 bool LinuxCncHalComponent::write(const std::string& suffix,
                                  HalAdapterValue value) {
   if (!impl_) return false;
   const auto found = impl_->items.find(suffix);
-  if (found == impl_->items.end() || !same_type(found->second.type, value))
-    return false;
-  auto& item = found->second;
-  if (item.pin && item.pin_direction == HAL_IN) return false;
-  void* data =
-      item.pin ? item.data_location && *static_cast<void**>(item.data_location)
-                     ? *static_cast<void**>(item.data_location)
-                     : nullptr
-               : item.data_location;
-  return write_value(item.type, data, value);
+  if (found == impl_->items.end() || !found->second.ref) return false;
+  const auto& item = found->second;
+  if (item.pin && item.direction == HAL_IN) return false;
+  return write_owned(item.type, *item.ref, value);
 }
 
 LinuxCncHalAdapter::LinuxCncHalAdapter(std::string component_name,
@@ -477,7 +690,7 @@ LinuxCncHalAdapter::LinuxCncHalAdapter(std::string component_name,
   if (dynamic_item_capacity == 0 ||
       dynamic_item_capacity >
           static_cast<std::size_t>(std::numeric_limits<long>::max()) /
-              sizeof(hal_data_u))
+              sizeof(hal_refs_u))
     throw HalAdapterError("invalid HAL dynamic item capacity", -EINVAL);
   impl_->component_name = std::move(component_name);
   impl_->component_id = hal_init(impl_->component_name.c_str());
@@ -519,195 +732,201 @@ int LinuxCncHalAdapter::component_id() const noexcept {
 }
 
 HalAdapterTopology LinuxCncHalAdapter::topology() const {
-  HalMutex lock;
   HalAdapterTopology result;
-  for (SHMFIELD(hal_comp_t) next = hal_data->comp_list_ptr; next;
-       next = SHMPTR(next)->next_ptr) {
-    auto* component = static_cast<hal_comp_t*>(SHMPTR(next));
-    HalAdapterComponentInfo info;
-    info.id = component->comp_id;
-    info.name = component->name;
-    info.kind = component_kind(component->type);
-    info.ready = component->ready != 0;
-    if (component->pid > 0) info.pid = component->pid;
-    result.components.push_back(std::move(info));
-  }
-  for (SHMFIELD(hal_funct_t) next = hal_data->funct_list_ptr; next;
-       next = SHMPTR(next)->next_ptr) {
-    auto* function = static_cast<hal_funct_t*>(SHMPTR(next));
-    auto* owner = static_cast<hal_comp_t*>(SHMPTR(function->owner_ptr));
-    HalAdapterFunctionInfo info;
-    info.name = function->name;
-    if (owner) {
-      info.owner_id = owner->comp_id;
-      info.owner_name = owner->name;
+  std::vector<std::optional<rtapi_sint>> thread_beats;
+  run_locked([&] {
+    checked(hal_query::list_components([&](hal_query_t& query) {
+              HalAdapterComponentInfo info;
+              info.id = query.comp.comp_id;
+              info.name = query.name;
+              info.kind = component_kind(query.comp.type);
+              info.ready = query.comp.ready;
+              if (query.comp.pid > 0) info.pid = query.comp.pid;
+              result.components.push_back(std::move(info));
+            }),
+            "hal_list_comp");
+
+    checked(hal_query::list_functions([&](hal_query_t& query) {
+              HalAdapterFunctionInfo info;
+              info.name = query.name;
+              info.owner_id = query.funct.comp_id;
+              if (query.funct.comp) info.owner_name = query.funct.comp;
+              // HAL no longer tracks a per-function floating-point flag; all
+              // functions may use floating point.
+              info.uses_fp = true;
+              info.reentrant = query.funct.reentrant;
+              info.users = query.funct.users;
+              result.functions.push_back(std::move(info));
+            }),
+            "hal_list_funct");
+    for (auto& function : result.functions) {
+      // HAL publishes the execution statistics as items owned by the
+      // function's component: <funct>.time (pin), <funct>.tmax and
+      // <funct>.tmax-increased (parameters).
+      function.runtime =
+          statistic_value(function.name + ".time", HAL_QTYPE_PIN);
+      function.max_runtime =
+          statistic_value(function.name + ".tmax", HAL_QTYPE_PARAM).value_or(0);
+      function.max_runtime_increased =
+          statistic_flag(function.name + ".tmax-increased", HAL_QTYPE_PARAM)
+              .value_or(false);
     }
-    info.uses_fp = function->uses_fp != 0;
-    info.reentrant = function->reentrant != 0;
-    info.users = function->users;
-    info.max_runtime = function->maxtime;
-    info.max_runtime_increased = function->maxtime_increased != 0;
-    // hal_funct_t::runtime is a process-local pointer written by the
-    // realtime component. Resolve the exported <function>.time HAL pin
-    // instead of dereferencing that pointer in this daemon process.
-    info.runtime = runtime_pin_value(function->name);
-    result.functions.push_back(std::move(info));
-  }
-  for (SHMFIELD(hal_thread_t) next = hal_data->thread_list_ptr; next;
-       next = SHMPTR(next)->next_ptr) {
-    auto* thread = static_cast<hal_thread_t*>(SHMPTR(next));
-    HalAdapterThreadInfo info;
-    info.name = thread->name;
-    info.period_ns = thread->period;
-    info.priority = thread->priority;
-    info.uses_fp = thread->uses_fp != 0;
-    info.running = hal_data->threads_running != 0;
-    info.max_runtime = thread->maxtime;
-    // hal_thread_t::runtime has the same process-local pointer semantics as
-    // hal_funct_t::runtime. The shared <thread>.time pin is the safe view.
-    info.runtime = runtime_pin_value(thread->name);
-    auto* root = &thread->funct_list;
-    for (auto* entry = list_next(root); entry != root;
-         entry = list_next(entry)) {
-      auto* function_entry = reinterpret_cast<hal_funct_entry_t*>(entry);
-      auto* function =
-          static_cast<hal_funct_t*>(SHMPTR(function_entry->funct_ptr));
-      if (function) info.functions.emplace_back(function->name);
+
+    checked(hal_query::list_threads(
+                true,
+                [&](hal_query_t& query) {
+                  if (query.qtype == HAL_QTYPE_THREAD) {
+                    HalAdapterThreadInfo info;
+                    info.name = query.name;
+                    info.period_ns = query.thread.period;
+                    info.priority = query.thread.priority;
+                    info.uses_fp = true;
+                    result.threads.push_back(std::move(info));
+                  } else if (query.qtype == HAL_QTYPE_THREAD_FUNCT &&
+                             !query.thread.is_init && query.thread.funct &&
+                             !result.threads.empty()) {
+                    // One-shot init functions are not part of the cyclic
+                    // function list reported here.
+                    result.threads.back().functions.emplace_back(
+                        query.thread.funct);
+                  }
+                }),
+            "hal_list_thread");
+    thread_beats.reserve(result.threads.size());
+    for (auto& thread : result.threads) {
+      thread.runtime = statistic_value(thread.name + ".time", HAL_QTYPE_PIN);
+      thread.max_runtime =
+          statistic_value(thread.name + ".tmax", HAL_QTYPE_PARAM).value_or(0);
+      const auto beat = find_pp(thread.name + ".threadbeat", HAL_QTYPE_PIN);
+      thread_beats.push_back(beat && beat->pp.type == HAL_SINT
+                                 ? std::optional<rtapi_sint>(beat->pp.value.s)
+                                 : std::nullopt);
     }
-    result.threads.push_back(std::move(info));
-  }
-  for (SHMFIELD(hal_pin_t) next = hal_data->pin_list_ptr; next;
-       next = SHMPTR(next)->next_ptr) {
-    auto* pin = static_cast<hal_pin_t*>(SHMPTR(next));
-    HalAdapterPinInfo info;
-    info.name = pin->name;
-    const auto converted = adapter_type(pin->type);
-    // HAL_PORT is an implementation-specific internal type; it is not part
-    // of the six scalar values exposed by the gRPC HAL oneof.
-    if (!converted) continue;
-    info.type = *converted;
-    info.direction = pin_direction(pin->dir);
-    auto* owner = static_cast<hal_comp_t*>(SHMPTR(pin->owner_ptr));
-    if (owner) info.owner_id = owner->comp_id;
-    if (pin->signal) {
-      auto* signal = static_cast<hal_sig_t*>(SHMPTR(pin->signal));
-      if (signal) info.signal_name = signal->name;
+
+    checked(hal_query::list_pins_params(
+                HAL_QTYPE_PIN,
+                [&](hal_query_t& query) {
+                  const auto converted = adapter_type(query.pp.type);
+                  if (!converted) return;
+                  HalAdapterPinInfo info;
+                  info.name = query.name;
+                  info.type = *converted;
+                  info.direction = pin_direction(query.pp.dir);
+                  info.owner_id = query.pp.comp_id;
+                  if (query.pp.signal) info.signal_name = query.pp.signal;
+                  info.value = from_hal(query.pp.type, query.pp.value);
+                  result.pins.push_back(std::move(info));
+                }),
+            "hal_list_p");
+
+    checked(hal_query::list_pins_params(
+                HAL_QTYPE_PARAM,
+                [&](hal_query_t& query) {
+                  const auto converted = adapter_type(query.pp.type);
+                  if (!converted) return;
+                  HalAdapterParamInfo info;
+                  info.name = query.name;
+                  info.type = *converted;
+                  info.direction = param_direction(query.pp.dir);
+                  info.owner_id = query.pp.comp_id;
+                  info.value = from_hal(query.pp.type, query.pp.value);
+                  result.params.push_back(std::move(info));
+                }),
+            "hal_list_p");
+
+    checked(hal_query::list_signals([&](hal_query_t& query) {
+              const auto converted = adapter_type(query.sig.type);
+              if (!converted) return;
+              HalAdapterSignalInfo info;
+              info.name = query.name;
+              info.type = *converted;
+              info.value = from_hal(query.sig.type, query.sig.value);
+              info.readers = query.sig.readers;
+              info.writers = query.sig.writers;
+              info.bidirs = query.sig.bidirs;
+              result.signals.push_back(std::move(info));
+            }),
+            "hal_list_s");
+    for (auto& signal : result.signals) {
+      checked(hal_query::list_signal_pins(signal.name.c_str(),
+                                          [&](hal_query_t& query) {
+                                            if (query.pp.dir != HAL_OUT &&
+                                                query.pp.dir != HAL_IO)
+                                              return 0;
+                                            signal.driver = query.name;
+                                            return hal_query::kStop;
+                                          }),
+              "hal_list_p_s");
     }
-    info.value = read_value(info.type, pin_data(pin));
-    result.pins.push_back(std::move(info));
-  }
-  for (SHMFIELD(hal_param_t) next = hal_data->param_list_ptr; next;
-       next = SHMPTR(next)->next_ptr) {
-    auto* parameter = static_cast<hal_param_t*>(SHMPTR(next));
-    HalAdapterParamInfo info;
-    info.name = parameter->name;
-    const auto converted = adapter_type(parameter->type);
-    if (!converted) continue;
-    info.type = *converted;
-    info.direction = param_direction(parameter->dir);
-    auto* owner = static_cast<hal_comp_t*>(SHMPTR(parameter->owner_ptr));
-    if (owner) info.owner_id = owner->comp_id;
-    info.value = read_value(
-        info.type, reinterpret_cast<const void*>(SHMPTR(parameter->data_ptr)));
-    result.params.push_back(std::move(info));
-  }
-  for (SHMFIELD(hal_sig_t) next = hal_data->sig_list_ptr; next;
-       next = SHMPTR(next)->next_ptr) {
-    auto* signal = static_cast<hal_sig_t*>(SHMPTR(next));
-    HalAdapterSignalInfo info;
-    info.name = signal->name;
-    const auto converted = adapter_type(signal->type);
-    if (!converted) continue;
-    info.type = *converted;
-    info.value = read_value(
-        info.type, reinterpret_cast<const void*>(SHMPTR(signal->data_ptr)));
-    info.readers = signal->readers;
-    info.writers = signal->writers;
-    info.bidirs = signal->bidirs;
-    for (auto* pin = halpr_find_pin_by_sig(signal, nullptr); pin;
-         pin = halpr_find_pin_by_sig(signal, pin)) {
-      if (pin->dir == HAL_OUT || pin->dir == HAL_IO) {
-        info.driver = pin->name;
-        break;
-      }
-    }
-    result.signals.push_back(std::move(info));
-  }
+  });
+  const bool running =
+      impl_->observe_thread_beats(result.threads, thread_beats);
+  for (auto& thread : result.threads) thread.running = running;
   return result;
 }
 
 std::optional<HalAdapterValue> LinuxCncHalAdapter::read(
     const HalAdapterReference& reference) const {
-  HalMutex lock;
-  const auto item = resolve_unlocked(reference);
-  if (!item) return std::nullopt;
-  return read_value(item->type, item->data);
+  std::optional<HalAdapterValue> result;
+  run_locked([&] { result = read_unlocked(reference); });
+  return result;
 }
 
 std::vector<std::optional<HalAdapterValue>> LinuxCncHalAdapter::read_many(
     const std::vector<HalAdapterReference>& references,
     const std::stop_token& stop_token) const {
-  HalMutex lock;
   std::vector<std::optional<HalAdapterValue>> result;
   result.reserve(references.size());
-  for (const auto& reference : references) {
-    if (stop_token.stop_requested())
-      throw HalAdapterError("HAL read cancelled", -ECANCELED);
-    const auto item = resolve_unlocked(reference);
-    result.push_back(item ? std::optional<HalAdapterValue>(
-                                read_value(item->type, item->data))
-                          : std::nullopt);
-  }
+  run_locked([&] {
+    for (const auto& reference : references) {
+      if (stop_token.stop_requested())
+        throw HalAdapterError("HAL read cancelled", -ECANCELED);
+      result.push_back(read_unlocked(reference));
+    }
+  });
   return result;
 }
 
 bool LinuxCncHalAdapter::write(const HalAdapterReference& reference,
                                HalAdapterValue value,
                                HalAdapterValue* written) {
-  HalMutex lock;
-  const auto item = resolve_unlocked(reference);
-  if (!item || !same_type(item->type, value)) return false;
-  if (item->param && item->param->dir != HAL_RW) return false;
-  if (item->pin && (item->pin->dir == HAL_OUT || item->pin->signal))
-    return false;
-  if (item->signal && item->signal->writers > 0) return false;
-  if (!write_value(item->type, item->data, value)) return false;
-  if (written) *written = read_value(item->type, item->data);
-  return true;
+  bool applied = false;
+  run_locked([&] {
+    const auto prepared = prepare_unlocked(reference, value);
+    if (!prepared || !apply_unlocked(*prepared)) return;
+    if (written) *written = read_back_unlocked(reference);
+    applied = true;
+  });
+  return applied;
 }
 
 std::size_t LinuxCncHalAdapter::write_many(
     const std::vector<std::pair<HalAdapterReference, HalAdapterValue>>& updates,
     std::vector<HalAdapterValue>* written, const std::stop_token& stop_token) {
-  HalMutex lock;
-  std::vector<ResolvedItem> resolved;
-  resolved.reserve(updates.size());
-  for (const auto& [reference, value] : updates) {
+  std::size_t applied = 0;
+  run_locked([&] {
+    std::vector<PreparedWrite> prepared;
+    prepared.reserve(updates.size());
+    for (const auto& [reference, value] : updates) {
+      if (stop_token.stop_requested())
+        throw HalAdapterError("HAL write cancelled", -ECANCELED);
+      auto item = prepare_unlocked(reference, value);
+      if (!item) return;
+      prepared.push_back(*item);
+    }
+    if (written) {
+      written->clear();
+      written->reserve(updates.size());
+    }
     if (stop_token.stop_requested())
       throw HalAdapterError("HAL write cancelled", -ECANCELED);
-    const auto item = resolve_unlocked(reference);
-    if (!item || !item->data || !same_type(item->type, value)) return 0;
-    if (item->param && item->param->dir != HAL_RW) return 0;
-    if (item->pin && (item->pin->dir == HAL_OUT || item->pin->signal)) return 0;
-    if (item->signal && item->signal->writers > 0) return 0;
-    resolved.push_back(*item);
-  }
-  if (written) {
-    written->clear();
-    written->reserve(updates.size());
-  }
-  if (stop_token.stop_requested())
-    throw HalAdapterError("HAL write cancelled", -ECANCELED);
-  for (std::size_t index = 0; index < updates.size(); ++index) {
-    const auto& value = updates[index].second;
-    if (!write_value(resolved[index].type, resolved[index].data, value))
-      return index;
-    if (written) {
-      written->push_back(
-          read_value(resolved[index].type, resolved[index].data));
+    for (const auto& item : prepared) {
+      if (!apply_unlocked(item)) return;
+      if (written) written->push_back(read_back_unlocked(*item.reference));
+      ++applied;
     }
-  }
-  return updates.size();
+  });
+  return applied;
 }
 
 bool LinuxCncHalAdapter::create_signal(const std::string& name,
@@ -720,24 +939,34 @@ bool LinuxCncHalAdapter::create_signal(const std::string& name,
 }
 
 bool LinuxCncHalAdapter::pin_has_writer(const std::string& name) const {
-  HalMutex lock;
-  auto* pin = halpr_find_pin_by_name(name.c_str());
-  if (!pin)
+  bool found = false;
+  bool has_writer = false;
+  run_locked([&] {
+    const auto pin = find_pp(name, HAL_QTYPE_PIN);
+    if (!pin) return;
+    found = true;
+    if (!pin->pp.signal) return;
+    const auto signal = find_signal(pin->pp.signal);
+    has_writer = signal && signal->sig.writers > 0;
+  });
+  if (!found)
     throw HalAdapterError("HAL pin '" + name + "' was not found", -ENOENT);
-  if (!pin->signal) return false;
-  auto* signal = static_cast<hal_sig_t*>(SHMPTR(pin->signal));
-  return signal && signal->writers > 0;
+  return has_writer;
 }
 
 bool LinuxCncHalAdapter::component_exists(const std::string& name) const {
-  HalMutex lock;
-  return halpr_find_comp_by_name(name.c_str()) != nullptr;
+  const int result = hal_comp_by_name(name.c_str(), nullptr);
+  if (result == -ENOENT) return false;
+  checked(result, "hal_comp_by_name");
+  return true;
 }
 
 bool LinuxCncHalAdapter::component_ready(const std::string& name) const {
-  HalMutex lock;
-  auto* component = halpr_find_comp_by_name(name.c_str());
-  return component && component->ready != 0;
+  hal_query_t query{};
+  const int result = hal_comp_by_name(name.c_str(), &query);
+  if (result == -ENOENT) return false;
+  checked(result, "hal_comp_by_name");
+  return query.comp.ready;
 }
 
 int LinuxCncHalAdapter::message_level() const { return rtapi_get_msg_level(); }
