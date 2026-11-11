@@ -15,16 +15,23 @@ Interp::init(), and preserve _setup.spindle_mode[] across synch()
 calls.  Also update Interp::convert_stop() (M2/M30) to set the
 interpreter model back to G97 when it already turns CSS off at the
 canon level.
+
+Since the original patch, upstream added the interpreter-side
+_setup.css_maximum[] (the G96 D word, used by the G33/G76 pitch check)
+and reset it in the same synch() loop.  It is modal state belonging to
+G96, and canon keeps its own CSS limit across synch(), so treat it
+exactly like spindle_mode: initialize it in init(), preserve it across
+synch(), and clear it in convert_stop() alongside the return to G97.
 ---
- src/emc/rs274ngc/interp_convert.cc | 3 ++-
- src/emc/rs274ngc/rs274ngc_pre.cc   | 7 +++++--
- 2 files changed, 7 insertions(+), 3 deletions(-)
+ src/emc/rs274ngc/interp_convert.cc |  4 +++-
+ src/emc/rs274ngc/rs274ngc_pre.cc   | 11 ++++++++---
+ 2 files changed, 11 insertions(+), 4 deletions(-)
 
 diff --git a/src/emc/rs274ngc/interp_convert.cc b/src/emc/rs274ngc/interp_convert.cc
-index 779ed70095..be11b73201 100644
+index 35e9d50..450922e 100644
 --- a/src/emc/rs274ngc/interp_convert.cc
 +++ b/src/emc/rs274ngc/interp_convert.cc
-@@ -5246,8 +5246,9 @@ int Interp::convert_stop(block_pointer block,    //!< pointer to a block of RS27
+@@ -5533,8 +5533,10 @@ int Interp::convert_stop(block_pointer block,    //!< pointer to a block of RS27
          settings->spindle_turning[s] = CANON_STOPPED;
  
          settings->speed_override[s] = true;
@@ -32,31 +39,36 @@ index 779ed70095..be11b73201 100644
 +        /* turn off CSS (G96) and return to G97 */
          SET_SPINDLE_MODE(s, 0);
 +        settings->spindle_mode[s] = SPINDLE_MODE::CONSTANT_RPM;
++        settings->css_maximum[s] = 0.0;
      }
  
  /*8*/ settings->motion_mode = G_1;
 diff --git a/src/emc/rs274ngc/rs274ngc_pre.cc b/src/emc/rs274ngc/rs274ngc_pre.cc
-index f843fc8298..2ea4bf5550 100644
+index f594b4d..ac70436 100644
 --- a/src/emc/rs274ngc/rs274ngc_pre.cc
 +++ b/src/emc/rs274ngc/rs274ngc_pre.cc
-@@ -1207,7 +1207,9 @@ int Interp::init()
+@@ -1232,7 +1232,10 @@ int Interp::init()
    _setup.sequence_number = 0;   /*DOES THIS NEED TO BE AT TOP? */
  //_setup.speed set in Interp::synch
    _setup.speed_feed_mode = CANON_INDEPENDENT;
 -// setup.spindle_mode  set in interp_synch;
 +  for (int s = 0; s < EMCMOT_MAX_SPINDLES; s++) {
 +      _setup.spindle_mode[s] = SPINDLE_MODE::CONSTANT_RPM;
++      _setup.css_maximum[s] = 0.0;
 +  }
  //_setup.speed_override set in Interp::synch
  //_setup.spindle_turning set in Interp::synch
  //_setup.stack does not need initialization
-@@ -2061,7 +2063,8 @@ int Interp::synch()
+@@ -2137,8 +2140,10 @@ int Interp::synch()
  	  _setup.speed[s] = GET_EXTERNAL_SPEED(s);
  	  _setup.spindle_turning[s] = GET_EXTERNAL_SPINDLE(s);
  	  _setup.speed_override[s] = GET_EXTERNAL_SPINDLE_OVERRIDE_ENABLE(s);
 -	  _setup.spindle_mode[s] = SPINDLE_MODE::CONSTANT_RPM;
-+	  // _setup.spindle_mode is modal; preserve it across synch() so that
-+	  // G96/G97 survives task-mode switches and MDI command boundaries.
+-	  _setup.css_maximum[s] = 0.0;
++	  // _setup.spindle_mode and _setup.css_maximum (the G96 D word) are
++	  // modal; preserve them across synch() so that G96/G97 survives
++	  // task-mode switches and MDI command boundaries.  Canon keeps its own
++	  // CSS limit across synch() too, so the two models stay in step.
    }
    GET_EXTERNAL_PARAMETER_FILE_NAME(file_name, (LINELEN - 1));
    save_parameters(((file_name[0] ==

@@ -12,10 +12,10 @@ Subject: [PATCH] emc: expose interpreter coordinate data in status
  5 files changed, 88 insertions(+)
 
 diff --git a/src/emc/nml_intf/emc.cc b/src/emc/nml_intf/emc.cc
-index fd5b118fba..282edd98ec 100644
+index 299418c..ec54d4e 100644
 --- a/src/emc/nml_intf/emc.cc
 +++ b/src/emc/nml_intf/emc.cc
-@@ -1392,8 +1392,14 @@ void EMC_TASK_STAT::update(CMS * cms)
+@@ -1417,8 +1417,14 @@ void EMC_TASK_STAT::update(CMS * cms)
      cms->update(ini_filename, LINELEN);
      EmcPose_update(cms, &g5x_offset);
      cms->update(g5x_index);
@@ -31,10 +31,10 @@ index fd5b118fba..282edd98ec 100644
      cms->update(activeGCodes, ACTIVE_G_CODES);
      cms->update(activeMCodes, ACTIVE_M_CODES);
 diff --git a/src/emc/nml_intf/emc_nml.hh b/src/emc/nml_intf/emc_nml.hh
-index 68478559c7..38f67b98bd 100644
+index 9e1d4d0..3d8c617 100644
 --- a/src/emc/nml_intf/emc_nml.hh
 +++ b/src/emc/nml_intf/emc_nml.hh
-@@ -1459,8 +1459,12 @@ class EMC_TASK_STAT:public EMC_TASK_STAT_MSG {
+@@ -1538,8 +1538,12 @@ class EMC_TASK_STAT:public EMC_TASK_STAT_MSG {
      char ini_filename[LINELEN];
      EmcPose g5x_offset;		// in user units, currently active
      int g5x_index;              // index of active g5x system
@@ -48,10 +48,10 @@ index 68478559c7..38f67b98bd 100644
      int activeGCodes[ACTIVE_G_CODES];
      int activeMCodes[ACTIVE_M_CODES];
 diff --git a/src/emc/nml_intf/emcops.cc b/src/emc/nml_intf/emcops.cc
-index 6373c42f49..6e068c2708 100644
+index 4fd5564..ed6a962 100644
 --- a/src/emc/nml_intf/emcops.cc
 +++ b/src/emc/nml_intf/emcops.cc
-@@ -134,8 +134,12 @@ EMC_TASK_STAT::EMC_TASK_STAT()
+@@ -150,8 +150,12 @@ EMC_TASK_STAT::EMC_TASK_STAT()
      ini_filename{},
      g5x_offset{},
      g5x_index(0),
@@ -65,10 +65,10 @@ index 6373c42f49..6e068c2708 100644
      activeSettings{},
      programUnits(CANON_UNITS_MM),
 diff --git a/src/emc/task/emctask.cc b/src/emc/task/emctask.cc
-index 90fc85d0be..d5c060f669 100644
+index 8ab3f56..7620a30 100644
 --- a/src/emc/task/emctask.cc
 +++ b/src/emc/task/emctask.cc
-@@ -738,6 +738,46 @@ int emcTaskUpdate(EMC_TASK_STAT * stat)
+@@ -797,6 +797,46 @@ int emcTaskUpdate(EMC_TASK_STAT * stat)
      //update state of block delete
      stat->block_delete_state = GET_BLOCK_DELETE();
  
@@ -116,10 +116,10 @@ index 90fc85d0be..d5c060f669 100644
      stat->taskbeat = task_beat;
  
 diff --git a/src/emc/usr_intf/axis/extensions/emcmodule.cc b/src/emc/usr_intf/axis/extensions/emcmodule.cc
-index 73b9efc2c8..3345c0a6a0 100644
+index 1d2ab2f..d242bd5 100644
 --- a/src/emc/usr_intf/axis/extensions/emcmodule.cc
 +++ b/src/emc/usr_intf/axis/extensions/emcmodule.cc
-@@ -1261,6 +1261,26 @@ static PyObject *Stat_g5x_offset(pyStatChannel *s, void *) {
+@@ -1267,6 +1267,26 @@ static PyObject *Stat_g5x_offset(pyStatChannel *s, void *) {
      return pose(s->status.task.g5x_offset);
  }
  
@@ -146,7 +146,7 @@ index 73b9efc2c8..3345c0a6a0 100644
  static PyObject *Stat_g92_offset(pyStatChannel *s, void *) {
      return pose(s->status.task.g92_offset);
  }
-@@ -1543,8 +1563,22 @@ static PyGetSetDef Stat_getsetlist[] = {
+@@ -1576,8 +1596,22 @@ static PyGetSetDef Stat_getsetlist[] = {
      {(char*)"mcodes", (getter)Stat_activemcodes, NULL, NULL, NULL},
      {(char*)"misc_error", (getter)Stat_misc_error, NULL, NULL, NULL},
      {(char*)"g5x_offset", (getter)Stat_g5x_offset, NULL, NULL, NULL},

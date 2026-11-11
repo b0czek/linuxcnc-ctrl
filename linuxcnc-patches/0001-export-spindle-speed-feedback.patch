@@ -12,10 +12,10 @@ Subject: [PATCH] emc: expose spindle speed feedback in status
  5 files changed, 6 insertions(+), 1 deletion(-)
 
 diff --git a/src/emc/nml_intf/emc.cc b/src/emc/nml_intf/emc.cc
-index df82c4d0d0..fd5b118fba 100644
+index 3809d6b..299418c 100644
 --- a/src/emc/nml_intf/emc.cc
 +++ b/src/emc/nml_intf/emc.cc
-@@ -1014,6 +1014,7 @@ void EMC_SPINDLE_STAT::update(CMS * cms)
+@@ -1018,6 +1018,7 @@ void EMC_SPINDLE_STAT::update(CMS * cms)
  {
      EMC_SPINDLE_STAT_MSG::update(cms);
      cms->update(speed);
@@ -24,10 +24,10 @@ index df82c4d0d0..fd5b118fba 100644
      cms->update(css_maximum);
      cms->update(css_factor);
 diff --git a/src/emc/nml_intf/emc_nml.hh b/src/emc/nml_intf/emc_nml.hh
-index afd051e27b..68478559c7 100644
+index d31f9a5..9e1d4d0 100644
 --- a/src/emc/nml_intf/emc_nml.hh
 +++ b/src/emc/nml_intf/emc_nml.hh
-@@ -1118,7 +1118,8 @@ class EMC_SPINDLE_STAT:public EMC_SPINDLE_STAT_MSG {
+@@ -1160,7 +1160,8 @@ class EMC_SPINDLE_STAT:public EMC_SPINDLE_STAT_MSG {
      // cppcheck-suppress duplInheritedMember
      void update(CMS * cms);
  
@@ -38,10 +38,10 @@ index afd051e27b..68478559c7 100644
      double css_maximum;
      double css_factor;  // CSS Status
 diff --git a/src/emc/nml_intf/emcops.cc b/src/emc/nml_intf/emcops.cc
-index d58c87c637..6373c42f49 100644
+index 2be2c1b..4fd5564 100644
 --- a/src/emc/nml_intf/emcops.cc
 +++ b/src/emc/nml_intf/emcops.cc
-@@ -178,6 +178,7 @@ EMC_AUX_STAT::EMC_AUX_STAT()
+@@ -195,6 +195,7 @@ EMC_AUX_STAT::EMC_AUX_STAT()
  EMC_SPINDLE_STAT::EMC_SPINDLE_STAT()
    : EMC_SPINDLE_STAT_MSG(EMC_SPINDLE_STAT_TYPE, sizeof(EMC_SPINDLE_STAT)),
      speed(0.0),
@@ -50,10 +50,10 @@ index d58c87c637..6373c42f49 100644
      css_maximum(0.0),
      css_factor(1.0),
 diff --git a/src/emc/task/taskintf.cc b/src/emc/task/taskintf.cc
-index 7aaee75fe7..a37da0ca5f 100644
+index befed5a..4215d22 100644
 --- a/src/emc/task/taskintf.cc
 +++ b/src/emc/task/taskintf.cc
-@@ -2036,6 +2036,7 @@ int emcSpindleUpdate(EMC_SPINDLE_STAT stat[], int num_spindles){
+@@ -2131,6 +2131,7 @@ int emcSpindleUpdate(EMC_SPINDLE_STAT stat[], int num_spindles){
  		stat[s].spindle_override_enabled = enables & SS_ENABLED;
  		stat[s].enabled = emcmotStatus.spindle_status[s].speed != 0;
  		stat[s].speed = emcmotStatus.spindle_status[s].speed;
@@ -62,10 +62,10 @@ index 7aaee75fe7..a37da0ca5f 100644
  		stat[s].direction = emcmotStatus.spindle_status[s].direction;
  		stat[s].orient_state = emcmotStatus.spindle_status[s].orient_state;
 diff --git a/src/emc/usr_intf/axis/extensions/emcmodule.cc b/src/emc/usr_intf/axis/extensions/emcmodule.cc
-index 0ffaae6b7d..73b9efc2c8 100644
+index 0fcf4da..1d2ab2f 100644
 --- a/src/emc/usr_intf/axis/extensions/emcmodule.cc
 +++ b/src/emc/usr_intf/axis/extensions/emcmodule.cc
-@@ -1425,6 +1425,7 @@ static PyObject *Stat_spindle_one(pyStatChannel *s, int spindleno) {
+@@ -1431,6 +1431,7 @@ static PyObject *Stat_spindle_one(pyStatChannel *s, int spindleno) {
      F(enabled);
      F2("override_enabled", spindle_override_enabled);
      F(speed);
