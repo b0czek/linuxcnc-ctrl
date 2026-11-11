@@ -406,12 +406,7 @@ runtime feature.
 function with deterministic kinematics and the real cubic implementation. It
 covers late invalid targets, interpolation failure, and no partial commitment.
 
-### ~~0017 — Runtime joint and spindle availability~~
-
-> **Removed** with the move to LinuxCNC v2.10.0-pre2. Upstream added `G28.2`, which homes joints from G-code.
-> Runtime availability is being redesigned around it and will return as a new
-> patch with a new number.
-> The description below records what the patch did.
+### 0017 — Runtime joint and spindle availability
 
 Adds runtime acquisition and release of individual joints and spindles, allowing
 external hardware to hand physical resources to LinuxCNC and take them back.
@@ -456,12 +451,7 @@ motion. Resources are managed independently, with no automatic pairing or
 switching sequence. Patch 0018 adds the M54/M55 G-code interface to these
 operations.
 
-### ~~0018 — Standalone M54/M55 interface~~
-
-> **Removed** with the move to LinuxCNC v2.10.0-pre2. Upstream added `G28.2`, which homes joints from G-code.
-> Runtime availability is being redesigned around it and will return as a new
-> patch with a new number.
-> The description below records what the patch did.
+### 0018 — Standalone M54/M55 interface
 
 Adds G-code commands for the runtime availability operations in patch 0017.
 `M54` acquires a joint or spindle, and `M55` releases it. Programs can explicitly
