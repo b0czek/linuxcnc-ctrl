@@ -18,6 +18,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -26,9 +27,16 @@
 namespace linuxcnc::server {
 namespace {
 
-// A thread counts as running for this long beyond twice its period after its
-// threadbeat pin was last seen to advance (see observe_thread_beats()).
-constexpr auto kThreadRunningGrace = std::chrono::milliseconds(250);
+// Thread "running" detection (see LinuxCncHalAdapter::Impl::threads_running).
+// A running thread advances its threadbeat pin once per period; a beat that
+// stays put for twice the period plus this slack means threads are stopped.
+// The slack absorbs wake-up latency, which is large without a realtime
+// kernel.
+constexpr auto kThreadBeatSlack = std::chrono::milliseconds(20);
+// Longest time topology() waits for a beat when earlier observations cannot
+// decide, and the interval between reads while it waits.
+constexpr auto kThreadBeatMaxWait = std::chrono::milliseconds(100);
+constexpr auto kThreadBeatPollInterval = std::chrono::milliseconds(1);
 
 [[noreturn]] void throw_hal_error(const std::string& operation, int code) {
   // The query API reports -EFAULT only when HAL shared memory is not mapped.
@@ -546,10 +554,21 @@ struct LinuxCncHalComponent::Impl {
   }
 };
 
+// Reads <thread>.threadbeat, which HAL increments once per cycle while
+// threads run.
+std::optional<rtapi_sint> read_thread_beat(const std::string& thread) {
+  const auto beat = find_pp(thread + ".threadbeat", HAL_QTYPE_PIN);
+  if (!beat || beat->pp.type != HAL_SINT) return std::nullopt;
+  return beat->pp.value.s;
+}
+
 struct LinuxCncHalAdapter::Impl {
+  using Clock = std::chrono::steady_clock;
+
   struct BeatState {
     rtapi_sint beat = 0;
-    std::optional<std::chrono::steady_clock::time_point> last_change;
+    Clock::time_point since;    // first read that returned `beat`
+    Clock::time_point read_at;  // latest read
   };
 
   int component_id = 0;
@@ -557,43 +576,99 @@ struct LinuxCncHalAdapter::Impl {
   std::shared_ptr<HalAllocationSlab> slab;
   std::mutex beat_mutex;
   std::unordered_map<std::string, BeatState> beats;
+  std::optional<bool> last_running;
 
-  // HAL no longer publishes its global "threads running" flag. Each thread's
-  // <thread>.threadbeat pin advances once per cycle only while threads run,
-  // so threads are reported as running when any beat advanced within twice
-  // its thread's period plus a grace interval since an earlier topology()
-  // call. A non-zero beat seen for the first time counts as an advance.
-  bool observe_thread_beats(
-      const std::vector<HalAdapterThreadInfo>& threads,
-      const std::vector<std::optional<rtapi_sint>>& thread_beats) {
-    const auto now = std::chrono::steady_clock::now();
+  // HAL no longer exposes its global "threads running" flag through the
+  // public API; hal_start_threads()/hal_stop_threads() change nothing else
+  // a process can observe except each thread's <thread>.threadbeat pin,
+  // which advances once per period only while threads run.
+  //
+  // `observed` holds the beats read in topology() at `read_at`. Compared
+  // with the previous topology() call, a beat that changed within twice its
+  // period plus kThreadBeatSlack proves threads are running, and a beat that
+  // has stayed put for at least that long proves they are stopped. Without
+  // such evidence (first call, a new thread, or a change seen only after a
+  // longer gap) the beats are re-read every kThreadBeatPollInterval until
+  // one moves (running) or twice the shortest period plus the slack has
+  // passed (stopped). That wait is bounded by kThreadBeatMaxWait; when it
+  // cannot decide (every thread period above about 40 ms) the previous
+  // answer is kept, or, on the first call, a non-zero beat counts as
+  // running.
+  //
+  // Cost: none when topology() is called again within the window; about one
+  // period when threads run; twice the shortest period plus the slack (22 ms
+  // with a 1 ms thread) on the first call while threads are stopped.
+  bool threads_running(const std::vector<HalAdapterThreadInfo>& threads,
+                       const std::vector<std::optional<rtapi_sint>>& observed,
+                       Clock::time_point read_at) {
     std::lock_guard lock(beat_mutex);
     std::unordered_map<std::string, BeatState> next;
     bool running = false;
+    bool stopped = false;
+    bool any_beat = false;
+    bool nonzero_beat = false;
+    auto shortest_window = Clock::duration::max();
     for (std::size_t index = 0; index < threads.size(); ++index) {
-      const auto& observed = thread_beats[index];
-      if (!observed) continue;
+      const auto& reading = observed[index];
+      if (!reading) continue;
       const auto& thread = threads[index];
-      const auto beat = *observed;
-      BeatState state;
+      const auto beat = *reading;
+      const auto window = std::chrono::duration_cast<Clock::duration>(
+                              std::chrono::nanoseconds(thread.period_ns) * 2) +
+                          kThreadBeatSlack;
+      any_beat = true;
+      nonzero_beat = nonzero_beat || beat != 0;
+      shortest_window = std::min(shortest_window, window);
+      BeatState state{beat, read_at, read_at};
       if (const auto found = beats.find(thread.name); found != beats.end()) {
-        state = found->second;
-        if (state.beat != beat) {
-          state.beat = beat;
-          state.last_change = now;
+        const auto& previous = found->second;
+        if (previous.beat != beat) {
+          if (read_at - previous.read_at <= window) running = true;
+        } else {
+          state.since = previous.since;
+          if (read_at - previous.since >= window) stopped = true;
         }
-      } else {
-        state.beat = beat;
-        if (beat != 0) state.last_change = now;
       }
-      const auto window =
-          std::chrono::nanoseconds(thread.period_ns) * 2 + kThreadRunningGrace;
-      if (state.last_change && now - *state.last_change <= window)
-        running = true;
       next.emplace(thread.name, state);
     }
     beats = std::move(next);
+    if (!any_beat) {
+      last_running = false;
+      return false;
+    }
+    if (!running && !stopped) {
+      const auto decided = probe_beats(read_at, shortest_window);
+      running = decided.value_or(last_running.value_or(nonzero_beat));
+    }
+    last_running = running;
     return running;
+  }
+
+  // Re-reads the beats recorded in `beats` until one changes (true), until
+  // `window` has passed since `read_at` without a change (false), or for at
+  // most kThreadBeatMaxWait (nullopt). Called with beat_mutex held and HAL's
+  // mutex not held.
+  std::optional<bool> probe_beats(Clock::time_point read_at,
+                                  Clock::duration window) {
+    const auto give_up = Clock::now() + kThreadBeatMaxWait;
+    const auto decide_stopped = read_at + window;
+    while (true) {
+      const auto wake = std::min(
+          {Clock::now() + kThreadBeatPollInterval, decide_stopped, give_up});
+      std::this_thread::sleep_until(wake);
+      const auto now = Clock::now();
+      for (auto& [name, state] : beats) {
+        const auto beat = read_thread_beat(name);
+        if (!beat) continue;
+        if (*beat != state.beat) {
+          state = BeatState{*beat, now, now};
+          return true;
+        }
+        state.read_at = now;
+      }
+      if (now >= decide_stopped) return false;
+      if (now >= give_up) return std::nullopt;
+    }
   }
 };
 
@@ -734,6 +809,7 @@ int LinuxCncHalAdapter::component_id() const noexcept {
 HalAdapterTopology LinuxCncHalAdapter::topology() const {
   HalAdapterTopology result;
   std::vector<std::optional<rtapi_sint>> thread_beats;
+  std::chrono::steady_clock::time_point beats_read_at;
   run_locked([&] {
     checked(hal_query::list_components([&](hal_query_t& query) {
               HalAdapterComponentInfo info;
@@ -797,11 +873,9 @@ HalAdapterTopology LinuxCncHalAdapter::topology() const {
       thread.runtime = statistic_value(thread.name + ".time", HAL_QTYPE_PIN);
       thread.max_runtime =
           statistic_value(thread.name + ".tmax", HAL_QTYPE_PARAM).value_or(0);
-      const auto beat = find_pp(thread.name + ".threadbeat", HAL_QTYPE_PIN);
-      thread_beats.push_back(beat && beat->pp.type == HAL_SINT
-                                 ? std::optional<rtapi_sint>(beat->pp.value.s)
-                                 : std::nullopt);
+      thread_beats.push_back(read_thread_beat(thread.name));
     }
+    beats_read_at = std::chrono::steady_clock::now();
 
     checked(hal_query::list_pins_params(
                 HAL_QTYPE_PIN,
@@ -860,7 +934,7 @@ HalAdapterTopology LinuxCncHalAdapter::topology() const {
     }
   });
   const bool running =
-      impl_->observe_thread_beats(result.threads, thread_beats);
+      impl_->threads_running(result.threads, thread_beats, beats_read_at);
   for (auto& thread : result.threads) thread.running = running;
   return result;
 }

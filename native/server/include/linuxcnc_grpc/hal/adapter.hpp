@@ -152,9 +152,10 @@ class LinuxCncHalComponent final {
  * mutex, so it observes and modifies a consistent HAL state. It intentionally
  * exposes no signal link/unlink methods.
  *
- * Thread "running" is derived from each thread's threadbeat pin across
- * topology() calls, because HAL no longer publishes its global flag; it can
- * lag a start or stop by up to twice the thread period plus 250 ms.
+ * Thread "running" is derived from each thread's threadbeat pin, because HAL
+ * no longer publishes its global flag. It can lag a start or stop by up to
+ * twice the thread period plus 20 ms. When earlier topology() calls give no
+ * evidence, topology() watches the beats for at most 100 ms.
  */
 class LinuxCncHalAdapter final {
  public:
