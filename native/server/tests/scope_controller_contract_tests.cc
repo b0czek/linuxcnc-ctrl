@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "../src/scope/delta_count.hpp"
 #include "../src/scope/shm_abi.h"
 #include "linuxcnc_grpc/scope/controller.hpp"
 
@@ -20,6 +21,25 @@ int main() {
                 offsetof(scope_shm_control_t, data_type));
   static_assert(offsetof(linuxcnc_scope_shm_control_t, data_len) ==
                 offsetof(scope_shm_control_t, data_len));
+
+  // scope_rt first grows the record and then slides it; a snapshot pair can
+  // straddle the moment it fills, and every sample on both sides counts.
+  constexpr int cells_per_sample = 16;
+  constexpr int buffer_cells = 100 * cells_per_sample;
+  constexpr auto recorded = [](ScopeRecordPosition previous,
+                               ScopeRecordPosition current) {
+    return scope_new_sample_count(previous, current, cells_per_sample,
+                                  buffer_cells);
+  };
+  static_assert(recorded({0, 40}, {0, 40}) == 0);
+  static_assert(recorded({0, 40}, {0, 50}) == 10);
+  static_assert(recorded({0, 90}, {10 * cells_per_sample, 99}) == 19);
+  static_assert(
+      recorded({10 * cells_per_sample, 99}, {25 * cells_per_sample, 99}) == 15);
+  static_assert(
+      recorded({95 * cells_per_sample, 99}, {5 * cells_per_sample, 99}) == 10);
+  static_assert(!recorded({0, 50}, {0, 40}).has_value());
+  static_assert(!recorded({0, 99}, {8, 99}).has_value());
 
   ScopeFrameQueue queue;
   int notifications = 0;
