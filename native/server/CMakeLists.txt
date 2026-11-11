@@ -311,6 +311,7 @@ if(LINUXCNC_GRPC_BUILD_WIRE OR LINUXCNC_GRPC_BUILD_LISTENER_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/listener_boundaries.py
                 --server $<TARGET_FILE:linuxcnc-listener-test-server>
                 --provider $<TARGET_FILE:${LINUXCNC_LISTENER_TEST_PROVIDER}>
+                --grpc-version ${gRPC_VERSION}
                 --runner ${CMAKE_CROSSCOMPILING_EMULATOR})
         set_tests_properties(linuxcnc-listener-boundaries PROPERTIES TIMEOUT 90)
     endif()

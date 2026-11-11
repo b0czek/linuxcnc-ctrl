@@ -133,12 +133,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", required=True)
     parser.add_argument("--provider", required=True)
+    parser.add_argument("--grpc-version", required=True)
     parser.add_argument("--runner", nargs=argparse.REMAINDER, default=[])
     args = parser.parse_args()
+    # gRPC before 1.80 cannot hold a file-key listener to TLS 1.3.
+    grpc_tls13_only = tuple(int(part) for part in args.grpc_version.split(".")[:2]) >= (1, 80)
     now = datetime.datetime.now(datetime.timezone.utc)
     ca = ec.generate_private_key(ec.SECP384R1())
     server_key = ec.generate_private_key(ec.SECP384R1())
-    client_key = ec.generate_private_key(ec.SECP384R1())
+    # gRPC offers only the P-256 group, and TLS 1.2 also checks the client
+    # certificate curve against it, so a P-256 client is needed for a TLS 1.2
+    # attempt to reach the version check.
+    client_key = ec.generate_private_key(ec.SECP256R1())
     other_key = ec.generate_private_key(ec.SECP384R1())
     name = lambda value: x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, value)])
 
@@ -176,6 +182,11 @@ def main():
             root.write_bytes(certificate(ca, "Ephemeral transport CA", is_ca=True))
             cert = folder / "server.crt"
             cert.write_bytes(certificate(server_key, "transport.test", is_server=True))
+            # Likewise a P-256 file identity, so rejecting TLS 1.2 in file
+            # modes tests the version policy, not curve support.
+            file_key = ec.generate_private_key(ec.SECP256R1())
+            file_cert = folder / "file-server.crt"
+            file_cert.write_bytes(certificate(file_key, "transport.test", is_server=True))
             point = folder / "public.point"
             point.write_bytes(server_key.public_key().public_bytes(
                 serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint))
@@ -186,12 +197,14 @@ def main():
             bad_cert = memory_file("transport-test-untrusted-certificate",
                                    certificate(client_key, "client", issuer_key=other_key))
             client_private = memory_file("transport-ephemeral-client-key", private_pem(client_key))
-            server_private = memory_file("transport-ephemeral-file-key", private_pem(server_key))
+            server_private = memory_file("transport-ephemeral-file-key", private_pem(file_key))
             signer = Signer(folder / "signer.sock", server_key)
 
             def command(mode, cipher="TLS_AES_256_GCM_SHA384", public_point=point):
-                source = server_private if mode.endswith("-file") else str(public_point)
-                return args.runner + [args.server, mode, args.provider, str(cert), str(root),
+                file_mode = mode.endswith("-file")
+                source = server_private if file_mode else str(public_point)
+                return args.runner + [args.server, mode, args.provider,
+                                      str(file_cert if file_mode else cert), str(root),
                                       source, signer.path, cipher]
 
             probe = subprocess.run(command("probe"), capture_output=True, text=True,
@@ -285,7 +298,8 @@ def main():
                         rejected(client=False)
                         rejected(untrusted=True)
                         rejected(hostname="wrong.test")
-                        rejected(version=ssl.TLSVersion.TLSv1_2)
+                        if mode != "grpc-file" or grpc_tls13_only:
+                            rejected(version=ssl.TLSVersion.TLSv1_2)
                         if not mode.endswith("-file"):
                             for fault in ("deny", "disconnect", "truncated", "oversize",
                                           "malformed", "wrong-key"):

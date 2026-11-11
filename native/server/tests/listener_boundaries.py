@@ -99,11 +99,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", required=True)
     parser.add_argument("--provider", required=True)
+    parser.add_argument("--grpc-version", required=True)
     parser.add_argument("--runner", nargs=argparse.REMAINDER, default=[])
     args = parser.parse_args()
+    # gRPC before 1.80 cannot hold a file-key listener to TLS 1.3.
+    grpc_tls13_only = tuple(int(part) for part in args.grpc_version.split(".")[:2]) >= (1, 80)
     shutdown_timeout = 10 if args.runner else 3
     now = datetime.datetime.now(datetime.timezone.utc)
-    root_key, server_key, client_key, unknown_key = [ec.generate_private_key(ec.SECP384R1()) for _ in range(4)]
+    root_key, server_key, unknown_key = [ec.generate_private_key(ec.SECP384R1()) for _ in range(3)]
+    # gRPC offers only the P-256 group, and TLS 1.2 also checks the client
+    # certificate curve against it, so a P-256 client is needed for a TLS 1.2
+    # attempt to reach the version check.
+    client_key = ec.generate_private_key(ec.SECP256R1())
     name = lambda value: x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, value)])
 
     def certificate(key, subject, *, authority=False, server=False, issuer=None):
@@ -140,6 +147,12 @@ def main():
             cert = folder / "server.pem"
             cert.write_bytes(certificate(server_key, "listener.test", server=True))
             private = memory_file(private_pem(server_key))
+            # Likewise a P-256 file identity, so rejecting TLS 1.2 with it tests the
+            # version policy, not curve support.
+            file_key = ec.generate_private_key(ec.SECP256R1())
+            file_cert = folder / "file-server.pem"
+            file_cert.write_bytes(certificate(file_key, "listener.test", server=True))
+            file_private = memory_file(private_pem(file_key))
             client_cert = memory_file(certificate(client_key, "client"))
             unknown_cert = memory_file(certificate(client_key, "unknown", issuer=unknown_key))
             client_private = memory_file(private_pem(client_key))
@@ -252,10 +265,12 @@ def main():
                         with socket.socket() as probe:
                             probe.bind(("127.0.0.1", port))
 
-                for key_options in ([f"--tls-private-key={private}"], external):
+                for certificate_path, key_options in ((file_cert, [f"--tls-private-key={file_private}"]),
+                                                      (cert, external)):
                     signer.deny = False
                     grpc_port, ws_port = free_port(), free_port()
-                    with running(base + key_options + ["--mtls", f"--tls-client-ca={root}"]) as (process, hal_path):
+                    with running(["--tls", f"--tls-certificate={certificate_path}"] + key_options +
+                                 ["--mtls", f"--tls-client-ca={root}"]) as (process, hal_path):
                         for port in (grpc_port, ws_port):
                             def plaintext():
                                 with socket.create_connection(("127.0.0.1", port), timeout=2) as connection:
@@ -293,7 +308,8 @@ def main():
                                     raise EOFError()
                         rejected(lambda: grpc_preface(client=False))
                         rejected(lambda: grpc_preface(unknown=True))
-                        rejected(lambda: grpc_preface(version=ssl.TLSVersion.TLSv1_2))
+                        if key_options == external or grpc_tls13_only:
+                            rejected(lambda: grpc_preface(version=ssl.TLSVersion.TLSv1_2))
                         if key_options == external:
                             before = signer.requests
                             with ws("/v1/position-history") as connection:

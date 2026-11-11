@@ -62,6 +62,7 @@ if(LINUXCNC_TRANSPORT_BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/handshakes.py
         --server $<TARGET_FILE:transport-handshake-server>
         --provider $<TARGET_FILE:linuxcnc-external-key>
+        --grpc-version ${TRANSPORT_GRPC_VERSION}
         --runner ${CMAKE_CROSSCOMPILING_EMULATOR})
     set_tests_properties(transport-handshakes PROPERTIES TIMEOUT 60)
   endif()
