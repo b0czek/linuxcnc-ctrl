@@ -9,15 +9,18 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 #include "grpc/server/local_health.hpp"
 #include "grpc/server/runtime.hpp"
@@ -155,6 +158,72 @@ struct KilledChild {
   }
 };
 
+// A connected client that has sent part of a request.
+class PartialClient {
+ public:
+  PartialClient(const std::filesystem::path& path, const char* prefix)
+      : fd_(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)) {
+    const auto address = unix_address(path);
+    require(fd_ >= 0 &&
+                connect(fd_, reinterpret_cast<const sockaddr*>(&address),
+                        sizeof(address)) == 0 &&
+                send(fd_, prefix, std::strlen(prefix), MSG_NOSIGNAL) ==
+                    static_cast<ssize_t>(std::strlen(prefix)),
+            "cannot start partial client");
+  }
+  ~PartialClient() { close(fd_); }
+  PartialClient(const PartialClient&) = delete;
+  PartialClient& operator=(const PartialClient&) = delete;
+  int fd() const { return fd_; }
+
+ private:
+  int fd_;
+};
+
+std::chrono::milliseconds elapsed_since(
+    std::chrono::steady_clock::time_point start) {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+}
+
+// Neither a stalled nor a trickling client may hold the endpoint for longer
+// than one request deadline, and shutdown must not wait for either.
+void slow_clients_bounded(const std::filesystem::path& path,
+                          const std::string& endpoint) {
+  linuxcnc::server::detail::LocalHealthServer server(endpoint);
+  {
+    PartialClient stalled(path, "GET /hea");
+    const auto start = std::chrono::steady_clock::now();
+    require_serving(path);
+    require(elapsed_since(start) < std::chrono::milliseconds(1000),
+            "stalled client held the health endpoint");
+  }
+  {
+    PartialClient trickling(path, "G");
+    std::atomic<bool> done{false};
+    std::thread sender([&] {
+      while (!done.load()) {
+        if (send(trickling.fd(), "E", 1, MSG_NOSIGNAL) != 1) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const auto start = std::chrono::steady_clock::now();
+    require_serving(path);
+    const auto waited = elapsed_since(start);
+    done.store(true);
+    sender.join();
+    require(waited < std::chrono::milliseconds(1000),
+            "trickling client held the health endpoint");
+  }
+  PartialClient stalled(path, "GET /hea");
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  const auto start = std::chrono::steady_clock::now();
+  server.shutdown();
+  require(elapsed_since(start) < std::chrono::milliseconds(1000),
+          "shutdown waited for a stalled client");
+}
+
 void requests_routed(const std::filesystem::path& path) {
   require(starts_with(http_exchange(path, "GET /other HTTP/1.1\r\n\r\n"),
                       "HTTP/1.1 404 "),
@@ -162,9 +231,15 @@ void requests_routed(const std::filesystem::path& path) {
   require(starts_with(http_exchange(path, "POST /health HTTP/1.1\r\n\r\n"),
                       "HTTP/1.1 405 "),
           "non-GET request was not rejected");
-  require(
-      starts_with(http_exchange(path, std::string(2048, 'x')), "HTTP/1.1 400 "),
-      "oversized request was not rejected");
+  // The size limit must reject at once, not after the request deadline.
+  const auto oversized_start = std::chrono::steady_clock::now();
+  require(starts_with(http_exchange(path, std::string(2048, 'x')),
+                      "HTTP/1.1 400 ") &&
+              elapsed_since(oversized_start) < std::chrono::milliseconds(150),
+          "oversized request was not rejected promptly");
+  require(starts_with(http_exchange(path, "GET /health?probe=1 HTTP/1.1\n\n"),
+                      "HTTP/1.1 200 "),
+          "query string or bare-LF request was not served");
   require(starts_with(http_exchange(path, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"),
                       "HTTP/1.1 404 "),
           "gRPC/HTTP2 preface was not rejected");
@@ -339,6 +414,7 @@ int main() {
     const std::string endpoint = "unix:" + socket_path.string();
     crash_restart(socket_path, endpoint);
     machine_reported(socket_path, endpoint);
+    slow_clients_bounded(socket_path, endpoint);
     live_listener_preserved(socket_path, endpoint);
     unsafe_paths_preserved(socket_path, endpoint);
     replacement_preserved(socket_path, endpoint);

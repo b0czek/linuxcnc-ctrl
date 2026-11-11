@@ -1,9 +1,9 @@
 #include "grpc/server/local_health.hpp"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -142,39 +142,60 @@ class HealthEndpoint {
 };
 
 constexpr std::size_t kMaxRequestBytes = 1024;
-constexpr auto kClientTimeout = std::chrono::seconds(1);
+// The whole exchange with one client must finish within this time, however
+// slowly it sends. This bounds both how long one client can delay the next
+// and how long shutdown waits for a request in progress.
+constexpr auto kRequestDeadline = std::chrono::milliseconds(250);
 
-void set_timeouts(int fd) {
-  timeval timeout{};
-  timeout.tv_sec =
-      std::chrono::duration_cast<std::chrono::seconds>(kClientTimeout).count();
-  // NOLINTNEXTLINE(bugprone-unused-return-value): reads stay bounded by size
-  (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-  // NOLINTNEXTLINE(bugprone-unused-return-value): best-effort send bound
-  (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+using Deadline = std::chrono::steady_clock::time_point;
+
+// Waits until fd is ready for events or the deadline passes.
+bool wait_ready(int fd, short events, Deadline deadline) {
+  for (;;) {
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+    if (remaining.count() <= 0) return false;
+    pollfd descriptor{fd, events, 0};
+    const int ready = poll(&descriptor, 1, static_cast<int>(remaining.count()));
+    if (ready > 0) return true;
+    if (ready == 0 || errno != EINTR) return false;
+  }
+}
+
+std::size_t head_end(const std::string& request) {
+  const auto crlf = request.find("\r\n\r\n");
+  const auto lf = request.find("\n\n");
+  return std::min(crlf, lf);
 }
 
 // Reads the request head. Returns its request line, or an empty string for a
-// malformed, oversized or timed-out request.
-std::string read_request_line(int fd) {
+// malformed, oversized or late request.
+std::string read_request_line(int fd, Deadline deadline) {
   std::string request;
   char buffer[256];
-  while (request.find("\r\n\r\n") == std::string::npos) {
+  while (head_end(request) == std::string::npos) {
     if (request.size() >= kMaxRequestBytes) return {};
-    const auto count = recv(fd, buffer, sizeof(buffer), 0);
-    if (count < 0 && errno == EINTR) continue;
+    if (!wait_ready(fd, POLLIN, deadline)) return {};
+    const auto wanted =
+        std::min(sizeof(buffer), kMaxRequestBytes - request.size());
+    const auto count = recv(fd, buffer, wanted, MSG_DONTWAIT);
+    if (count < 0 && (errno == EINTR || errno == EAGAIN)) continue;
     if (count <= 0) return {};
     request.append(buffer, static_cast<std::size_t>(count));
   }
-  return request.substr(0, request.find("\r\n"));
+  auto line = request.substr(0, request.find('\n'));
+  if (!line.empty() && line.back() == '\r') line.pop_back();
+  return line;
 }
 
-void send_all(int fd, const std::string& data) {
+void send_all(int fd, const std::string& data, Deadline deadline) {
   std::size_t sent = 0;
   while (sent < data.size()) {
-    const auto count =
-        send(fd, data.data() + sent, data.size() - sent, MSG_NOSIGNAL);
-    if (count < 0 && errno == EINTR) continue;
+    if (!wait_ready(fd, POLLOUT, deadline)) return;
+    const auto count = send(fd, data.data() + sent, data.size() - sent,
+                            MSG_NOSIGNAL | MSG_DONTWAIT);
+    if (count < 0 && (errno == EINTR || errno == EAGAIN)) continue;
     if (count <= 0) return;
     sent += static_cast<std::size_t>(count);
   }
@@ -209,9 +230,9 @@ class LocalHealthServer::Impl {
   }
 
  private:
-  // Requests are answered one at a time; each is bounded by size and by the
-  // client socket timeouts, so a stalled client delays others by at most
-  // about a second.
+  // Requests are answered one at a time. Each exchange is bounded by
+  // kRequestDeadline, so a stalled or trickling client delays the next
+  // request, and shutdown, by at most that long.
   void accept_connections() {
     while (!stopped_.load()) {
       FileDescriptor client(
@@ -233,32 +254,39 @@ class LocalHealthServer::Impl {
   }
 
   void serve(int fd) const {
-    set_timeouts(fd);
-    const auto line = read_request_line(fd);
+    const auto deadline = std::chrono::steady_clock::now() + kRequestDeadline;
+    const auto line = read_request_line(fd, deadline);
     if (line.empty()) {
-      send_all(fd, response("400 Bad Request", R"({"error":"bad request"})"));
+      send_all(fd, response("400 Bad Request", R"({"error":"bad request"})"),
+               deadline);
       return;
     }
     const auto method_end = line.find(' ');
     const auto method = line.substr(0, method_end);
     const auto target_end = line.find(' ', method_end + 1);
-    const auto target =
+    auto target =
         method_end == std::string::npos
             ? std::string{}
             : line.substr(method_end + 1, target_end - method_end - 1);
+    target = target.substr(0, target.find('?'));
     if (target != "/health") {
-      send_all(fd, response("404 Not Found", R"({"error":"not found"})"));
+      send_all(fd, response("404 Not Found", R"({"error":"not found"})"),
+               deadline);
       return;
     }
     if (method != "GET") {
-      send_all(fd, response("405 Method Not Allowed",
-                            R"({"error":"method not allowed"})"));
+      send_all(fd,
+               response("405 Method Not Allowed",
+                        R"({"error":"method not allowed"})"),
+               deadline);
       return;
     }
     const bool serving = serving_.load(std::memory_order_acquire);
     const auto machine = machine_ ? machine_->read() : MachineHealth{};
-    send_all(fd, response(serving ? "200 OK" : "503 Service Unavailable",
-                          format_health_json(serving, machine)));
+    send_all(fd,
+             response(serving ? "200 OK" : "503 Service Unavailable",
+                      format_health_json(serving, machine)),
+             deadline);
   }
 
   HealthEndpoint endpoint_;

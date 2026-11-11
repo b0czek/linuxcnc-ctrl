@@ -7,6 +7,7 @@
 #include <pthread.h>
 
 #include <algorithm>
+#include <chrono>
 #include <csignal>
 #include <iostream>
 #include <memory>
@@ -85,7 +86,10 @@ int run_grpc_server(const DaemonConfig& config) {
     auto position_telemetry = std::make_shared<PositionTelemetry>(10000);
     auto hal_telemetry = std::make_shared<HalValueTelemetry>(128);
     auto scope_telemetry = std::make_shared<ScopeTelemetry>();
-    auto machine_health = std::make_shared<MachineHealthCache>();
+    // Allow several missed polls, and task cycles up to about half a second,
+    // before reporting a stopped task.
+    auto machine_health = std::make_shared<MachineHealthCache>(
+        std::max(std::chrono::milliseconds(500), 5 * config.status_period));
     auto machine = detail::make_machine_service(
         config, workspaces, position_telemetry, blocking, stream_admission,
         machine_health);

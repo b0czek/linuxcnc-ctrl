@@ -11,11 +11,12 @@ struct NmlStatusSnapshot;
 
 // The basic machine state reported by the local health endpoint.
 struct MachineHealth {
-  // False until the first status arrives and whenever the NML status channel
-  // is stale or disconnected.
+  // False until the first status arrives, whenever the NML status channel is
+  // stale or disconnected, and once the last status is older than the cache's
+  // stale_after limit.
   bool available = false;
-  // Time since the last new EMC_STAT. Task publishes every cycle, so a
-  // growing age means task has stopped even if the channel is still open.
+  // Time since the poller last saw a new EMC_STAT. Task publishes every
+  // cycle, so this stays below the poll period while task runs.
   std::chrono::milliseconds age{0};
   std::int32_t task_state = 0;
   std::int32_t interp_state = 0;
@@ -29,12 +30,19 @@ class MachineHealthCache {
  public:
   using Clock = std::chrono::steady_clock;
 
+  // Reads report the machine unavailable once its last status is older than
+  // stale_after, so a stopped task is not reported as running for long.
+  explicit MachineHealthCache(
+      std::chrono::milliseconds stale_after = std::chrono::milliseconds(500))
+      : stale_after_(stale_after) {}
+
   void observe(const NmlStatusSnapshot& snapshot,
                Clock::time_point now = Clock::now());
   void mark_unavailable();
   MachineHealth read(Clock::time_point now = Clock::now()) const;
 
  private:
+  const std::chrono::milliseconds stale_after_;
   mutable std::mutex mutex_;
   MachineHealth latest_;
   Clock::time_point observed_at_{};

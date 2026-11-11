@@ -183,10 +183,11 @@ probe returns `ECONNREFUSED`, recovering a socket left by a crash or forced
 termination. Live listeners, symlinks, non-sockets, and unsafe parents cause
 startup to fail without removing the occupied path.
 
-The listener answers only `GET /health`; other paths return 404 and other
-methods 405. It serves no gRPC and no application services. The reply is one
-JSON object, sent with `200` while the server is serving and `503` once
-shutdown has started:
+The listener answers only `GET /health` (a query string is ignored); other
+paths return 404 and other methods 405. It serves no gRPC and no application
+services. The reply is one JSON object, sent with `200` while the server is
+serving. Once shutdown starts the listener stops accepting; a request that
+races shutdown gets `503`:
 
 ```json
 {"version":1,"serving":true,"machine":{"available":true,"age_ms":7,
@@ -195,19 +196,24 @@ shutdown has started:
 
 `machine` comes from the status poller's cache, so a request never touches
 NML. `available` is false, with no other machine fields, until the first status
-arrives and whenever the NML status channel is stale or disconnected. `age_ms`
-is the time since the last new `EMC_STAT`; task publishes every cycle, so a
-growing age means task has stopped. `task_state` and `interp_state` are the
+arrives, whenever the NML status channel is stale or disconnected, and once the
+last new `EMC_STAT` is older than 500 ms (or five status periods, if longer).
+Task publishes every cycle, so a stopped task reads as unavailable within that
+limit. `age_ms` is the time since the poller last saw a new `EMC_STAT`, and
+stays below the status period while task runs. `task_state` and `interp_state` are the
 LinuxCNC `EMC_TASK_STATE` (1 ESTOP to 4 ON) and `EMC_TASK_INTERP` (1 IDLE to 4
 WAITING) values.
 
-Requests are served one at a time, each bounded to 1 KiB and a one-second
-socket timeout. `ServerRuntime` starts local health only after the public
+Requests are served one at a time. Each request head is limited to 1 KiB, and
+the whole exchange to 250 ms however slowly the client sends, so one stalled
+client delays the next request, and shutdown, by at most that long.
+`ServerRuntime` starts local health only after the public
 listeners are ready and marks it non-serving and stops admission at the start
 of shutdown. Normal finalization removes only the originally bound socket
 inode, preserving any replacement path and permitting restart. Public gRPC
 health retains its existing TLS/mTLS admission. For `unix:` endpoints,
-`linuxcnc-grpc-health-check` sends `GET /health` and succeeds on `200`:
+`linuxcnc-grpc-health-check` sends `GET /health` and succeeds only on a
+complete `200` reply reporting `"serving":true`, within two seconds:
 
 ```sh
 linuxcnc-grpc-health-check unix:/run/linuxcnc-grpc/health.sock
@@ -286,6 +292,8 @@ trees remain outside the analysis pipeline.
 Wire builds also install `linuxcnc-grpc-health-check`. It calls the standard
 gRPC health service at `127.0.0.1:50051` by default, or at the endpoint passed
 as its first argument, and exits nonzero unless the server reports `SERVING`.
+For a `unix:` endpoint it checks the local HTTP health endpoint described
+above instead, and the TLS options below do not apply.
 For TLS, pass `--tls-ca=PATH`; mTLS additionally accepts
 `--tls-certificate=PATH` and `--tls-private-key=PATH`. The equivalent
 `LINUXCNC_GRPC_TLS_CA`, `LINUXCNC_GRPC_TLS_CERT`, and

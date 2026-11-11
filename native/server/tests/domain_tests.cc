@@ -410,6 +410,12 @@ void machine_health_test() {
 
   cache.mark_unavailable();
   expect(!cache.read(start).available);
+
+  MachineHealthCache bounded(std::chrono::milliseconds(100));
+  bounded.observe(snapshot, start);
+  expect(bounded.read(start + std::chrono::milliseconds(100)).available);
+  const auto stale = bounded.read(start + std::chrono::milliseconds(101));
+  expect(!stale.available && stale.ini_filename.empty());
 }
 
 int main() {

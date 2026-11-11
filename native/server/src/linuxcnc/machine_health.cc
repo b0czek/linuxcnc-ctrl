@@ -25,10 +25,10 @@ void MachineHealthCache::mark_unavailable() {
 MachineHealth MachineHealthCache::read(Clock::time_point now) const {
   std::lock_guard lock(mutex_);
   MachineHealth result = latest_;
-  if (result.available) {
-    result.age = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now - observed_at_);
-  }
+  if (!result.available) return result;
+  result.age =
+      std::chrono::duration_cast<std::chrono::milliseconds>(now - observed_at_);
+  if (result.age > stale_after_) return MachineHealth{};
   return result;
 }
 
