@@ -34,14 +34,16 @@ NATIVE_FILES=()
 while IFS= read -r -d '' native_file; do
   NATIVE_FILES+=("${native_file}")
 done < <(
-  git -C "${REPO_ROOT}" ls-files -z -- \
+  git -C "${REPO_ROOT}" ls-files -z --cached --others --exclude-standard -- \
     'native/server/*.cc' 'native/server/**/*.cc' \
     'native/server/*.hpp' 'native/server/**/*.hpp' \
-    'native/server/*.h' 'native/server/**/*.h'
+    'native/server/*.h' 'native/server/**/*.h' \
+    'native/transport/*.cc' 'native/transport/**/*.cc' \
+    'native/transport/*.hpp' 'native/transport/**/*.hpp'
 )
 
 if ((${#NATIVE_FILES[@]} == 0)); then
-  echo "error: no tracked native server C/C++ files found" >&2
+  echo "error: no native C/C++ files found" >&2
   exit 1
 fi
 
