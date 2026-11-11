@@ -77,6 +77,14 @@ exit and is never restored. Reserve process-wide OpenSSL
 SSL configuration for this module; reloading other configuration later can
 invalidate the policy. Credential construction checks the effective defaults.
 
+gRPC 1.80 and newer also receive the TLS 1.3 minimum and maximum through their
+credential options. Earlier gRPC sets TLS 1.2 as the minimum on the SSL_CTX it
+creates, overriding the process default, and has no option to raise it. There,
+a gRPC listener with a **file key** also accepts TLS 1.2 (with TLS 1.2 session
+tickets). External keys still complete only TLS 1.3, because the provider signs
+nothing but a TLS 1.3 server CertificateVerify. Boost/WSS contexts are
+configured directly and are TLS 1.3 only with either gRPC.
+
 Use this initialization only in a dedicated server process. `NumTickets` is a
 server-only SSL_CONF command: a later `TLS_client_method()` context in the same
 process can fail when OpenSSL config diagnostics are enabled. Do not distribute
