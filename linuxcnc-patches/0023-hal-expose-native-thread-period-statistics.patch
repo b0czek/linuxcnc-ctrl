@@ -4,6 +4,7 @@ Date: Tue, 22 Sep 2026 21:15:00 +0200
 Subject: [PATCH] hal: expose native thread period statistics
 
 ---
+ docs/src/hal/basic-hal.adoc                   | 23 +++++
  src/hal/hal_lib.c                             | 73 +++++++++++++++
  src/hal/hal_period_stats.h                    | 89 +++++++++++++++++++
  src/hal/hal_priv.h                            | 22 ++++-
@@ -14,7 +15,7 @@ Subject: [PATCH] hal: expose native thread period statistics
  tests/thread-period-stats/README              |  4 +
  tests/thread-period-stats/checkresult         | 29 ++++++
  tests/thread-period-stats/test.hal            | 11 +++
- 10 files changed, 318 insertions(+), 1 deletion(-)
+ 11 files changed, 341 insertions(+), 1 deletion(-)
  create mode 100644 src/hal/hal_period_stats.h
  create mode 100644 tests/thread-period-stats-arithmetic/arithmetic.c
  create mode 100644 tests/thread-period-stats-arithmetic/expected
@@ -23,8 +24,42 @@ Subject: [PATCH] hal: expose native thread period statistics
  create mode 100755 tests/thread-period-stats/checkresult
  create mode 100644 tests/thread-period-stats/test.hal
 
+diff --git a/docs/src/hal/basic-hal.adoc b/docs/src/hal/basic-hal.adoc
+index b23a0f465a..0112a56838 100644
+--- a/docs/src/hal/basic-hal.adoc
++++ b/docs/src/hal/basic-hal.adoc
+@@ -383,6 +383,29 @@ These allow you to scope the execution time of a component.
+ 
+ `tmax` is a read/write parameter so the user can set it to 0 to get rid of the first time initialization on the function's execution time.
+ 
++[[sec:hal-thread-parameters]]
++== HAL Thread Parameters
++
++(((HAL Thread Parameters)))
++Each realtime thread measures the interval between the starts of consecutive
++cycles and publishes the results as parameters named after the thread, for
++example `servo-thread.period-max`.
++All times are in nanoseconds.
++
++[horizontal]
++`.period-target` (u32, RO):: Configured period.
++`.period-last`, `.period-min`, `.period-max`, `.period-avg` (u32, RO):: Latest, shortest, longest and average measured interval.
++`.jitter`, `.jitter-avg`, `.jitter-max` (u32, RO):: Latest, average and largest absolute difference between the measured interval and the configured period.
++`.exec-avg`, `.exec-max` (u32, RO):: Average and longest time to run the thread's functions.
++`.outlier-q`, `.outlier-h` (s64, RO):: Number of intervals whose jitter was at least a quarter or a half of the period.
++`.outlier-at` (s64, RO):: Value of `samples` at the latest quarter-period outlier.
++`.missed` (s64, RO):: Number of intervals longer than two periods.
++`.samples` (s64, RO):: Number of measured intervals.
++`.stats-reset` (bit, RW):: Set to true to clear the statistics. The thread clears them, and this parameter, at the start of its next cycle.
++
++The first cycle and intervals during which threads were stopped are not measured.
++Thread names longer than 41 characters leave no room for the parameter suffixes, so such threads are created without statistics and a warning is logged.
++
+ [[sec:hal-logic-components]]
+ == Basic Logic Components
+ 
 diff --git a/src/hal/hal_lib.c b/src/hal/hal_lib.c
-index 653fa53f0c..f6f7348664 100644
+index 653fa53f0c..c10dd268ea 100644
 --- a/src/hal/hal_lib.c
 +++ b/src/hal/hal_lib.c
 @@ -56,9 +56,11 @@
@@ -35,7 +70,7 @@ index 653fa53f0c..f6f7348664 100644
  
  #include <rtapi_string.h>
  #include <rtapi_atomic.h>
-+#include <limits.h>
++#include <rtapi_limits.h>
  
  #ifdef RTAPI
  #include <rtapi_app.h>
@@ -161,14 +196,14 @@ index 653fa53f0c..f6f7348664 100644
  	p->period = 0;
 diff --git a/src/hal/hal_period_stats.h b/src/hal/hal_period_stats.h
 new file mode 100644
-index 0000000000..e5200a454d
+index 0000000000..51daf69621
 --- /dev/null
 +++ b/src/hal/hal_period_stats.h
 @@ -0,0 +1,89 @@
 +#ifndef HAL_PERIOD_STATS_H
 +#define HAL_PERIOD_STATS_H
 +
-+#include <limits.h>
++#include <rtapi_limits.h>
 +#include "hal.h"
 +#include "hal_priv.h"
 +

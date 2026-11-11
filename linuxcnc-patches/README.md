@@ -493,17 +493,27 @@ derived from the cross prefix.
 the configured include directory for native external components and the
 corresponding directory in the supplied sysroot for cross builds. The sysroot
 applies to realtime and userspace compilation and linking. With `--install`,
-the sysroot also becomes the install root for modules and userspace programs.
+modules and userspace programs are installed below `DESTDIR` when it is set,
+so packaging systems can stage the result, and below the sysroot otherwise.
+`--install` with `--cross-prefix` requires `--sysroot`, so target binaries are
+never installed into host directories.
 Compiler paths, sysroot paths, and `Makefile.modinc` paths may contain spaces.
 When cross-compiling from a run-in-place LinuxCNC checkout, pass `--modinc`
 pointing to a `Makefile.modinc` configured for the installed target LinuxCNC;
 the run-in-place file contains host checkout paths and is rejected with
-`--sysroot`. The kbuild recipe preserves paths containing spaces when passing
-the compiler, kernel directory, module directory, and symbol file to make.
+`--sysroot`. The generated component Makefile includes its `Makefile.modinc` by absolute
+path, because kbuild rereads it from inside the kernel tree. Cross builds
+reject a `Makefile.modinc` without cross-compilation support for realtime and
+userspace components alike. The kbuild recipe preserves paths containing
+spaces when passing the compiler, kernel directory, module directory, and
+symbol file to make. `--cc` and `--make` accept a command with arguments.
 With no new options, native compilation retains the existing configured
-compiler and standard `ld` and `objdump` behavior. The accompanying regression
-test checks option handling at a fake make boundary, compiles a real HAL
-component with paths containing spaces, and exercises the kbuild make recipe.
+compiler and standard `ld` and `objdump`, ignoring `LD` and `OBJDUMP` exported
+by a cross SDK environment. The accompanying regression test builds and
+installs realtime and userspace components through argument-logging target
+tool wrappers and checks that the target sysroot reaches compilation and
+linking, and that installation honours `DESTDIR`. It also covers paths with
+spaces and a kbuild build that rereads the component Makefile.
 
 ### 0022 — Raise HAL_NAME_LEN to 55
 
@@ -515,24 +525,20 @@ that already has the longer names.
 
 ### 0023 — Native HAL thread period statistics
 
-Each HAL thread measures its actual start-to-start interval inside the
-LinuxCNC scheduler and publishes read-only HAL parameters. All times are in
-nanoseconds:
-
-| Parameter | Meaning |
-| --- | --- |
-| `period-target` | configured period |
-| `period-last`, `period-min`, `period-max`, `period-avg` | measured start-to-start interval |
-| `jitter`, `jitter-avg`, `jitter-max` | absolute deviation from the configured period |
-| `exec-avg`, `exec-max` | thread execution time |
-| `outlier-q`, `outlier-h` | samples with jitter of at least a quarter or half period |
-| `outlier-at` | sample number of the latest quarter-period outlier |
-| `missed` | intervals longer than two periods |
-| `samples` | measured intervals |
+Each HAL thread measures its actual start-to-start interval, jitter, and
+execution time inside the LinuxCNC scheduler and publishes them as read-only
+HAL parameters such as `<thread>.period-max`, `<thread>.jitter-max`, and
+`<thread>.missed`. The parameters are documented in the "HAL Thread
+Parameters" section of `docs/src/hal/basic-hal.adoc` in the patched tree.
 
 A writable `<thread>.stats-reset` parameter clears the statistics on the next
 cycle; like `tmax`, it appears in `halcmd save` output. Initialization and
 stopped intervals are not counted. Counts use signed 64-bit HAL parameters so
 their decimal output can be read by existing statistics consumers. Thread names
 of up to 41 characters receive statistics; a longer valid thread name still
-creates its thread, without them, and logs a warning.
+creates its thread, without them, and logs a warning. The statistics code uses
+`rtapi_limits.h`, so it also builds as a 64-bit kernel module; 32-bit kernels
+are not supported.
+
+Known limitation, shared with the existing thread `tmax` and `time` handling:
+a failure while creating the parameters leaves a partially created thread.
