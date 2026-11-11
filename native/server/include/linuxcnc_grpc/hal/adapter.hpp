@@ -13,6 +13,10 @@
 
 namespace linuxcnc::server {
 
+// The six wire types. LinuxCNC HAL (2.10+) stores integers in 64 bits only,
+// so items read from HAL are always Bit, Float, S64 or U64. S32 and U32 are
+// accepted as values written to S64 and U64 items, and as the declared types
+// of items of owned components (see LinuxCncHalComponent).
 enum class HalAdapterType { Bit, Float, S32, U32, S64, U64 };
 using HalAdapterValue = std::variant<bool, double, std::int32_t, std::uint32_t,
                                      std::int64_t, std::uint64_t>;
@@ -107,6 +111,10 @@ class HalAdapterError final : public std::runtime_error {
  * Owns one server-retained remote HAL proxy. Its lifetime is independent of
  * any individual RPC stream; hal_exit() runs only when the proxy is destroyed
  * or the daemon shuts down.
+ *
+ * Items keep their declared type for read() and write(). An item declared
+ * S32 or U32 is a 64-bit HAL item; read() clamps a value outside the 32-bit
+ * range to the nearest 32-bit limit.
  */
 class LinuxCncHalComponent final {
  public:
@@ -139,8 +147,14 @@ class LinuxCncHalComponent final {
 
 /**
  * Transport-neutral LinuxCNC HAL adapter. It owns a small ready observer
- * component to attach to HAL and serializes shared-memory list/value access
- * under HAL's mutex. It intentionally exposes no signal link/unlink methods.
+ * component to attach to HAL and uses only HAL's public query API. Each call
+ * (topology(), read_many(), write_many(), ...) runs under one hold of HAL's
+ * mutex, so it observes and modifies a consistent HAL state. It intentionally
+ * exposes no signal link/unlink methods.
+ *
+ * Thread "running" is derived from each thread's threadbeat pin across
+ * topology() calls, because HAL no longer publishes its global flag; it can
+ * lag a start or stop by up to twice the thread period plus 250 ms.
  */
 class LinuxCncHalAdapter final {
  public:
