@@ -1,0 +1,597 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dariusz Majnert <dariusz.majnert@gmail.com>
+Date: Tue, 22 Sep 2026 12:56:22 +0200
+Subject: [PATCH] hal: support cross-compiling external components
+
+---
+ docs/src/man/man1/halcompile.1.adoc           |  34 ++++
+ src/Makefile.modinc.in                        |  64 +++++--
+ src/hal/utils/halcompile.g                    | 129 +++++++++++--
+ tests/halcompile/cross-tools/.gitignore       |   2 +
+ tests/halcompile/cross-tools/checkresult      |   4 +
+ tests/halcompile/cross-tools/cross_tools.comp |   6 +
+ tests/halcompile/cross-tools/test.sh          | 170 ++++++++++++++++++
+ 7 files changed, 382 insertions(+), 27 deletions(-)
+ create mode 100644 tests/halcompile/cross-tools/.gitignore
+ create mode 100755 tests/halcompile/cross-tools/checkresult
+ create mode 100644 tests/halcompile/cross-tools/cross_tools.comp
+ create mode 100755 tests/halcompile/cross-tools/test.sh
+
+diff --git a/docs/src/man/man1/halcompile.1.adoc b/docs/src/man/man1/halcompile.1.adoc
+index c06cd1b868..f5f5bc1116 100644
+--- a/docs/src/man/man1/halcompile.1.adoc
++++ b/docs/src/man/man1/halcompile.1.adoc
+@@ -74,6 +74,40 @@ Extra arguments passed to the C-compiler.
+ *--extra-link-args*=_args_::
+ Extra arguments passed to the linker.
+ 
++=== Cross-compilation options
++
++*--cross-prefix*=_prefix_::
++Use __prefix__**gcc**, __prefix__**ld** and __prefix__**objdump** to build.
++_prefix_ may include a directory, for example
++_/opt/sdk/bin/aarch64-linux-gnu-_. *--install* with this option requires
++*--sysroot*.
++*--sysroot*=_directory_::
++Compile and link against the target system in _directory_. LinuxCNC headers
++and libraries are taken from the target installation paths below
++_directory_. With *--install*, components are installed below *DESTDIR* when it
++is set in the environment, otherwise below _directory_. A run-in-place
++*Makefile.modinc* contains host paths, so when *halcompile* runs from a
++run-in-place build, *--modinc* must name the *Makefile.modinc* of the
++installed target LinuxCNC.
++*--cc*=_command_::
++C compiler. Overrides the compiler selected by *--cross-prefix*.
++*--ld*=_command_::
++Linker used for the relocatable link of realtime components. Overrides the
++linker selected by *--cross-prefix*.
++*--objdump*=_command_::
++*objdump* used to list exported realtime symbols. Overrides the one selected by
++*--cross-prefix*.
++*--make*=_command_::
++*make* program to run.
++*--modinc*=_file_::
++*Makefile.modinc* to build with instead of the one belonging to this
++*halcompile*.
++
++_command_ is the path of an executable, or a command with arguments, such as
++*--cc*="ccache aarch64-linux-gnu-gcc". Without these options, *halcompile*
++uses the compiler LinuxCNC was configured with and the host *ld* and
++*objdump*. *LD* and *OBJDUMP* in the environment are ignored.
++
+ == DESCRIPTION
+ 
+ *halcompile* performs many different functions:
+diff --git a/src/Makefile.modinc.in b/src/Makefile.modinc.in
+index ed9d75d98c..89904320d4 100644
+--- a/src/Makefile.modinc.in
++++ b/src/Makefile.modinc.in
+@@ -65,46 +65,87 @@ BUILDSYS = @BUILD_SYS@
+ KERNELDIR := @KERNELDIR@
+ CC := @CC@
+ RTAI = @RTAI@
++prefix := @prefix@
++exec_prefix := @exec_prefix@
++EMC2_HOME=@EMC2_HOME@
++RUN_IN_PLACE=@RUN_IN_PLACE@
++ifneq ($(SYSROOT),)
++ifeq ($(RUN_IN_PLACE),yes)
++$(error Cross compilation from a run-in-place build requires an installed target Makefile.modinc; pass --modinc=...)
++endif
++endif
+ RTFLAGS = $(filter-out -ffast-math,@RTFLAGS@ @EXT_RTFLAGS@) -fno-fast-math $(call cc-option,-mieee-fp) -fno-unsafe-math-optimizations
+-RTFLAGS := -O2 -Wall -Wextra -g -I. -I@RTDIR@/include $(RTFLAGS) -DRTAPI -D_GNU_SOURCE -Drealtime
++ifeq ($(SYSROOT),)
++ifeq ($(RUN_IN_PLACE),yes)
++RTAPI_INCLUDEDIR := @RTDIR@/include
++else
++RTAPI_INCLUDEDIR := @includedir@/linuxcnc
++endif
++else
++RTAPI_INCLUDEDIR := $(SYSROOT)@includedir@/linuxcnc
++endif
++ifeq ($(SYSROOT):$(RUN_IN_PLACE),:yes)
++HAL_INCLUDEDIR := $(EMC2_HOME)/include
++else
++HAL_INCLUDEDIR := $(RTAPI_INCLUDEDIR)
++endif
++RTFLAGS := -O2 -Wall -Wextra -g -I. -I"$(RTAPI_INCLUDEDIR)" $(RTFLAGS) -DRTAPI -D_GNU_SOURCE -Drealtime
+ ifneq ($(KERNELRELEASE),)
+ ifeq ($(RTARCH):$(RTAI):$(filter $(RTFLAGS),-msse),x86_64:3:)
+ EXTRA_CFLAGS += -msse
+ endif
+ endif
+ EXTRA_CFLAGS += -fno-builtin-sin -fno-builtin-cos -fno-builtin-sincos
+-EMC2_HOME=@EMC2_HOME@
+-RUN_IN_PLACE=@RUN_IN_PLACE@
+ ifeq ($(RUN_IN_PLACE),yes)
+-EXTRA_CFLAGS := $(RTFLAGS) -D__MODULE__ -I$(EMC2_HOME)/include
++EXTRA_CFLAGS := $(RTFLAGS) -D__MODULE__ -I"$(HAL_INCLUDEDIR)"
+ RTLIBDIR := @EMC2_HOME@/rtlib
+ LIBDIR := @EMC2_HOME@/lib
+ else
+-prefix := @prefix@
+-EXTRA_CFLAGS := $(RTFLAGS) -D__MODULE__ -I@includedir@/linuxcnc
++EXTRA_CFLAGS := $(RTFLAGS) -D__MODULE__ -I"$(HAL_INCLUDEDIR)"
+ RTLIBDIR := @EMC2_RTLIB_DIR@
+ LIBDIR := @libdir@
+ endif
++HAL_USER_BINDIR := @bindir@
++ifeq ($(SYSROOT),)
++HAL_USER_RPATH := $(LIBDIR)
++HAL_USER_SYSROOT :=
++else
++LIBDIR := $(SYSROOT)@libdir@
++HAL_USER_RPATH := @libdir@
++HAL_USER_SYSROOT := --sysroot="$(SYSROOT)"
++endif
+ EXTRA_CFLAGS += -Wframe-larger-than=2560
++ifneq ($(SYSROOT),)
++EXTRA_CFLAGS += --sysroot="$(SYSROOT)"
++EXTRA_LDFLAGS += --sysroot="$(SYSROOT)"
++endif
+ 
+ ifeq ($(BUILDSYS),kbuild)
+ modules:
+-	$(MAKE) KBUILD_EXTRA_SYMBOLS=$(RTLIBDIR)/Module.symvers -C $(KERNELDIR) SUBDIRS=`pwd` CC=$(CC) V=0 modules
++	$(MAKE) KBUILD_EXTRA_SYMBOLS="$(RTLIBDIR)/Module.symvers" -C "$(KERNELDIR)" SUBDIRS="$(CURDIR)" CC="$(CC)" V=0 modules
+ 
+ clean:
+ 	rm *.ko *.mod.c *.o
+ 
+ install:
+-	cp $(patsubst %.o,%.ko,$(obj-m)) $(DESTDIR)$(RTLIBDIR)/
++	cp $(patsubst %.o,%.ko,$(obj-m)) "$(DESTDIR)$(RTLIBDIR)/"
+ endif
+ 
+ ifeq ($(BUILDSYS),uspace)
++# Like CC, use the build tools unless halcompile selects them explicitly;
++# an SDK environment may export target tools for an unrelated build.
++ifneq ($(origin LD),command line)
++LD := ld
++endif
++ifneq ($(origin OBJDUMP),command line)
++OBJDUMP := objdump
++endif
+ EXTRA_CFLAGS += -DSIM -fPIC
+ allmodules = $(patsubst %.o,%.so,$(obj-m))
+ modules: $(allmodules)
+ 
+ install: modules
+-	cp $(allmodules) $(DESTDIR)$(RTLIBDIR)/
++	cp $(allmodules) "$(DESTDIR)$(RTLIBDIR)/"
+ 
+ getobjs = $(if $(filter undefined, $(origin $(1)-objs)), $(1).o, $($(1)-objs))
+ getsrcs = $(patsubst %.o,%.c,$(call getobjs,$(1)))
+@@ -119,8 +160,8 @@ $(foreach mod,$(patsubst %.o,%,$(obj-m)),\
+ .PHONY: %.so
+ %.so:
+ 	$(ECHO) Linking $@
+-	$(Q)ld -d -r -o $*.tmp $^
+-	$(Q)objdump -w -j .rtapi_export -t $*.tmp \
++	$(Q)$(LD) -d -r -o $*.tmp $^
++	$(Q)$(OBJDUMP) -w -j .rtapi_export -t $*.tmp \
+ 	| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($$6,16))} END{print "local : * ; };"}' \
+ 	> $*.ver
+ 	$(Q)$(CC) -shared -Bsymbolic $(LDFLAGS) -Wl,--version-script,$*.ver -o $@ $^ -lm $(EXTRA_LDFLAGS)
+@@ -130,4 +171,3 @@ endif
+ ifeq ($(BUILDSYS),normal)
+ $(error Makefile.modinc is only suitable for 'kbuild' kernels and 'uspace' systems)
+ endif
+-
+diff --git a/src/hal/utils/halcompile.g b/src/hal/utils/halcompile.g
+index fcce8c6329..e8db9fcd42 100644
+--- a/src/hal/utils/halcompile.g
++++ b/src/hal/utils/halcompile.g
+@@ -97,7 +97,7 @@ parser Hal:
+                 | {{ return 1 }}
+ %%
+ 
+-import os, sys, tempfile, shutil, getopt, time
++import os, sys, tempfile, shutil, getopt, time, shlex
+ import subprocess
+ BASE = os.path.abspath(os.path.join(os.path.dirname(sys.argv[0]), ".."))
+ BINDIR = os.getenv('USER_MODULE_DIR', None) or os.path.join(BASE, "bin")
+@@ -807,6 +807,9 @@ INSTALL, COMPILE, PREPROCESS, DOCUMENT, INSTALLDOC, VIEWDOC, MODINC = range(7)
+ modename = ("install", "compile", "preprocess", "document", "installdoc", "viewdoc", "print-modinc")
+ 
+ modinc = None
++make_command = ["make"]
++build_variables = {}
++
+ def find_modinc():
+     global modinc
+     if modinc: return modinc
+@@ -818,44 +821,89 @@ def find_modinc():
+             return e
+     raise SystemExit("Unable to locate Makefile.modinc")
+ 
++def split_tool_command(value):
++    if os.path.isfile(value):
++        return [value]
++    return shlex.split(value)
++
++def make_tool_command(value):
++    return " ".join(shlex.quote(argument) for argument in split_tool_command(value))
++
++def make_path(path):
++    return path.replace("$", "$$").replace("#", "\\#").replace(" ", "\\ ")
++
++def cross_build():
++    return any(name in build_variables for name in ("SYSROOT", "LD", "OBJDUMP"))
++
++def install_root():
++    return os.environ.get("DESTDIR") or build_variables["SYSROOT"]
++
++def include_modinc(f, tempdir):
++    # Kbuild rereads this Makefile from the kernel tree, so the include
++    # must not depend on the current directory.
++    print("include %s" % make_path(os.path.join(tempdir, "Makefile.modinc")), file=f)
++    if cross_build():
++        print("ifeq ($(HAL_INCLUDEDIR),)", file=f)
++        print("$(error Makefile.modinc does not support cross compilation)", file=f)
++        print("endif", file=f)
++
++def run_make(tempdir, *targets, install_root=None):
++    command = make_command + ["-S", "-C", tempdir]
++    command.extend("%s=%s" % (name, make_tool_command(value) if name in ("CC", "LD", "OBJDUMP") else value)
++                   for name, value in build_variables.items())
++    if install_root is not None:
++        command.append("DESTDIR=%s" % install_root)
++    command.extend(targets)
++    result = subprocess.run(command)
++    if result.returncode != 0:
++        raise SystemExit(result.returncode)
++
++def copy_modinc(tempdir):
++    shutil.copyfile(find_modinc(), os.path.join(tempdir, "Makefile.modinc"))
++
+ def build_usr(tempdir, filename, mode, origfilename):
+     binname = os.path.basename(os.path.splitext(filename)[0])
+ 
++    copy_modinc(tempdir)
+     makefile = os.path.join(tempdir, "Makefile")
+     f = open(makefile, "w")
+     print("%s: %s" % (binname, filename), file=f)
+-    print("\t$(CC) -I%s -I$(EMC2_HOME)/include -I/usr/include/linuxcnc -URTAPI -U__MODULE__ -DULAPI -O2 %s -o $@ $< -Wl,-rpath,$(LIBDIR) -L$(LIBDIR) -llinuxcnchal %s" % (
++    print("\t$(CC) -I%s $(HAL_USER_SYSROOT) -I\"$(HAL_INCLUDEDIR)\" -URTAPI -U__MODULE__ -DULAPI -O2 %s -o $@ $< -Wl,-rpath,\"$(HAL_USER_RPATH)\" -L\"$(LIBDIR)\" -llinuxcnchal %s" % (
+ 
+-        os.path.abspath(os.path.dirname(origfilename)),
++        shlex.quote(os.path.abspath(os.path.dirname(origfilename))),
+         options.get("extra_compile_args", ""),
+         options.get("extra_link_args", "")), file=f)
+-    print("include %s" % find_modinc(), file=f)
++    include_modinc(f, tempdir)
++    print("install-user: %s" % binname, file=f)
++    print("\t@test -n \"$(HAL_USER_BINDIR)\"", file=f)
++    print("\tinstall -d \"$(DESTDIR)$(HAL_USER_BINDIR)\"", file=f)
++    print("\tinstall -m 755 $< \"$(DESTDIR)$(HAL_USER_BINDIR)/\"", file=f)
+     f.close()
+-    result = os.system("cd %s && make -S %s" % (tempdir, binname))
+-    if result != 0:
+-        raise SystemExit(os.WEXITSTATUS(result) or 1)
++    cross_install = mode == INSTALL and build_variables.get("SYSROOT")
++    run_make(tempdir, "install-user" if cross_install else binname,
++             install_root=install_root() if cross_install else None)
+     output = os.path.join(tempdir, binname)
+-    if mode == INSTALL:
++    if mode == INSTALL and not cross_install:
+         shutil.copy(output, os.path.join(BINDIR, binname))
+     elif mode == COMPILE:
+         shutil.copy(output, os.path.join(os.path.dirname(origfilename),binname))
+ 
+ def build_rt(tempdir, filename, mode, origfilename):
+     objname = os.path.basename(os.path.splitext(filename)[0] + ".o")
++    copy_modinc(tempdir)
+     makefile = os.path.join(tempdir, "Makefile")
+     f = open(makefile, "w")
+     print("obj-m += %s" % objname, file=f)
+-    print("include %s" % find_modinc(), file=f)
+-    print("EXTRA_CFLAGS += -I%s" % os.path.abspath(os.path.dirname(origfilename)), file=f)
+-    print("EXTRA_CFLAGS += -I%s" % os.path.abspath('.'), file=f)
++    include_modinc(f, tempdir)
++    print("EXTRA_CFLAGS += -I%s" % shlex.quote(os.path.abspath(os.path.dirname(origfilename))), file=f)
++    print("EXTRA_CFLAGS += -I%s" % shlex.quote(os.path.abspath('.')), file=f)
+     f.close()
+     if mode == INSTALL:
+         target = "modules install"
+     else:
+         target = "modules"
+-    result = os.system("cd %s && make -S %s" % (tempdir, target))
+-    if result != 0:
+-        raise SystemExit(os.WEXITSTATUS(result) or 1)
++    run_make(tempdir, *target.split(),
++             install_root=install_root() if mode == INSTALL and "SYSROOT" in build_variables else None)
+     if mode == COMPILE:
+         for extension in ".ko", ".so", ".o":
+             kobjname = os.path.splitext(filename)[0] + extension
+@@ -1187,6 +1235,18 @@ Options to add compile and link flags (only for userspace, only for .c files)
+     --extra-compile-args="-I/usr/include/..."
+     --extra-link-args="-l..."
+ 
++Cross-compilation options:
++    --cross-prefix=prefix          Prefix for gcc, ld, and objdump
++    --sysroot=directory            Target compiler sysroot; from a run-in-place
++                                   build also pass an installed target --modinc.
++                                   --install installs into $DESTDIR, or into
++                                   the sysroot when DESTDIR is unset
++    --cc=command                   C compiler override
++    --ld=command                   relocatable linker override
++    --objdump=command              objdump override
++    --make=command                 make override
++    --modinc=file                  Makefile.modinc override
++
+ Do not use [sudo] for RIP installation.
+ 
+ """ % {'name': os.path.basename(sys.argv[0]),'dflt':MAX_PERSONALITIES})
+@@ -1205,14 +1265,24 @@ def main():
+     outfile = None
+     userspace = False
+     global options
++    global make_command
++    global modinc
++    global build_variables
+     options = {}
++    build_variables = {}
++    cross_prefix = None
++    cc = None
++    ld = None
++    objdump = None
++    sysroot = None
+     try:
+         opts, args = getopt.getopt(sys.argv[1:], "UluijJcpdak:o:h?P:",
+                            ['unix', 'install', 'compile', 'preprocess', 'outfile=',
+                             'document', 'adoc', 'keep-adoc=', 'help', 'userspace', 'install-doc',
+                             'view-doc', 'require-license', 'print-modinc',
+                             'personalities=', "extra-compile-args=",
+-                            'extra-link-args='])
++                            'extra-link-args=', 'cross-prefix=', 'sysroot=',
++                            'cc=', 'ld=', 'objdump=', 'make=', 'modinc='])
+     except getopt.GetoptError:
+         usage(1)
+     for k, v in opts:
+@@ -1257,9 +1327,38 @@ def main():
+             option("extra_compile_args", v)
+         if k in ("--extra-link-args"):
+             option("extra_link_args", v)
++        if k == "--cross-prefix":
++            cross_prefix = v
++        if k == "--sysroot":
++            sysroot = os.path.abspath(v)
++        if k == "--cc":
++            cc = v
++        if k == "--ld":
++            ld = v
++        if k == "--objdump":
++            objdump = v
++        if k == "--make":
++            make_command = split_tool_command(v)
++        if k == "--modinc":
++            modinc = os.path.abspath(v)
+         if k in ("-?", "-h", "--help"):
+             usage(0)
+ 
++    if modinc is not None and not os.path.isfile(modinc):
++        raise SystemExit("Makefile.modinc does not exist: %s" % modinc)
++    if sysroot is not None and not os.path.isdir(sysroot):
++        raise SystemExit("Sysroot does not exist: %s" % sysroot)
++    if mode == INSTALL and cross_prefix is not None and sysroot is None:
++        raise SystemExit("--install with --cross-prefix requires --sysroot")
++    if cross_prefix is not None:
++        cc = cc or cross_prefix + "gcc"
++        ld = ld or cross_prefix + "ld"
++        objdump = objdump or cross_prefix + "objdump"
++    for name, value in (("CC", cc), ("LD", ld), ("OBJDUMP", objdump),
++                        ("SYSROOT", sysroot)):
++        if value is not None:
++            build_variables[name] = value
++
+     if outfile and mode != PREPROCESS and mode != DOCUMENT:
+         raise SystemExit("Can only specify -o when preprocessing or documenting")
+ 
+diff --git a/tests/halcompile/cross-tools/.gitignore b/tests/halcompile/cross-tools/.gitignore
+new file mode 100644
+index 0000000000..b6e162464d
+--- /dev/null
++++ b/tests/halcompile/cross-tools/.gitignore
+@@ -0,0 +1,2 @@
++cross_tools.so
++with space.*/
+diff --git a/tests/halcompile/cross-tools/checkresult b/tests/halcompile/cross-tools/checkresult
+new file mode 100755
+index 0000000000..367210b0f7
+--- /dev/null
++++ b/tests/halcompile/cross-tools/checkresult
+@@ -0,0 +1,4 @@
++#!/bin/sh
++set -eu
++
++test -f "$(dirname "$1")/cross_tools.so"
+diff --git a/tests/halcompile/cross-tools/cross_tools.comp b/tests/halcompile/cross-tools/cross_tools.comp
+new file mode 100644
+index 0000000000..1d48f620b8
+--- /dev/null
++++ b/tests/halcompile/cross-tools/cross_tools.comp
+@@ -0,0 +1,6 @@
++component cross_tools;
++pin out bit ready;
++function _;
++license "GPL";
++;;
++ready = 1;
+diff --git a/tests/halcompile/cross-tools/test.sh b/tests/halcompile/cross-tools/test.sh
+new file mode 100755
+index 0000000000..13c1671450
+--- /dev/null
++++ b/tests/halcompile/cross-tools/test.sh
+@@ -0,0 +1,170 @@
++#!/bin/sh
++set -eu
++
++space_root=$(mktemp -d "$PWD/with space.XXXXXX")
++trap 'rm -rf -- "$space_root"' EXIT
++cp cross_tools.comp "$space_root/cross_tools.comp"
++cat > "$space_root/cross_user.c" <<'EOF'
++#include "hal.h"
++int main(void) { return hal_init("cross_user") < 0; }
++EOF
++
++# Target tools that record their arguments and run the host tools. The
++# compiler drops --sysroot so the host compiler keeps its own C library while
++# LinuxCNC headers and libraries still have to be found in the test sysroot.
++tools=$space_root/tools
++mkdir -p "$tools"
++for tool in gcc ld objdump; do
++    cat > "$tools/target-$tool" <<EOF
++#!/bin/sh
++printf '\t' >> "\$0.log"
++printf '%s\t' "\$@" >> "\$0.log"
++printf '\n' >> "\$0.log"
++for argument; do
++    shift
++    case \$argument in
++        --sysroot=*) ;;
++        *) set -- "\$@" "\$argument" ;;
++    esac
++done
++exec $tool "\$@"
++EOF
++    chmod +x "$tools/target-$tool"
++done
++reset_tool_logs() {
++    rm -f "$tools"/*.log
++}
++# Succeeds when one logged call of tool $1 received every following argument.
++tool_called_with() {
++    calls=$(cat "$tools/target-$1.log")
++    shift
++    for argument; do
++        calls=$(printf '%s\n' "$calls" | grep -F -- "$(printf '\t%s\t' "$argument")") || return 1
++    done
++}
++
++# An installed target LinuxCNC, as seen through the sysroot.
++sysroot=$space_root/sysroot
++mkdir -p "$sysroot/usr/include" "$sysroot/usr/lib"
++ln -s "$EMC2_HOME/include" "$sysroot/usr/include/linuxcnc"
++ln -s "$EMC2_HOME/lib/liblinuxcnchal.so" "$sysroot/usr/lib/liblinuxcnchal.so"
++target_modinc=$space_root/target.modinc
++sed -e 's|^RUN_IN_PLACE=.*|RUN_IN_PLACE=no|' \
++    -e 's|^prefix := .*|prefix := /usr|' \
++    -e 's|^RTLIBDIR := .*|RTLIBDIR := /usr/lib/linuxcnc/modules|' \
++    "$(halcompile --print-modinc)" > "$target_modinc"
++
++target_halcompile() {
++    halcompile --modinc="$target_modinc" --cross-prefix="$tools/target-" \
++        --sysroot="$sysroot" "$@"
++}
++
++(
++    cd "$space_root"
++    reset_tool_logs
++    target_halcompile --compile cross_tools.comp
++    test -s cross_tools.so
++    tool_called_with gcc "--sysroot=$sysroot" -c cross_tools.c
++    tool_called_with gcc "--sysroot=$sysroot" -shared
++    tool_called_with ld -r
++    tool_called_with objdump .rtapi_export
++
++    reset_tool_logs
++    target_halcompile --compile --userspace cross_user.c
++    test -x cross_user
++    tool_called_with gcc "--sysroot=$sysroot" "-L$sysroot/usr/lib" \
++        -Wl,-rpath,/usr/lib
++)
++
++# Installation goes to the sysroot unless the caller stages into DESTDIR.
++mkdir -p "$sysroot/usr/lib/linuxcnc/modules"
++(
++    cd "$space_root"
++    target_halcompile --install cross_tools.comp
++    target_halcompile --install --userspace cross_user.c
++)
++test -s "$sysroot/usr/lib/linuxcnc/modules/cross_tools.so"
++test -x "$sysroot/usr/bin/cross_user"
++rm "$sysroot/usr/lib/linuxcnc/modules/cross_tools.so" "$sysroot/usr/bin/cross_user"
++
++stage=$space_root/stage
++mkdir -p "$stage/usr/lib/linuxcnc/modules"
++(
++    cd "$space_root"
++    DESTDIR=$stage target_halcompile --install cross_tools.comp
++    DESTDIR=$stage target_halcompile --install --userspace cross_user.c
++)
++test -s "$stage/usr/lib/linuxcnc/modules/cross_tools.so"
++test -x "$stage/usr/bin/cross_user"
++test ! -e "$sysroot/usr/lib/linuxcnc/modules/cross_tools.so"
++test ! -e "$sysroot/usr/bin/cross_user"
++
++if halcompile --install --cross-prefix="$tools/target-" cross_tools.comp \
++        >"$space_root/host-install-output" 2>&1; then
++    echo "cross installation without a sysroot was accepted" >&2
++    exit 1
++fi
++grep -F -- '--cross-prefix requires --sysroot' "$space_root/host-install-output"
++
++if halcompile --compile --sysroot="$sysroot" cross_tools.comp \
++        >"$space_root/rip-cross-output" 2>&1; then
++    echo "cross compilation unexpectedly accepted a run-in-place Makefile.modinc" >&2
++    exit 1
++fi
++grep -F 'requires an installed target Makefile.modinc' "$space_root/rip-cross-output"
++
++# A native build ignores target tools exported by a cross SDK environment.
++rm -f cross_tools.so
++LD=false OBJDUMP=false halcompile --compile cross_tools.comp
++test -s cross_tools.so
++
++# Compiler and make overrides may be commands with arguments.
++(
++    cd "$space_root"
++    rm -f cross_tools.so
++    halcompile --compile --cc="env gcc" --make="env make" cross_tools.comp
++    test -s cross_tools.so
++)
++
++# Kbuild passes paths with spaces to the kernel build intact.
++mkdir -p "$space_root/kernel dir" "$space_root/module dir"
++cp "$(halcompile --print-modinc)" "$space_root/Makefile.modinc"
++cat > "$space_root/kernel dir/Makefile" <<'EOF'
++modules:
++	@$(CC) --version > "$(CHECK_OUTPUT)"
++	@printf '%s\n' '$(KBUILD_EXTRA_SYMBOLS)' '$(SUBDIRS)' >> "$(CHECK_OUTPUT)"
++EOF
++(
++    cd "$space_root/module dir"
++    make -s -f "$space_root/Makefile.modinc" modules \
++        BUILDSYS=kbuild KERNELDIR="$space_root/kernel dir" \
++        RTLIBDIR="$space_root/rt lib" CC="'$tools/target-gcc'" \
++        CHECK_OUTPUT="$space_root/kbuild-output"
++)
++test -s "$space_root/kbuild-output"
++grep -Fx -- "$space_root/rt lib/Module.symvers" "$space_root/kbuild-output"
++grep -Fx -- "$space_root/module dir" "$space_root/kbuild-output"
++
++# Kbuild rereads the component Makefile from inside the kernel tree, as
++# scripts/Makefile.build does, so its Makefile.modinc include must resolve
++# from there.
++kbuild_root=$space_root/kbuild
++mkdir -p "$kbuild_root/kernel"
++sed -e 's|^BUILDSYS = .*|BUILDSYS = kbuild|' \
++    -e "s|^KERNELDIR := .*|KERNELDIR := $kbuild_root/kernel|" \
++    "$(halcompile --print-modinc)" > "$kbuild_root/Makefile.modinc"
++cat > "$kbuild_root/kernel/Makefile" <<'EOF'
++modules:
++	@$(MAKE) -f "$(SUBDIRS)/Makefile" -f kbuild.mk component
++EOF
++cat > "$kbuild_root/kernel/kbuild.mk" <<'EOF'
++component:
++	@test "$(obj-m)" = cross_tools.o
++	@touch "$(SUBDIRS)/cross_tools.ko"
++EOF
++(
++    cd "$kbuild_root"
++    cp ../cross_tools.comp .
++    halcompile --compile --modinc="$kbuild_root/Makefile.modinc" cross_tools.comp
++    test -f cross_tools.ko
++)
