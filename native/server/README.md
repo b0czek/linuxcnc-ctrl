@@ -39,11 +39,13 @@ initialization; managed tool data must use a file-backed `[EMCIO]TOOL_TABLE`.
 
 Position-history configuration and clearing remain on `MachineService` through
 `ConfigurePositionHistory` and `ClearPositionHistory`. Telemetry is published
-directly to renderers at `ws://127.0.0.1:50052/v1/position-history` by default;
-set `--telemetry-endpoint=HOST:PORT` to change the shared listener. This
-read-only telemetry listener is always a plaintext `ws://` endpoint; `--tls`
-and `--mtls` secure only the gRPC control plane. A non-loopback telemetry bind
-requires `--allow-plaintext-non-loopback`.
+on the shared `127.0.0.1:50052` listener by default; set
+`--telemetry-endpoint=HOST:PORT` to change it. `--tls` protects both gRPC and
+telemetry using TLS 1.3 and the same server identity; telemetry clients must use
+`wss://`. `--mtls --tls-client-ca=PATH` additionally requires a verified client
+certificate on every connection to either listener, before telemetry HTTP upgrade
+or route/token handling. The [listener credential contract](#listener-credentials)
+defines key selection and development plaintext opt-in.
 
 The application protocol is server-to-client only. Client data messages close
 the connection with WebSocket policy error 1008. Every binary WebSocket
@@ -122,6 +124,116 @@ library without creating a server executable.
 Wire generation is the default and requires the complete pinned LinuxCNC NML,
 rs274, HAL, and scope integrations. Pass `-DLINUXCNC_GRPC_BUILD_WIRE=OFF` for
 an explicit domain-only build.
+
+## Listener credentials
+
+Provide `--tls --tls-certificate=PATH` with exactly one key source:
+
+- `--tls-private-key=PATH` deliberately selects a PEM private-key file.
+- `--tls-external-key-reference=PATH --tls-provider-module=ABSOLUTE_PATH`
+  selects a public external-key reference and the installed OpenSSL provider
+  module. The reference format and typed signer protocol belong to
+  [`native/transport`](../transport/README.md). An external reference is never
+  interpreted as a file private key, and failed provider loading or signing
+  never falls back to file keys or plaintext.
+
+The certificate chain and client trust roots (`--tls-client-ca=PATH`) are PEM
+files. `--mtls` requires both `--tls` and client roots, and client roots require
+`--mtls`. Non-loopback listeners require `--mtls`; server-authenticated TLS
+without client certificates on a network address is a deliberate opt-in with
+`--allow-anonymous`. TLS secures both listeners with one identity; there is no
+independently plaintext telemetry option. The TLS policy and signer deadline
+are defined by [`native/transport`](../transport/README.md).
+Certificate, key, and provider configuration errors occur before either listener
+binds.
+
+Credentials load once at startup, before any SSL context, gRPC initialization,
+or worker thread, because the transport installs process-wide gRPC TLS defaults.
+Outbound TLS clients therefore belong in another process. Shutdown closes all
+pending and upgraded telemetry sessions and drains their handlers before
+releasing SSL contexts, then releases gRPC and credentials.
+
+Telemetry admits at most 16 connections, including pending handshakes. Both
+listeners abandon handshakes after `kServerHandshakeTimeout` (five seconds);
+for telemetry this covers TLS and the WebSocket upgrade. Sessions run on an
+isolated four-thread pool, so blocking signer calls never run on the accept
+thread. The transport's signer deadline limits how long a slow signer can hold pool
+threads. Established writes retain their five-second deadline and
+route-specific bounded queues. TLS authentication supplements the existing
+HAL/scope attachment tokens; it does not replace their checks.
+
+Plaintext is an explicit development choice: `--allow-plaintext` permits loopback
+WS/gRPC, and `--allow-plaintext-non-loopback` permits unsafe development binds.
+Without `--tls` or one of these development options, startup fails. Default
+addresses remain loopback. For example, a file-key mutual-TLS daemon uses:
+
+```sh
+linuxcnc-grpc-server --ini=/etc/linuxcnc/machine.ini --nml=/etc/linuxcnc/machine.nml \
+  --tls --mtls --tls-certificate=/etc/linuxcnc/server-chain.pem \
+  --tls-private-key=/etc/linuxcnc/server-key.pem --tls-client-ca=/etc/linuxcnc/client-roots.pem
+```
+
+For local process readiness, `--health-endpoint=unix:/absolute/path` enables a
+separate plaintext Unix-domain gRPC listener, disabled by default. TCP, abstract
+Unix sockets, relative paths, URI queries/escapes, and non-normalized paths are
+rejected. Create its parent directory first, owned by the daemon user with no
+group/other permissions (for example, mode 0700), and run one daemon per
+endpoint. Startup removes an existing socket only when a nonblocking connection
+probe returns `ECONNREFUSED`, recovering a socket left by a crash or forced
+termination. Live listeners, symlinks, non-sockets, and unsafe parents cause
+startup to fail without removing the occupied path.
+
+This listener registers only the standard `grpc.health.v1.Health/Check` RPC for
+the empty service name. Machine commands and all application services return
+`UNIMPLEMENTED` there; global builder plugins, including reflection, are excluded.
+`ServerRuntime` starts local health only after the public listeners are ready,
+marks it non-serving and stops admission at the start of shutdown, and retains
+its server/service until callbacks have finished. The listener owns the Unix
+socket and passes accepted connections to gRPC; gRPC cannot unlink its path.
+Normal finalization removes only the originally bound socket inode, preserving
+any replacement path and permitting restart. Public gRPC health retains its existing
+TLS/mTLS admission. Local checks use the existing client without a TLS identity:
+
+```sh
+linuxcnc-grpc-health-check unix:/run/linuxcnc-grpc/health.sock
+```
+
+The local client must have no TLS client credentials configured through flags
+or environment. The server identity is solely a server identity and is never
+used as a local client credential. The socket's private directory supplies local
+access control; local health does not authorize access to application services.
+
+CMake prefers `find_package(linuxcnc-transport CONFIG)` and the installed
+`linuxcnc::transport-grpc` target. Standalone source builds fall back to the
+adjacent transport tree, with its tests disabled locally in that fallback.
+No root build/test setting is changed. Reflection is available only when the
+gRPC reflection library is installed; requesting `--reflection` in a build
+without it fails before either listener binds.
+
+The real listener boundary suite can run without LinuxCNC libraries:
+
+```sh
+cmake -S native/server -B build/listeners \
+  -DLINUXCNC_GRPC_BUILD_WIRE=OFF -DLINUXCNC_GRPC_ENABLE_NML=OFF \
+  -DLINUXCNC_GRPC_BUILD_TESTS=ON -DLINUXCNC_GRPC_BUILD_LISTENER_TESTS=ON \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/listeners --parallel
+ctest --test-dir build/listeners --output-on-failure
+```
+
+It requires Python `cryptography` and uses ephemeral P-384 keys in memory/memfd.
+It executes the production credential loader, TLS provider, telemetry sessions,
+and gRPC TLS listener: both key modes must deliver encrypted protobuf frames,
+reject plaintext/TLS 1.2/missing or unknown client certificates, retain token
+exclusivity, expire incomplete handshakes, and stop with open connections.
+Invalid key choices, malformed external inputs, and network health endpoints
+must leave both public ports unbound. A separate runtime boundary suite executes
+real Unix health RPCs, checks command isolation, and verifies recovery after
+`SIGKILL`, rejection of live listeners and unsafe paths, and cleanup that
+preserves replacement sockets.
+The transport package owns detailed signer/protocol and resumption-failure tests.
+Without the optional LinuxCNC integrations, scope attachment and program
+interpretation remain unavailable; full runtime tests require a built checkout.
 
 ## Native code quality
 

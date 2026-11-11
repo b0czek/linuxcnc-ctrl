@@ -146,6 +146,7 @@ hal_is_ready() {
 start_server() {
   local log_file="$1"
   "$server" \
+    --allow-plaintext \
     "--endpoint=127.0.0.1:${grpc_port}" \
     "--telemetry-endpoint=127.0.0.1:${telemetry_port}" \
     "--ini=$root/live.ini" \

@@ -62,6 +62,7 @@ RUN build_jobs="${BUILD_JOBS:-$(nproc)}" \
       -DCMAKE_BUILD_TYPE=MinSizeRel \
     && cmake --build /build/native-release --parallel "${build_jobs}" \
       --target linuxcnc-grpc-server linuxcnc-grpc-health-check \
+        linuxcnc-external-key \
     && cmake --install /build/native-release --prefix /usr/local --strip \
     && cmake -S . -B /build/native-test \
       -DLINUXCNC_ROOT=/src/linuxcnc \

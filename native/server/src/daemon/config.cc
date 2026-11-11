@@ -1,5 +1,7 @@
 #include "linuxcnc_grpc/daemon/config.hpp"
 
+#include <sys/un.h>
+
 #include <algorithm>
 #include <charconv>
 #include <limits>
@@ -65,50 +67,101 @@ std::filesystem::path configured_location(const std::filesystem::path& path,
 
 }  // namespace
 
+bool validate_health_endpoint(const std::string& endpoint, std::string* error) {
+  if (endpoint.empty()) return true;
+  constexpr std::string_view prefix = "unix:";
+  const std::filesystem::path path(
+      endpoint.substr(std::min(endpoint.size(), prefix.size())));
+  if (!endpoint.starts_with("unix:/") || endpoint.starts_with("unix://") ||
+      !path.is_absolute() || !path.has_filename() || path == path.root_path() ||
+      path.string().size() >= sizeof(sockaddr_un::sun_path) ||
+      endpoint.find_first_of("%?#\r\n") != std::string::npos ||
+      endpoint.find('\0') != std::string::npos ||
+      path.lexically_normal() != path) {
+    if (error)
+      *error =
+          "health endpoint must be unix:/absolute/path with a bounded, "
+          "normalized filesystem path";
+    return false;
+  }
+  return true;
+}
+
 bool validate_config(const DaemonConfig& config, std::string* error) {
   const auto fail = [error](const std::string& message) {
     if (error) *error = message;
     return false;
   };
-  const auto valid_endpoint = [&](const std::string& endpoint, const char* name,
-                                  bool tls_protected) {
+  const auto valid_endpoint = [&](const std::string& endpoint,
+                                  const char* name) {
     const auto separator = endpoint.rfind(':');
     if (separator == std::string::npos || separator == 0 ||
         separator + 1 == endpoint.size()) {
       if (error) *error = std::string(name) + " must be HOST:PORT";
       return false;
     }
-    if (!tls_protected && !config.allow_plaintext_non_loopback &&
-        !loopback_host(endpoint_host(endpoint))) {
+    if (loopback_host(endpoint_host(endpoint))) return true;
+    if (!config.tls && !config.allow_plaintext_non_loopback) {
       if (error)
         *error = std::string(name) +
                  " on a non-loopback host requires "
                  "--allow-plaintext-non-loopback";
       return false;
     }
+    if (config.tls && !config.mtls && !config.allow_anonymous) {
+      if (error)
+        *error = std::string(name) +
+                 " on a non-loopback host requires --mtls or "
+                 "--allow-anonymous";
+      return false;
+    }
     return true;
   };
-  if (!valid_endpoint(config.endpoint, "endpoint", config.tls) ||
-      !valid_endpoint(config.telemetry_endpoint, "telemetry endpoint", false))
+  if (!valid_endpoint(config.endpoint, "endpoint") ||
+      !valid_endpoint(config.telemetry_endpoint, "telemetry endpoint"))
     return false;
+  if (!validate_health_endpoint(config.health_endpoint, error)) return false;
   if (config.endpoint == config.telemetry_endpoint) {
     return fail("gRPC and telemetry endpoints must differ");
   }
   if (config.mtls && !config.tls) return fail("mTLS requires TLS");
+  if (!config.tls && !config.allow_plaintext &&
+      !config.allow_plaintext_non_loopback)
+    return fail("plaintext development listeners require --allow-plaintext");
+  const bool file_key = !config.tls_private_key.empty();
+  const bool external_key = !config.tls_external_key_reference.empty();
+  if (!config.tls &&
+      (!config.tls_certificate.empty() || file_key || external_key ||
+       !config.tls_client_ca.empty() || !config.tls_provider_module.empty()))
+    return fail("TLS credential options require --tls");
   if (config.tls &&
-      (config.tls_certificate.empty() || config.tls_private_key.empty())) {
-    return fail("TLS requires --tls-certificate and --tls-private-key");
-  }
+      (config.tls_certificate.empty() || file_key == external_key))
+    return fail(
+        "TLS requires --tls-certificate and exactly one of "
+        "--tls-private-key or --tls-external-key-reference");
+  if (external_key &&
+      (!config.tls_provider_module.is_absolute() ||
+       !std::filesystem::is_regular_file(config.tls_provider_module)))
+    return fail(
+        "external keys require --tls-provider-module=ABSOLUTE_PATH to a "
+        "regular file");
+  if (!external_key && !config.tls_provider_module.empty())
+    return fail("--tls-provider-module requires --tls-external-key-reference");
   if (config.mtls && config.tls_client_ca.empty())
     return fail("mTLS requires --tls-client-ca");
+  if (!config.mtls && !config.tls_client_ca.empty())
+    return fail("--tls-client-ca requires --mtls");
+  if (!config.tls && config.allow_anonymous)
+    return fail("--allow-anonymous requires --tls");
   if (config.tls &&
       (!std::filesystem::is_regular_file(config.tls_certificate) ||
-       !std::filesystem::is_regular_file(config.tls_private_key))) {
-    return fail("TLS certificate and private key must be regular files");
-  }
-  if (config.mtls && !std::filesystem::is_regular_file(config.tls_client_ca)) {
-    return fail("mTLS client CA must be a regular file");
-  }
+       !std::filesystem::is_regular_file(
+           file_key ? config.tls_private_key
+                    : config.tls_external_key_reference)))
+    return fail("TLS certificate and selected key input must be regular files");
+  if (!config.tls_client_ca.empty() &&
+      !std::filesystem::is_regular_file(config.tls_client_ca))
+    return fail("TLS client CA must be a regular file");
   if (!config.nml_file.empty() &&
       !std::filesystem::is_regular_file(config.nml_file)) {
     return fail("NML configuration must be a regular file");
@@ -195,8 +248,16 @@ bool parse_config(int argc, char* argv[], DaemonConfig* config, bool* show_help,
       config->reflection = true;
       continue;
     }
+    if (argument == "--allow-plaintext") {
+      config->allow_plaintext = true;
+      continue;
+    }
     if (argument == "--allow-plaintext-non-loopback") {
       config->allow_plaintext_non_loopback = true;
+      continue;
+    }
+    if (argument == "--allow-anonymous") {
+      config->allow_anonymous = true;
       continue;
     }
 
@@ -205,7 +266,9 @@ bool parse_config(int argc, char* argv[], DaemonConfig* config, bool* show_help,
       config->endpoint = value;
     else if (option_value(argument, "--telemetry-endpoint", &value)) {
       config->telemetry_endpoint = value;
-    } else if (option_value(argument, "--ini", &value))
+    } else if (option_value(argument, "--health-endpoint", &value))
+      config->health_endpoint = value;
+    else if (option_value(argument, "--ini", &value))
       config->ini_file = value;
     else if (option_value(argument, "--nml", &value))
       config->nml_file = value;
@@ -217,6 +280,10 @@ bool parse_config(int argc, char* argv[], DaemonConfig* config, bool* show_help,
       config->tls_certificate = value;
     else if (option_value(argument, "--tls-private-key", &value))
       config->tls_private_key = value;
+    else if (option_value(argument, "--tls-external-key-reference", &value))
+      config->tls_external_key_reference = value;
+    else if (option_value(argument, "--tls-provider-module", &value))
+      config->tls_provider_module = value;
     else if (option_value(argument, "--tls-client-ca", &value))
       config->tls_client_ca = value;
     else if (option_value(argument, "--workspace-quota", &value)) {
@@ -359,13 +426,15 @@ bool parse_config(int argc, char* argv[], DaemonConfig* config, bool* show_help,
       return false;
     }
   }
-  return validate_config(*config, error);
+  return (show_help && *show_help) || validate_config(*config, error);
 }
 
 std::string config_help() {
   return "linuxcnc-grpc-server [options]\n"
          "  --endpoint=HOST:PORT                 (default 127.0.0.1:50051)\n"
          "  --telemetry-endpoint=HOST:PORT         (default 127.0.0.1:50052)\n"
+         "  --health-endpoint=unix:/absolute/path (health only; disabled by "
+         "default)\n"
          "  --ini=PATH --nml=PATH\n"
          "  --workspace-root=PATH --active-program-directory=PATH\n"
          "  --workspace-quota=BYTES --total-quota=BYTES "
@@ -374,8 +443,12 @@ std::string config_help() {
          "  --max-upload-metadata=1048576 --upload-timeout-seconds=300\n"
          "  --command-queue-capacity=N\n"
          "  --command-completion-timeout-ms=0     (0 uses RPC deadline)\n"
-         "  --tls --tls-certificate=PATH --tls-private-key=PATH (gRPC only)\n"
-         "  --mtls --tls-client-ca=PATH --reflection (gRPC only)\n"
+         "  --tls --tls-certificate=PATH          (TLS 1.3 gRPC and WSS)\n"
+         "  --tls-private-key=PATH               (PEM file key), or\n"
+         "  --tls-external-key-reference=PATH "
+         "--tls-provider-module=ABSOLUTE_PATH\n"
+         "  --mtls --tls-client-ca=PATH           (both listeners)\n"
+         "  --reflection                         (gRPC only)\n"
          "  --status-period-ms=50 --error-period-ms=100 "
          "--position-period-ms=10\n"
          "  --topology-period-ms=2000 --scope-samples=32000\n"
@@ -385,7 +458,10 @@ std::string config_help() {
          "--component-heartbeat-timeout-ms=3000\n"
          "  --component-default-sampling-ms=20 "
          "--component-min-sampling-ms=5 --component-max-sampling-ms=1000\n"
-         "  --allow-plaintext-non-loopback\n";
+         "  --allow-plaintext                    (loopback development only)\n"
+         "  --allow-plaintext-non-loopback        (unsafe development binds)\n"
+         "  --allow-anonymous                    (non-loopback TLS without "
+         "client certificates)\n";
 }
 
 }  // namespace linuxcnc::server

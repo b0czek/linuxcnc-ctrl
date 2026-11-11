@@ -51,10 +51,23 @@ and `u64` values remain exact integers across the boundary.
 
 ## Endpoints and security
 
+Reusable server TLS construction lives in
+[`native/transport`](../native/transport/README.md). It owns external-key
+references, the typed signer protocol and OpenSSL provider, credential lifetime,
+and shared TLS policy. It is independent of daemon configuration and service
+composition. The [daemon credential and lifecycle contract](../native/server/README.md#listener-credentials)
+defines how both listeners consume it.
+
 The default gRPC endpoint is `127.0.0.1:50051`; telemetry defaults to
-`ws://127.0.0.1:50052`. gRPC supports TLS and mutual TLS. Telemetry is always
-plaintext WebSocket, and non-loopback plaintext binds require the explicit
-unsafe-bind option. The daemon has no machine lease or application
+`127.0.0.1:50052`. `--tls` protects both listeners with TLS 1.3 and one shared
+identity; telemetry then uses `wss://`. `--mtls` requires verified client
+certificates before every connection reaches route or attachment-token checks,
+and is required for non-loopback listeners unless explicitly waived.
+Plaintext requires the explicit development options described in the credential
+contract. Optional `--health-endpoint=unix:/absolute/path` exposes only local
+health checks in a private directory, after public startup, and is owned by the
+same runtime shutdown boundary. It exposes no application services and does not
+change public TLS admission. The daemon has no machine lease or application
 authorization layer; application policy belongs outside this repository.
 
 Subscriber queues and workspace resources are bounded. Status watchers receive
