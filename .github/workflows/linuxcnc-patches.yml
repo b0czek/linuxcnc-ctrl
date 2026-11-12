@@ -33,6 +33,8 @@ jobs:
             label: 2
           - shard: 2
             label: 3
+          - shard: 3
+            label: 4
 
     steps:
       - name: Check out repository
@@ -89,14 +91,19 @@ jobs:
         run: |
           set -euo pipefail
 
+          # tests/resumable-stop/* are the longest tests (about 2.5 minutes
+          # each); spread them one per shard. Everything else is hashed
+          # across all shards.
           shard_tests=()
+          resumable_index=0
           while IFS= read -r -d '' test_path; do
             if [[ "${test_path}" == tests/resumable-stop/* ]]; then
-              test_shard=0
+              test_shard=$((resumable_index % SHARD_COUNT))
+              resumable_index=$((resumable_index + 1))
             else
               checksum="$(printf '%s' "${test_path}" | cksum)"
               checksum="${checksum%% *}"
-              test_shard=$((1 + checksum % (SHARD_COUNT - 1)))
+              test_shard=$((checksum % SHARD_COUNT))
             fi
             if (( test_shard == SHARD_INDEX )); then
               shard_tests+=("${test_path}")

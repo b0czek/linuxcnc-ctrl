@@ -38,10 +38,10 @@ index 4cc5503..e814320 100644
  }
  
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index aafe3a5..fad2241 100644
+index 75a9f1c..f22ab9b 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
-@@ -1249,9 +1249,83 @@ static void handle_jjogwheels(void)
+@@ -1257,9 +1257,83 @@ static void handle_jjogwheels(void)
      first_pass = 0;
  }
  
@@ -126,7 +126,7 @@ index aafe3a5..fad2241 100644
      emcmot_joint_t *joint;
      double positions[EMCMOT_MAX_JOINTS];
      double vel_lim;
-@@ -1436,40 +1510,21 @@ static void get_pos_cmds(long period)
+@@ -1444,40 +1518,21 @@ static void get_pos_cmds(long period)
                  ext_offset_coord_limit = 0;
              }
  
@@ -179,7 +179,7 @@ index aafe3a5..fad2241 100644
  	/* there is data in the interpolators */
  	/* run interpolation */
  	for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
-@@ -1517,39 +1572,20 @@ static void get_pos_cmds(long period)
+@@ -1525,39 +1580,20 @@ static void get_pos_cmds(long period)
  	/* the next position then gets run through the inverse kins,
  	    to compute the next positions of the joints */
  

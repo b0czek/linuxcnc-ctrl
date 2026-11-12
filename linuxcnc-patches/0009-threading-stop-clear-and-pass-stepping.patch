@@ -91,7 +91,7 @@ index 950dc5c..f13ec12 100644
  spindle speed and will be a <<gcode:g0,rapid move>>. With a slow spindle,
  the exit move might take only a small fraction of a revolution. If the
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index 4c0b914..dfceb2a 100644
+index 35cf0db..a8e8ae3 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
 @@ -545,6 +545,9 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
@@ -176,10 +176,10 @@ index 4c0b914..dfceb2a 100644
  		emcmotStatus->commandStatus = EMCMOT_COMMAND_BAD_EXEC;
  		tpAbort(&emcmotInternal->coord_tp);
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index 7a85db9..499824d 100644
+index ccd0f34..e347bf1 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
-@@ -2075,10 +2075,13 @@ static void output_to_hal(void)
+@@ -2083,10 +2083,13 @@ static void output_to_hal(void)
       * Alternate trajectory planners only provide the established tpPause()
       * interface.  Treat a completed fallback pause as a completed Stop.  The
       * default planner sets stop_sync_run while a position-synchronized run
@@ -195,7 +195,7 @@ index 7a85db9..499824d 100644
              !emcmotInternal->coord_tp.stop_sync_run &&
              fabs(emcmotStatus->current_vel) < TP_VEL_EPSILON) {
          emcmotStatus->stopped = 1;
-@@ -2306,10 +2309,20 @@ static void update_status(void)
+@@ -2314,10 +2317,20 @@ static void update_status(void)
      /* check to see if we should pause in order to implement
         single emcmotStatus->stepping */
  
@@ -221,7 +221,7 @@ index 7a85db9..499824d 100644
      // State Tags handling
      // Get the current executing trajectory component (the "Source of Truth")
 diff --git a/src/emc/motion/motion.h b/src/emc/motion/motion.h
-index eb11553..019e6d1 100644
+index 1915616..ad391e1 100644
 --- a/src/emc/motion/motion.h
 +++ b/src/emc/motion/motion.h
 @@ -278,6 +278,8 @@ extern "C" {
@@ -297,7 +297,7 @@ index d8d1d9d..ded71c3 100644
  
  /*
 diff --git a/src/emc/nml_intf/emc.hh b/src/emc/nml_intf/emc.hh
-index 9435447..8e943ba 100644
+index 4c8ebac..6b3f9d9 100644
 --- a/src/emc/nml_intf/emc.hh
 +++ b/src/emc/nml_intf/emc.hh
 @@ -145,6 +145,7 @@ struct PM_CARTESIAN;
@@ -703,10 +703,10 @@ index 55fb417..90cc136 100644
  }
 -
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index df94f0c..fe2a371 100644
+index d2eec9f..e0156ee 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -501,6 +501,22 @@ static int programStartLine = 0;	// which line to run program from
+@@ -504,6 +504,22 @@ static int programStartLine = 0;	// which line to run program from
  int stepping = 0;
  int steppingWait = 0;
  static int steppedLine = 0;
@@ -729,7 +729,7 @@ index df94f0c..fe2a371 100644
  
  // Variables to handle MDI call interrupts
  // Depth of call level before interrupted MDI call
-@@ -831,8 +847,7 @@ static void emcTaskResumeInterpreter()
+@@ -874,8 +890,7 @@ static void emcTaskResumeInterpreter()
          emcStatus->task.interpState = interpResumeState;
      }
      emcStatus->motion.traj.single_stepping = 0;
@@ -739,7 +739,7 @@ index df94f0c..fe2a371 100644
  }
  
  static void emcTaskStepInterpreter()
-@@ -1473,6 +1488,10 @@ static int emcTaskPlan(void)
+@@ -1535,6 +1550,10 @@ static int emcTaskPlan(void)
  		    emcStatus->motion.traj.single_stepping = 1;
  		    stepping = 1;	// set stepping mode in case it's not
  		    steppingWait = 0;	// clear the wait
@@ -750,7 +750,7 @@ index df94f0c..fe2a371 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1625,6 +1644,10 @@ static int emcTaskPlan(void)
+@@ -1687,6 +1706,10 @@ static int emcTaskPlan(void)
  		    emcStatus->motion.traj.single_stepping = 1;
  		    stepping = 1;	// set stepping mode in case it's not
  		    steppingWait = 0;	// clear the wait
@@ -761,7 +761,7 @@ index df94f0c..fe2a371 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1882,6 +1905,11 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
+@@ -1944,6 +1967,11 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
  	return EMC_TASK_EXEC::WAITING_FOR_MOTION_AND_IO;
  	break;
  
@@ -773,7 +773,7 @@ index df94f0c..fe2a371 100644
      case EMC_TRAJ_DELAY_TYPE:
  	return EMC_TASK_EXEC::WAITING_FOR_MOTION_AND_IO;
  	break;
-@@ -2187,7 +2215,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2249,7 +2277,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
                                     emcTrajLinearMoveMsg->type, emcTrajLinearMoveMsg->vel,
                                     emcTrajLinearMoveMsg->ini_maxvel, emcTrajLinearMoveMsg->acc, emcTrajLinearMoveMsg->ini_maxjerk,
                                     emcTrajLinearMoveMsg->vlimit_scale,
@@ -784,7 +784,7 @@ index df94f0c..fe2a371 100644
  	break;
  
      case EMC_TRAJ_CIRCULAR_MOVE_TYPE:
-@@ -2560,6 +2590,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2622,6 +2652,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	} else { // we can honour the modeswitch
  	    if (mode_msg->mode != emcStatus->task.mode) {
  		emcTaskStopClear();
@@ -793,7 +793,7 @@ index df94f0c..fe2a371 100644
  	    }
  	    if (mode_msg->mode == EMC_TASK_MODE::MANUAL &&
  		emcStatus->task.mode != EMC_TASK_MODE::MANUAL) {
-@@ -2593,8 +2625,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2655,8 +2687,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  		emcStatus->task.interpState = EMC_TASK_INTERP::IDLE;
  		emcStatus->task.execState = EMC_TASK_EXEC::DONE;
  		emcStatus->motion.traj.single_stepping = 0;
@@ -803,7 +803,7 @@ index df94f0c..fe2a371 100644
  
  		// now queue up command to resynch interpreter
  		emcTaskQueueTaskPlanSynchCmd();
-@@ -2607,6 +2638,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2669,6 +2700,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	state_msg = reinterpret_cast<EMC_TASK_SET_STATE *>(cmd);
  	if (state_msg->state != EMC_TASK_STATE::ON) {
  	    emcTaskStopClear();
@@ -812,7 +812,7 @@ index df94f0c..fe2a371 100644
  	}
  	retval = emcTaskSetState(state_msg->state);
  	break;
-@@ -2691,8 +2724,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2753,8 +2786,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_TASK_PLAN_EXECUTE_TYPE:
  	emcStatus->motion.traj.single_stepping = 0;
@@ -822,7 +822,7 @@ index df94f0c..fe2a371 100644
  	execute_msg = reinterpret_cast<EMC_TASK_PLAN_EXECUTE *>(cmd);
          if (!all_homed() && !no_force_homing) { //!no_force_homing = force homing before MDI
              emcOperatorError(_("Can't issue MDI command when not homed"));
-@@ -2787,8 +2819,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2849,8 +2881,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
              break;
          }
  	emcStatus->motion.traj.single_stepping = 0;
@@ -832,7 +832,7 @@ index df94f0c..fe2a371 100644
  	if (!taskplanopen && emcStatus->task.file[0] != 0) {
  	    emcTaskPlanOpen(emcStatus->task.file);
  	}
-@@ -2856,6 +2887,10 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2918,6 +2949,10 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	}
  	break;
  
@@ -843,7 +843,7 @@ index df94f0c..fe2a371 100644
      case EMC_TASK_PLAN_SET_OPTIONAL_STOP_TYPE:
  	os_msg = reinterpret_cast<EMC_TASK_PLAN_SET_OPTIONAL_STOP *>(cmd);
  	emcTaskPlanSetOptionalStop(os_msg->state);
-@@ -2964,6 +2999,7 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3026,6 +3061,7 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
      case EMC_TASK_PLAN_END_TYPE:
      case EMC_TASK_PLAN_INIT_TYPE:
      case EMC_TASK_PLAN_SYNCH_TYPE:
@@ -851,7 +851,7 @@ index df94f0c..fe2a371 100644
      case EMC_TASK_PLAN_EXECUTE_TYPE:
      case EMC_TASK_PLAN_OPTIONAL_STOP_TYPE:
  	return EMC_TASK_EXEC::DONE;
-@@ -3016,11 +3052,18 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3078,11 +3114,18 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
  #define STEPPING_CHECK()                                                   \
  if (stepping) {                                                            \
    if (! steppingWait) {                                                    \
@@ -873,7 +873,7 @@ index df94f0c..fe2a371 100644
        break;                                                               \
      }                                                                      \
    }                                                                        \
-@@ -3082,8 +3125,7 @@ static int emcTaskExecute(void)
+@@ -3144,8 +3187,7 @@ static int emcTaskExecute(void)
  	emcStatus->task.interpState = EMC_TASK_INTERP::IDLE;
  	emcStatus->task.execState = EMC_TASK_EXEC::DONE;
  	emcStatus->motion.traj.single_stepping = 0;
@@ -883,7 +883,7 @@ index df94f0c..fe2a371 100644
  
  	// now queue up command to resynch interpreter
  	emcTaskQueueTaskPlanSynchCmd();
-@@ -3105,6 +3147,7 @@ static int emcTaskExecute(void)
+@@ -3167,6 +3209,7 @@ static int emcTaskExecute(void)
  		if (NULL != emcTaskCommand) {
  		    emcTaskEager = 1;
  		    emcStatus->task.currentLine = interp_list.get_line_number();
@@ -891,7 +891,7 @@ index df94f0c..fe2a371 100644
  		    // callLevel is set by emcTaskUpdate() from the executing
  		    // move's StateTag; the interpreter's live level at dequeue
  		    // time leads motion by the whole read-ahead queue.
-@@ -4101,8 +4144,7 @@ int main(int argc, char *argv[])
+@@ -4163,8 +4206,7 @@ int main(int argc, char *argv[])
  	    emcStatus->task.interpState = EMC_TASK_INTERP::IDLE;
  	    emcStatus->task.execState = EMC_TASK_EXEC::DONE;
  		emcStatus->motion.traj.single_stepping = 0;
@@ -919,7 +919,7 @@ index d8c619c..79dbeb6 100644
  #endif
 -
 diff --git a/src/emc/task/taskintf.cc b/src/emc/task/taskintf.cc
-index 7db2314..533265a 100644
+index 3f66a0b..3328659 100644
 --- a/src/emc/task/taskintf.cc
 +++ b/src/emc/task/taskintf.cc
 @@ -1576,7 +1576,8 @@ int emcTrajSetTermCond(int cond, double tolerance)
@@ -1371,11 +1371,11 @@ index e30cc2f..6afd929 100644
  void CANON_ERROR(const char *fmt, ...) {}
  void UPDATE_TAG(const StateTag& tag) {}
 diff --git a/tests/resumable-stop/README b/tests/resumable-stop/README
-index e5da45f..3a037f8 100644
+index 29da7fe..8750b87 100644
 --- a/tests/resumable-stop/README
 +++ b/tests/resumable-stop/README
-@@ -35,3 +35,19 @@ The g95-between-g33 scenario stops during a G95 move between two G33 moves
- and checks that the second G33 waits for a fresh spindle index after Resume.
+@@ -49,3 +49,19 @@ barrier, and queued-g33 drops and restores at-speed after Resume as a
+ spindle would while spinning up.
  The spindle-state scenario checks that an S-word for a spindle stopped by M5
  leaves it stopped after a Stop and Resume of the other spindle.
 +The G76 scenarios check that Stop executes only the
@@ -1395,14 +1395,14 @@ index e5da45f..3a037f8 100644
 +rapid. The handoff stress case uses a slow synchronized feed and issues Stop at
 +least 20 task cycles before the cut endpoint.
 diff --git a/tests/resumable-stop/checkresult b/tests/resumable-stop/checkresult
-index c40d14c..efeaf20 100755
+index 5586b64..631b3a4 100755
 --- a/tests/resumable-stop/checkresult
 +++ b/tests/resumable-stop/checkresult
 @@ -1,4 +1,4 @@
  #!/bin/sh
  set -e
--test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 29
-+test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 37
+-test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 31
++test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 39
  grep -q '^resumable stop scenarios complete$' "$1"
 diff --git a/tests/resumable-stop/g33-followed-by-rapid.ngc b/tests/resumable-stop/g33-followed-by-rapid.ngc
 new file mode 100644
@@ -1490,7 +1490,7 @@ index 0000000..b0eb997
 +M5
 +M2
 diff --git a/tests/resumable-stop/test-ui.py b/tests/resumable-stop/test-ui.py
-index aa7c6a3..a4fb758 100755
+index 0b39992..d29f03f 100755
 --- a/tests/resumable-stop/test-ui.py
 +++ b/tests/resumable-stop/test-ui.py
 @@ -2,6 +2,7 @@
@@ -1537,7 +1537,7 @@ index aa7c6a3..a4fb758 100755
  
  
  def wait_complete(message, timeout=10.0):
-@@ -447,6 +466,41 @@ def run_threading_stop_resume_test():
+@@ -478,6 +497,41 @@ def run_threading_stop_resume_test():
      )
  
  
@@ -1579,7 +1579,7 @@ index aa7c6a3..a4fb758 100755
  def run_fperrev_stop_resume_test():
      open_auto_program("fperrev.ngc")
      c.auto(linuxcnc.AUTO_RUN, 0)
-@@ -511,9 +565,9 @@ def run_g76_stop_resume_test():
+@@ -542,9 +596,9 @@ def run_g76_stop_resume_test():
      if s.position[2] > -4.90:
          fail("G76 stopped before its active threading TC completed")
  
@@ -1591,7 +1591,7 @@ index aa7c6a3..a4fb758 100755
              % s.position[0]
          )
  
-@@ -532,6 +586,264 @@ def run_g76_stop_resume_test():
+@@ -563,6 +617,264 @@ def run_g76_stop_resume_test():
      assert_outputs_stopped_after_program()
  
  
@@ -1856,7 +1856,7 @@ index aa7c6a3..a4fb758 100755
  def run_queued_threading_stop_resume_test():
      hal.set_p("spindle.0.at-speed", "false")
      open_auto_program("thread.ngc")
-@@ -1232,8 +1544,16 @@ SCENARIOS = {
+@@ -1463,8 +1775,16 @@ SCENARIOS = {
      "abort-empty": run_abort_from_empty_stopped_queue_test,
      "queued-g33": run_queued_threading_stop_resume_test,
      "g33": run_threading_stop_resume_test,
@@ -1886,7 +1886,7 @@ index a422788..96b5a38 100644
  MAX_LINEAR_VELOCITY = 50
  MAX_LINEAR_JERK = 5000
 diff --git a/tests/resumable-stop/test.sh b/tests/resumable-stop/test.sh
-index 6c37e51..d7b218d 100755
+index c70a720..4b7d7c2 100755
 --- a/tests/resumable-stop/test.sh
 +++ b/tests/resumable-stop/test.sh
 @@ -7,6 +7,11 @@ if nm -D -u "$EMC2_HOME/rtlib/motmod.so" | grep -q '[[:space:]]tpStop$'; then
@@ -1913,7 +1913,7 @@ index 6c37e51..d7b218d 100755
      rigid-tap
      orientation
      dwell
-@@ -33,6 +41,11 @@ scenarios=(
+@@ -35,6 +43,11 @@ scenarios=(
      step-resume-stopping
      g95-between-g33
      spindle-state

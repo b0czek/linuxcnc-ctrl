@@ -99,7 +99,7 @@ index ded71c3..ce4110e 100644
  /*
  *	NML/CMS Update function for EMC_TOOL_SET_NUMBER
 diff --git a/src/emc/nml_intf/emc.hh b/src/emc/nml_intf/emc.hh
-index 8e943ba..8a8f0d1 100644
+index 6b3f9d9..d445ee8 100644
 --- a/src/emc/nml_intf/emc.hh
 +++ b/src/emc/nml_intf/emc.hh
 @@ -28,6 +28,7 @@ class EMC_TRAJ_STAT;
@@ -184,10 +184,10 @@ index cf8bc14..b40c76d 100644
    public:
      EMC_TOOL_SET_NUMBER()
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 0b20d68..dc34e1a 100644
+index a16de26..f8ffe7c 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -1182,7 +1182,18 @@ static int emcTaskPlan(void)
+@@ -1244,7 +1244,18 @@ static int emcTaskPlan(void)
  		emcTaskQueueTaskPlanSynchCmd();
  		break;
  	    }
@@ -207,7 +207,7 @@ index 0b20d68..dc34e1a 100644
  	    case EMC_TOOL_SET_NUMBER_TYPE: {
  		// send to IO
  		emcTaskQueueCommand(std::make_unique<EMC_TOOL_SET_NUMBER>(*static_cast<EMC_TOOL_SET_NUMBER*>(emcCommand)));
-@@ -1311,6 +1322,18 @@ static int emcTaskPlan(void)
+@@ -1373,6 +1384,18 @@ static int emcTaskPlan(void)
  		emcTaskQueueTaskPlanSynchCmd();
  		break;
  	    }
@@ -226,7 +226,7 @@ index 0b20d68..dc34e1a 100644
  
  	    case EMC_TOOL_SET_NUMBER_TYPE: {
  		// send to IO
-@@ -1436,6 +1459,18 @@ static int emcTaskPlan(void)
+@@ -1498,6 +1521,18 @@ static int emcTaskPlan(void)
  		    emcTaskQueueTaskPlanSynchCmd();
  		    break;
  	        }
@@ -245,7 +245,7 @@ index 0b20d68..dc34e1a 100644
  
  		// otherwise we can't handle it
  	    	default:
-@@ -1771,6 +1806,18 @@ static int emcTaskPlan(void)
+@@ -1833,6 +1868,18 @@ static int emcTaskPlan(void)
  		emcTaskQueueTaskPlanSynchCmd();
  		break;
  	    }
@@ -264,7 +264,7 @@ index 0b20d68..dc34e1a 100644
  
  		// otherwise we can't handle it
  	    default:
-@@ -1874,6 +1921,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
+@@ -1936,6 +1983,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
  
      case EMC_TOOL_LOAD_TOOL_TABLE_TYPE:
      case EMC_TOOL_SET_OFFSET_TYPE:
@@ -273,7 +273,7 @@ index 0b20d68..dc34e1a 100644
  	return EMC_TASK_EXEC::WAITING_FOR_MOTION_AND_IO;
  	break;
  
-@@ -2506,6 +2555,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2568,6 +2617,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
                                    emc_tool_set_offset_msg->orientation);
  	break;
  
@@ -288,7 +288,7 @@ index 0b20d68..dc34e1a 100644
      case EMC_TOOL_SET_NUMBER_TYPE:
  	emc_tool_set_number_msg = reinterpret_cast<EMC_TOOL_SET_NUMBER *>(cmd);
  	retval = emcToolSetNumber(emc_tool_set_number_msg->tool);
-@@ -2980,6 +3037,8 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3042,6 +3099,8 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
      case EMC_TOOL_UNLOAD_TYPE:
      case EMC_TOOL_LOAD_TOOL_TABLE_TYPE:
      case EMC_TOOL_SET_OFFSET_TYPE:

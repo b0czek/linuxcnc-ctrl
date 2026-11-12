@@ -36,7 +36,7 @@ so the new concurrency checks never refuse it.
  create mode 100644 tests/homing-concurrent/tool.tbl
 
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index 56264d2..9a37b35 100644
+index 3734dae..3472aa9 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
 @@ -1746,8 +1746,16 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
@@ -59,10 +59,10 @@ index 56264d2..9a37b35 100644
  	    }
  	    if (!GET_MOTION_ENABLE_FLAG()) {
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index 8a544ee..26b5b1d 100644
+index 8d4c3e8..e26daea 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
-@@ -2711,18 +2711,13 @@ static void update_status(void)
+@@ -2719,18 +2719,13 @@ static void update_status(void)
  	}
  #endif
  	joint_status->flag = joint->flag;
