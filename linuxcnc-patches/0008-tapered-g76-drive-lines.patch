@@ -4,33 +4,74 @@ Date: Sat, 15 Aug 2026 22:14:12 +0200
 Subject: [PATCH] interp: extend G76 with tapered threads and alternating
  infeed
 
+Ported to v2.10.0-pre2, where G76 checks its synchronized feed against
+the axis velocity limits and holds the spindle override for the cycle.
+A tapered cycle now checks every synchronized move of every pass at the
+lead it is commanded with: the drive line, the X-only feed in and the
+angled move of an entry taper, and the angled move of an exit taper,
+each with its own X and Z components and, in G96, its own smallest
+radius.  Upstream's cylindrical checks are kept unchanged for a G76
+without X.  The pass geometry is computed once and used both for the
+checks and for the moves.  A D word in a block with both G96 and G76 is
+reported as ambiguous before it is range-checked as an infeed mode.
+tests/g76-tapered-pitch exercises the check on a simulated lathe.
 ---
- docs/src/gcode/g-code.adoc                    |  39 +-
- src/emc/rs274ngc/interp_check.cc              |  11 +-
- src/emc/rs274ngc/interp_convert.cc            | 142 ++++++-
- tests/interp/g76-tapered/README               |   8 +
- tests/interp/g76-tapered/expected             | 377 ++++++++++++++++++
+ docs/src/gcode/g-code.adoc                    |  52 ++-
+ src/emc/rs274ngc/interp_check.cc              |  13 +-
+ src/emc/rs274ngc/interp_convert.cc            | 253 +++++++++--
+ src/emc/rs274ngc/rs274ngc_interp.hh           |   4 +
+ tests/g76-tapered-pitch/README                |  34 ++
+ tests/g76-tapered-pitch/checkresult           |   2 +
+ tests/g76-tapered-pitch/core_sim.hal          |  18 +
+ tests/g76-tapered-pitch/test-ui.py            | 173 ++++++++
+ tests/g76-tapered-pitch/test.ini              |  67 +++
+ tests/g76-tapered-pitch/test.sh               |   3 +
+ tests/interp/g76-tapered/README               |  14 +
+ tests/interp/g76-tapered/expected             | 403 ++++++++++++++++++
  .../interp/g76-tapered/invalid-d-fraction.ngc |   5 +
  tests/interp/g76-tapered/invalid-d2.ngc       |   5 +
+ .../g76-tapered/invalid-g96-d-limit.ngc       |   5 +
  tests/interp/g76-tapered/invalid-g96-d.ngc    |   5 +
  tests/interp/g76-tapered/invalid-y.ngc        |   5 +
+ tests/interp/g76-tapered/invalid-zero-z.ngc   |   5 +
  tests/interp/g76-tapered/test.ngc             |  63 +++
- tests/interp/g76-tapered/test.sh              |  14 +
- 11 files changed, 653 insertions(+), 21 deletions(-)
+ tests/interp/g76-tapered/test.sh              |  31 ++
+ 20 files changed, 1118 insertions(+), 42 deletions(-)
+ create mode 100644 tests/g76-tapered-pitch/README
+ create mode 100755 tests/g76-tapered-pitch/checkresult
+ create mode 100644 tests/g76-tapered-pitch/core_sim.hal
+ create mode 100755 tests/g76-tapered-pitch/test-ui.py
+ create mode 100644 tests/g76-tapered-pitch/test.ini
+ create mode 100755 tests/g76-tapered-pitch/test.sh
  create mode 100644 tests/interp/g76-tapered/README
  create mode 100644 tests/interp/g76-tapered/expected
  create mode 100644 tests/interp/g76-tapered/invalid-d-fraction.ngc
  create mode 100644 tests/interp/g76-tapered/invalid-d2.ngc
+ create mode 100644 tests/interp/g76-tapered/invalid-g96-d-limit.ngc
  create mode 100644 tests/interp/g76-tapered/invalid-g96-d.ngc
  create mode 100644 tests/interp/g76-tapered/invalid-y.ngc
+ create mode 100644 tests/interp/g76-tapered/invalid-zero-z.ngc
  create mode 100644 tests/interp/g76-tapered/test.ngc
  create mode 100644 tests/interp/g76-tapered/test.sh
 
 diff --git a/docs/src/gcode/g-code.adoc b/docs/src/gcode/g-code.adoc
-index fa46049723..4160cfb4a2 100644
+index f8f9d01..950dc5c 100644
 --- a/docs/src/gcode/g-code.adoc
 +++ b/docs/src/gcode/g-code.adoc
-@@ -1900,15 +1900,24 @@ In example S100 with 1.25MM per revolution thread pitch gives a feed of F125.
+@@ -1390,7 +1390,11 @@ It is an error if:
+   this command is executed.
+ * The pitch and the spindle speed together ask an axis to move faster than
+   its maximum velocity. See <<gcode:g33,G33>> for how the speed is determined
+-  in constant surface speed mode.
++  in constant surface speed mode. With an 'X-' endpoint every synchronized
++  move of every pass is checked at the lead it is commanded with: the tapered
++  drive line, the feed in along X and the angled move of an entry taper, and
++  the angled move of an exit taper, each at the spindle speed reached at its
++  own smallest radius in constant surface speed mode.
+ 
+ [[gcode:g38]]
+ == G38._n_ Straight Probe(((G38.n Probe)))
+@@ -2217,15 +2221,24 @@ In example S100 with 1.25MM per revolution thread pitch gives a feed of F125.
  
  [source,ngc]
  ----
@@ -59,7 +100,7 @@ index fa46049723..4160cfb4a2 100644
  
  [NOTE]
  When G7 'Lathe Diameter Mode' is in force the values for 'I', 'J' and 'K' are diameter measurements.
-@@ -1937,7 +1946,17 @@ Unnecessarily high degression values will produce an unnecessarily high number o
+@@ -2254,7 +2267,17 @@ Unnecessarily high degression values will produce an unnecessarily high number o
  
  * 'Q-' - The 'compound slide angle' is the angle (in degrees) describing to what extent successive passes should be offset along the drive line.
    This is used to cause one side of the tool to remove more material than the other.
@@ -78,7 +119,7 @@ index fa46049723..4160cfb4a2 100644
  * 'H-' - The number of 'spring passes'.
    Spring passes are additional passes at full thread depth.
    If no additional passes are desired, program 'H0'.
-@@ -1957,8 +1976,10 @@ Thread entries and exits can be programmed tapered with the 'E' and 'L' values.
+@@ -2274,8 +2297,10 @@ Thread entries and exits can be programmed tapered with the 'E' and 'L' values.
    cut depth then synchronize and begin the cut.
  
  The tool is moved to the initial X and Z positions prior to issuing
@@ -91,22 +132,35 @@ index fa46049723..4160cfb4a2 100644
  
  The tool will pause briefly for synchronization before each threading
  pass, so a relief groove will be required at the entry unless the
-@@ -1981,7 +2002,9 @@ from the hole.
+@@ -2298,14 +2323,21 @@ from the hole.
  It is an error if:
  
  * The active plane is not the ZX plane.
 -* Other axis words, such as X- or Y-, are specified.
 +* A Y- word is specified, or another axis besides X or Z is moved.
 +* A 'D-' infeed mode other than 0 or 1 is specified.
-+* 'G96' and 'G76' use 'D-' in the same block.
++* A 'D-' word is given in a block with both 'G96' and 'G76', where it could be
++  either the G96 spindle speed limit or the G76 infeed mode.
  * The 'R-' degression value is less than 1.0.
  * All the required words are not specified.
  * 'P-', 'J-', 'K-' or 'H-' is negative.
+ * 'E-' is greater than half the drive line length.
+ * The pitch and the spindle speed together ask an axis to move faster than
+   its maximum velocity. See <<gcode:g33,G33>> for how the speed is determined
+-  in constant surface speed mode.
++  in constant surface speed mode. With an 'X-' endpoint every synchronized
++  move of every pass is checked at the lead it is commanded with: the tapered
++  drive line, the feed in along X and the angled move of an entry taper, and
++  the angled move of an exit taper, each at the spindle speed reached at its
++  own smallest radius in constant surface speed mode.
+ 
+ [NOTE]
+ The spindle speed override is held for the whole G76 cycle at the value in
 diff --git a/src/emc/rs274ngc/interp_check.cc b/src/emc/rs274ngc/interp_check.cc
-index cf3b8050c9..3b139a0ca6 100644
+index c65a3b2..50781c6 100644
 --- a/src/emc/rs274ngc/interp_check.cc
 +++ b/src/emc/rs274ngc/interp_check.cc
-@@ -256,9 +256,9 @@ int Interp::check_other_codes(block_pointer block)       //!< pointer to a block
+@@ -262,9 +262,9 @@ int Interp::check_other_codes(block_pointer block)       //!< pointer to a block
          (block->g_modes[7] != G_41_1) && (block->g_modes[7] != G_42_1) &&
          (motion != G_70) && (motion != G_71) && (motion != G_71_1) &&
          (motion != G_71_2) && (motion != G_72) && (motion != G_72_1) &&
@@ -118,114 +172,180 @@ index cf3b8050c9..3b139a0ca6 100644
    }
  
    if (block->dollar_flag) {
-@@ -383,6 +383,13 @@ int Interp::check_other_codes(block_pointer block)       //!< pointer to a block
+@@ -397,6 +397,15 @@ int Interp::check_other_codes(block_pointer block)       //!< pointer to a block
  
      CHKS((!block->i_flag || !block->j_flag || !block->k_flag),
              NCE_I_J_OR_K_WORDS_MISSING_WITH_G76);
 +
 +    if (block->d_flag) {
-+      CHKS((block->d_number_float != 0.0 && block->d_number_float != 1.0),
-+           _("In G76, D must be 0 or 1"));
++      // G96 reads D as its spindle speed limit; check this first so a limit
++      // such as D2000 is not reported as a bad infeed mode.
 +      CHKS((block->g_modes[GM_SPINDLE_MODE] == G_96),
 +           _("D cannot select both G76 infeed mode and G96 spindle limit in the same block"));
++      CHKS((block->d_number_float != 0.0 && block->d_number_float != 1.0),
++           _("In G76, D must be 0 or 1"));
 +    }
    }
  
    return INTERP_OK;
 diff --git a/src/emc/rs274ngc/interp_convert.cc b/src/emc/rs274ngc/interp_convert.cc
-index 99f9e6fdb8..373916cfb0 100644
+index 10bf98d..196d48c 100644
 --- a/src/emc/rs274ngc/interp_convert.cc
 +++ b/src/emc/rs274ngc/interp_convert.cc
-@@ -5659,6 +5659,88 @@ threading_pass(setup_pointer settings, block_pointer block,
+@@ -5984,6 +5984,152 @@ threading_pass(setup_pointer settings, block_pointer block,
      ENABLE_FEED_OVERRIDE();
  }
  
-+// Make one threading pass along a tapered XZ drive line.  X coordinates are
-+// offset from the drive line just as they are for a cylindrical thread, while
-+// compound offsets and entry/exit distances are measured along that line.
-+static void
-+tapered_threading_pass(setup_pointer settings, block_pointer block,
-+	       int boring, double start_x, double start_z,
-+	       double end_x, double end_z, double depth, double end_depth,
-+	       double start_y, double compound_offset,
-+	       double full_compound_offset, double taper_dist,
-+	       int entry_taper, int exit_taper, double pitch,
-+	       double full_threadheight) {
++// Geometry of one threading pass along a tapered XZ drive line.  X coordinates
++// are offset from the drive line just as they are for a cylindrical thread,
++// while compound offsets and entry/exit distances are measured along that line.
++// It is computed once per pass and used both to check every synchronized lead
++// the pass commands and to issue its moves, so the two cannot disagree.
++struct tapered_pass_geometry {
++    double drive_pitch;                 // synchronized lead along the drive line
++    double pass_start_z, pass_end_z;
++    double back_x, out_x;               // clearance before and after the cut
++    double cut_start_x, cut_end_x;      // drive line offset to the pass depth
++    bool entry;                         // tapered entry
++    double crest_start_x, entry_end_x, entry_end_z, entry_pitch;
++    bool exit;                          // tapered exit
++    double exit_start_x, exit_start_z, crest_end_x, exit_pitch;
++};
++
++static tapered_pass_geometry
++tapered_pass(int boring, double start_x, double start_z,
++	     double end_x, double end_z, double depth, double end_depth,
++	     double compound_offset, double full_compound_offset,
++	     double taper_dist, int entry_taper, int exit_taper, double pitch,
++	     double full_threadheight) {
++    tapered_pass_geometry g = {};
 +    const double drive_dx = end_x - start_x;
 +    const double drive_dz = end_z - start_z;
 +    const double drive_length = hypot(drive_dx, drive_dz);
 +    const double drive_x = drive_dx / drive_length;
 +    const double drive_z = drive_dz / drive_length;
 +    const double depth_direction = boring ? 1.0 : -1.0;
-+    const double drive_pitch = pitch * drive_length / fabs(drive_dz);
++    g.drive_pitch = pitch * drive_length / fabs(drive_dz);
 +
 +    const double pass_start_x = start_x + drive_x * compound_offset;
-+    const double pass_start_z = start_z + drive_z * compound_offset;
++    g.pass_start_z = start_z + drive_z * compound_offset;
 +    const double pass_end_x = end_x + drive_x *
 +	(compound_offset - full_compound_offset);
-+    const double pass_end_z = end_z + drive_z *
++    g.pass_end_z = end_z + drive_z *
 +	(compound_offset - full_compound_offset);
-+    const double cut_start_x = pass_start_x + depth_direction * depth;
-+    const double cut_end_x = pass_end_x + depth_direction * depth;
++    g.cut_start_x = pass_start_x + depth_direction * depth;
++    g.cut_end_x = pass_end_x + depth_direction * depth;
++    g.back_x = g.cut_start_x - depth_direction * end_depth;
++    g.out_x = g.cut_end_x - depth_direction * end_depth;
 +
-+    STRAIGHT_TRAVERSE(block->line_number,
-+		      cut_start_x - depth_direction * end_depth,
-+		      start_y, pass_start_z, AABBCC); // back
-+
-+    if(taper_dist && entry_taper) {
-+	const double entry_end_x = cut_start_x + drive_x * taper_dist;
-+	const double entry_end_z = pass_start_z + drive_z * taper_dist;
-+	const double crest_start_x =
-+	    cut_start_x - depth_direction * full_threadheight;
-+	const double entry_pitch = pitch *
-+	    hypot(entry_end_x - crest_start_x,
-+		  entry_end_z - pass_start_z) /
-+	    fabs(entry_end_z - pass_start_z);
-+
-+	DISABLE_FEED_OVERRIDE();
-+	START_SPEED_FEED_SYNCH(settings->active_spindle, entry_pitch, 0);
-+	STRAIGHT_FEED(block->line_number, crest_start_x,
-+		      start_y, pass_start_z, AABBCC); // in
-+	STRAIGHT_FEED(block->line_number, entry_end_x,
-+		      start_y, entry_end_z, AABBCC); // angled in
-+	START_SPEED_FEED_SYNCH(settings->active_spindle, drive_pitch, 0);
-+    } else {
-+	STRAIGHT_TRAVERSE(block->line_number, cut_start_x,
-+			  start_y, pass_start_z, AABBCC); // in
-+	DISABLE_FEED_OVERRIDE();
-+	START_SPEED_FEED_SYNCH(settings->active_spindle, drive_pitch, 0);
++    g.entry = taper_dist && entry_taper;
++    if(g.entry) {
++	g.entry_end_x = g.cut_start_x + drive_x * taper_dist;
++	g.entry_end_z = g.pass_start_z + drive_z * taper_dist;
++	g.crest_start_x = g.cut_start_x - depth_direction * full_threadheight;
++	g.entry_pitch = pitch *
++	    hypot(g.entry_end_x - g.crest_start_x,
++		  g.entry_end_z - g.pass_start_z) /
++	    fabs(g.entry_end_z - g.pass_start_z);
 +    }
 +
-+    if(taper_dist && exit_taper) {
-+	const double exit_start_x = cut_end_x - drive_x * taper_dist;
-+	const double exit_start_z = pass_end_z - drive_z * taper_dist;
-+	const double crest_end_x =
-+	    cut_end_x - depth_direction * full_threadheight;
-+	const double exit_pitch = pitch *
-+	    hypot(crest_end_x - exit_start_x,
-+		  pass_end_z - exit_start_z) /
-+	    fabs(pass_end_z - exit_start_z);
++    g.exit = taper_dist && exit_taper;
++    if(g.exit) {
++	g.exit_start_x = g.cut_end_x - drive_x * taper_dist;
++	g.exit_start_z = g.pass_end_z - drive_z * taper_dist;
++	g.crest_end_x = g.cut_end_x - depth_direction * full_threadheight;
++	g.exit_pitch = pitch *
++	    hypot(g.crest_end_x - g.exit_start_x,
++		  g.pass_end_z - g.exit_start_z) /
++	    fabs(g.pass_end_z - g.exit_start_z);
++    }
++    return g;
++}
 +
-+	STRAIGHT_FEED(block->line_number, exit_start_x,
-+		      start_y, exit_start_z, AABBCC); // over
-+	START_SPEED_FEED_SYNCH(settings->active_spindle, exit_pitch, 0);
-+	STRAIGHT_FEED(block->line_number, crest_end_x,
-+		      start_y, pass_end_z, AABBCC); // angled out
++// Make one threading pass along a tapered XZ drive line.
++static void
++tapered_threading_pass(setup_pointer settings, block_pointer block,
++		       const tapered_pass_geometry &g, double start_y) {
++    STRAIGHT_TRAVERSE(block->line_number, g.back_x,
++		      start_y, g.pass_start_z, AABBCC); // back
++
++    if(g.entry) {
++	DISABLE_FEED_OVERRIDE();
++	START_SPEED_FEED_SYNCH(settings->active_spindle, g.entry_pitch, 0);
++	STRAIGHT_FEED(block->line_number, g.crest_start_x,
++		      start_y, g.pass_start_z, AABBCC); // in
++	STRAIGHT_FEED(block->line_number, g.entry_end_x,
++		      start_y, g.entry_end_z, AABBCC); // angled in
++	START_SPEED_FEED_SYNCH(settings->active_spindle, g.drive_pitch, 0);
 +    } else {
-+	STRAIGHT_FEED(block->line_number, cut_end_x,
-+		      start_y, pass_end_z, AABBCC); // over
++	STRAIGHT_TRAVERSE(block->line_number, g.cut_start_x,
++			  start_y, g.pass_start_z, AABBCC); // in
++	DISABLE_FEED_OVERRIDE();
++	START_SPEED_FEED_SYNCH(settings->active_spindle, g.drive_pitch, 0);
++    }
++
++    if(g.exit) {
++	STRAIGHT_FEED(block->line_number, g.exit_start_x,
++		      start_y, g.exit_start_z, AABBCC); // over
++	START_SPEED_FEED_SYNCH(settings->active_spindle, g.exit_pitch, 0);
++	STRAIGHT_FEED(block->line_number, g.crest_end_x,
++		      start_y, g.pass_end_z, AABBCC); // angled out
++    } else {
++	STRAIGHT_FEED(block->line_number, g.cut_end_x,
++		      start_y, g.pass_end_z, AABBCC); // over
 +    }
 +    STOP_SPEED_FEED_SYNCH();
-+    STRAIGHT_TRAVERSE(block->line_number,
-+		      cut_end_x - depth_direction * end_depth,
-+		      start_y, pass_end_z, AABBCC); // out
++    STRAIGHT_TRAVERSE(block->line_number, g.out_x,
++		      start_y, g.pass_end_z, AABBCC); // out
 +    ENABLE_FEED_OVERRIDE();
++}
++
++int Interp::check_tapered_threading_pass(setup_pointer settings,
++					 const tapered_pass_geometry &g) {
++    // Every move the pass makes while synchronized, at the lead it is
++    // commanded with.  The Z advance per revolution of each is the programmed
++    // pitch, but X moves too, and a tapered entry first feeds in along X alone
++    // at the entry lead.  In G96 the spindle speed is bounded by each move's
++    // own smallest radius.
++    struct sync_move {
++	const char *what;
++	double lead, x0, z0, x1, z1;
++    } moves[4];
++    int count = 0;
++    double drive_x0 = g.cut_start_x, drive_z0 = g.pass_start_z;
++    double drive_x1 = g.cut_end_x, drive_z1 = g.pass_end_z;
++
++    if(g.entry) {
++	moves[count++] = {"G76 entry taper", g.entry_pitch,
++			  g.back_x, g.pass_start_z, g.crest_start_x, g.pass_start_z};
++	moves[count++] = {"G76 entry taper", g.entry_pitch,
++			  g.crest_start_x, g.pass_start_z, g.entry_end_x, g.entry_end_z};
++	drive_x0 = g.entry_end_x;
++	drive_z0 = g.entry_end_z;
++    }
++    if(g.exit) {
++	drive_x1 = g.exit_start_x;
++	drive_z1 = g.exit_start_z;
++    }
++    moves[count++] = {"G76 tapered thread", g.drive_pitch,
++		      drive_x0, drive_z0, drive_x1, drive_z1};
++    if(g.exit)
++	moves[count++] = {"G76 exit taper", g.exit_pitch,
++			  g.exit_start_x, g.exit_start_z, g.crest_end_x, g.pass_end_z};
++
++    for(int i = 0; i < count; i++) {
++	const sync_move &m = moves[i];
++	double delta[9] = {m.x1 - m.x0, 0.0, m.z1 - m.z0, 0, 0, 0, 0, 0, 0};
++	CHP(check_spindle_sync_feed(settings, m.lead, m.what, delta,
++				    min_abs_over_range(m.x0, m.x1)));
++    }
++    return INTERP_OK;
 +}
 +
  int Interp::convert_threading_cycle(block_pointer block,
  				    setup_pointer settings,
  				    double end_x, double end_y, double end_z) {
-@@ -5666,6 +5748,8 @@ int Interp::convert_threading_cycle(block_pointer block,
+@@ -5991,6 +6137,8 @@ int Interp::convert_threading_cycle(block_pointer block,
  
      CHKS((settings->cutter_comp_side != CUTTER_COMP::OFF),
           (_("Cannot use G76 threading cycle with cutter radius compensation on")));
@@ -234,7 +354,7 @@ index 99f9e6fdb8..373916cfb0 100644
  
      CHKS((block->i_number == 0),
          (_("In G76, I must not be 0")));
-@@ -5705,7 +5789,18 @@ int Interp::convert_threading_cycle(block_pointer block,
+@@ -6030,7 +6178,18 @@ int Interp::convert_threading_cycle(block_pointer block,
      double compound_angle = block->q_number;
      if(compound_angle == -1) compound_angle = 0;
      compound_angle *= M_PIl/180.0;
@@ -254,7 +374,7 @@ index 99f9e6fdb8..373916cfb0 100644
  
      int spring_cuts = block->h_flag ? block->h_number: 0;
  
-@@ -5717,7 +5812,8 @@ int Interp::convert_threading_cycle(block_pointer block,
+@@ -6042,7 +6201,8 @@ int Interp::convert_threading_cycle(block_pointer block,
      double taper_pitch = taper_dist > 0.0?
  	pitch * hypot(taper_dist, full_threadheight)/taper_dist: pitch;
  
@@ -264,13 +384,38 @@ index 99f9e6fdb8..373916cfb0 100644
  
      int taper_flags = block->l_number;
      if(taper_flags < 0) taper_flags = 0;
-@@ -5728,25 +5824,49 @@ int Interp::convert_threading_cycle(block_pointer block,
+@@ -6053,44 +6213,77 @@ int Interp::convert_threading_cycle(block_pointer block,
      double depth, zoff;
      int pass = 1;
  
 +    const double compound_tangent = tan(compound_angle);
 +    const double full_compound_offset = full_threadheight * compound_tangent;
      double target_z = end_z + fabs(k_number) * tan(compound_angle);
+ 
+-    // A taper also moves X by the thread height over the taper distance, at
+-    // the correspondingly larger pitch.
+-    double plain_pass[9] = {0.0, 0.0, target_z - start_z, 0, 0, 0, 0, 0, 0};
+-    /* the passes run between the first and last cut depth, so the tightest
+-       radius is the last cut outside, the first cut boring */
+-    double thread_min_x = boring
+-        ? min_abs_over_range(safe_x + start_depth, safe_x + end_depth)
+-        : min_abs_over_range(safe_x - end_depth, safe_x - start_depth);
+-    CHP(check_spindle_sync_feed(settings, pitch, "G76", plain_pass,
+-                                thread_min_x));
+-    if (taper_dist != 0.0 && (entry_taper || exit_taper)) {
+-        double taper_pass[9] = {full_threadheight, 0.0, taper_dist,
+-                                0, 0, 0, 0, 0, 0};
+-        CHP(check_spindle_sync_feed(settings, taper_pitch, "G76", taper_pass,
+-                                    thread_min_x));
+-    }
+-
+-    lock_speed_override(settings);
++    // The depth and compound offset of every pass, roughing passes first,
++    // then the full-depth pass and the spring passes.
++    struct threading_pass_plan {
++	double depth, zoff;
++    };
++    std::vector<threading_pass_plan> passes;
  
      depth = start_depth;
 -    zoff = (depth - full_dia_depth) * tan(compound_angle);
@@ -284,18 +429,7 @@ index 99f9e6fdb8..373916cfb0 100644
 +	// passes always use the same centered final path.
 +	if(alternating_infeed && !(pass & 1))
 +	    zoff = 2.0 * full_compound_offset - zoff;
-+	if(tapered_drive_line) {
-+	    tapered_threading_pass(settings, block, boring, start_x, start_z,
-+			    end_x, end_z, depth, end_depth, start_y, zoff,
-+			    full_compound_offset,
-+			    taper_dist, entry_taper, exit_taper, pitch,
-+			    full_threadheight);
-+	} else {
-+	    threading_pass(settings, block, boring, safe_x, depth, end_depth,
-+			   start_y, start_z, zoff, taper_dist, entry_taper,
-+			   exit_taper, taper_pitch, pitch, full_threadheight,
-+			   target_z);
-+	}
++	passes.push_back({depth, zoff});
          depth = full_dia_depth + cut_increment * pow(++pass, 1.0/degression);
 -        zoff = (depth - full_dia_depth) * tan(compound_angle);
 +        zoff = (depth - full_dia_depth) * compound_tangent;
@@ -303,46 +437,440 @@ index 99f9e6fdb8..373916cfb0 100644
      // full specified depth now
      depth = end_depth;
 -    zoff = (depth - full_dia_depth) * tan(compound_angle);
-+    zoff = full_compound_offset;
++    zoff = (tapered_drive_line || alternating_infeed) ? full_compound_offset :
++	(depth - full_dia_depth) * compound_tangent;
      // cut at least once -- more if spring cuts.
-     for(int i = 0; i<spring_cuts+1; i++) {
+-    for(int i = 0; i<spring_cuts+1; i++) {
 -	threading_pass(settings, block, boring, safe_x, depth, end_depth, start_y,
 -		       start_z, zoff, taper_dist, entry_taper, exit_taper,
 -		       taper_pitch, pitch, full_threadheight, target_z);
++    for(int i = 0; i<spring_cuts+1; i++)
++	passes.push_back({depth, zoff});
++
++    std::vector<tapered_pass_geometry> tapered_passes;
++    if(tapered_drive_line) {
++	for(const threading_pass_plan &p : passes) {
++	    tapered_passes.push_back(
++		tapered_pass(boring, start_x, start_z, end_x, end_z, p.depth,
++			     end_depth, p.zoff, full_compound_offset,
++			     taper_dist, entry_taper, exit_taper, pitch,
++			     full_threadheight));
++	    CHP(check_tapered_threading_pass(settings, tapered_passes.back()));
++	}
++    } else {
++	// A taper also moves X by the thread height over the taper distance, at
++	// the correspondingly larger pitch.
++	double plain_pass[9] = {0.0, 0.0, target_z - start_z, 0, 0, 0, 0, 0, 0};
++	/* the passes run between the first and last cut depth, so the tightest
++	   radius is the last cut outside, the first cut boring */
++	double thread_min_x = boring
++	    ? min_abs_over_range(safe_x + start_depth, safe_x + end_depth)
++	    : min_abs_over_range(safe_x - end_depth, safe_x - start_depth);
++	CHP(check_spindle_sync_feed(settings, pitch, "G76", plain_pass,
++				    thread_min_x));
++	if (taper_dist != 0.0 && (entry_taper || exit_taper)) {
++	    double taper_pass[9] = {full_threadheight, 0.0, taper_dist,
++				    0, 0, 0, 0, 0, 0};
++	    CHP(check_spindle_sync_feed(settings, taper_pitch, "G76", taper_pass,
++					thread_min_x));
++	}
++    }
++
++    lock_speed_override(settings);
++
++    for(size_t i = 0; i < passes.size(); i++) {
 +	if(tapered_drive_line) {
-+	    tapered_threading_pass(settings, block, boring, start_x, start_z,
-+			    end_x, end_z, depth, end_depth, start_y, zoff,
-+			    zoff, taper_dist, entry_taper, exit_taper, pitch,
-+			    full_threadheight);
++	    tapered_threading_pass(settings, block, tapered_passes[i], start_y);
 +	} else {
-+	    threading_pass(settings, block, boring, safe_x, depth, end_depth,
-+			   start_y, start_z, zoff, taper_dist, entry_taper,
-+			   exit_taper, taper_pitch, pitch, full_threadheight,
-+			   target_z);
++	    threading_pass(settings, block, boring, safe_x, passes[i].depth,
++			   end_depth, start_y, start_z, passes[i].zoff,
++			   taper_dist, entry_taper, exit_taper, taper_pitch,
++			   pitch, full_threadheight, target_z);
 +	}
      }
+     restore_speed_override(settings);
      STRAIGHT_TRAVERSE(block->line_number, end_x, end_y, end_z, AABBCC);
-     settings->current_x = end_x;
+diff --git a/src/emc/rs274ngc/rs274ngc_interp.hh b/src/emc/rs274ngc/rs274ngc_interp.hh
+index e834041..2fb074a 100644
+--- a/src/emc/rs274ngc/rs274ngc_interp.hh
++++ b/src/emc/rs274ngc/rs274ngc_interp.hh
+@@ -21,6 +21,8 @@
+ #include "interp_internal.hh"
+ #include "nml_intf/interp_return.hh"
+ 
++struct tapered_pass_geometry;
++
+ class Interp : public InterpBase {
+ 
+ public:
+@@ -363,6 +365,8 @@ public:
+                             double u_end, double v_end, double w_end);
+  int convert_threading_cycle(block_pointer block, setup_pointer settings,
+                              double end_x, double end_y, double end_z);
++ int check_tapered_threading_pass(setup_pointer settings,
++                                  const tapered_pass_geometry &pass);
+  int convert_tool_change(setup_pointer settings);
+  int convert_tool_length_offset(int g_code, block_pointer block,
+                                       setup_pointer settings);
+diff --git a/tests/g76-tapered-pitch/README b/tests/g76-tapered-pitch/README
+new file mode 100644
+index 0000000..7c9fb65
+--- /dev/null
++++ b/tests/g76-tapered-pitch/README
+@@ -0,0 +1,34 @@
++Check that a tapered G76 (an X endpoint) is rejected before it cuts when any
++synchronized move of any pass needs an axis to run faster than its maximum
++velocity, and that a thread just inside the limit is accepted.  The pitch check
++needs real axis limits, which the standalone interpreter does not have, so the
++test runs milltask with a simulated XZ lathe and drives it over MDI.
++
++The X axis allows 0.5 mm/s (30 mm/min) and Z 10 mm/s (600 mm/min).  A
++synchronized move with lead L along a direction (dx, dz) at N RPM needs
++L * N * |dx| / hypot(dx, dz) per minute of X.  Every tapered move is built so
++its Z advance per revolution is the programmed pitch P, so that X rate is
++P * N * |dx / dz|.
++
++- Drive line X10 Z0 to X8 Z-20 (G8): |dx/dz| = 0.1, so X needs 0.15 mm/min per
++  RPM and the limit is 200 RPM (Z alone would allow 400).  S199 is accepted,
++  S201 rejected.  The internal thread (X5 to X7) and the same thread in G7
++  (X20 to X16, I-2 J1 K2) have the same slope and limit.  A cylindrical G76 at
++  S201 is accepted: its synchronized moves are along Z only.
++- G96 without D: the smallest radius of any synchronized move is 6 mm, at the
++  end of the full-depth pass (8 - |I| - K).  200 RPM there is
++  S = 200 * 2 * pi * 6 / 1000 = 7.5398 m/min, so S7.5 is accepted and S7.6
++  (201.596 RPM) rejected.
++- G96 S100 with D: radius 6 would give 2653 RPM, so D bounds the speed.  D199
++  is accepted, D201 rejected, also for a later block using G76 D1 (the G96
++  limit is modal).
++- E2 L1: a tapered entry first feeds in along X alone, from the clearance to
++  the thread crest, at the entry lead 1.5 * hypot(1.199, 1.990) / 1.990 =
++  1.75121, where 1.199 = K + 0.0995 * E is the X travel and 1.990 = 0.995 * E
++  the Z travel of the angled entry.  X limits that to 30 / 1.75121 = 17.13 RPM:
++  S17 is accepted, S18 rejected.
++- E2 L2: the exit leaves the decreasing drive line outwards, so its X travel is
++  K - 0.0995 * E = 0.801 over Z 1.990; the limit is 30 / (1.5 * 0.4025) =
++  49.69 RPM: S49 is accepted, S50 rejected.
++
++An accepted G76 is aborted as soon as its moves are queued.
+diff --git a/tests/g76-tapered-pitch/checkresult b/tests/g76-tapered-pitch/checkresult
+new file mode 100755
+index 0000000..24dc9aa
+--- /dev/null
++++ b/tests/g76-tapered-pitch/checkresult
+@@ -0,0 +1,2 @@
++#!/bin/sh
++exit 0 # test failure is indicated by test.sh exit value
+diff --git a/tests/g76-tapered-pitch/core_sim.hal b/tests/g76-tapered-pitch/core_sim.hal
+new file mode 100644
+index 0000000..47884cf
+--- /dev/null
++++ b/tests/g76-tapered-pitch/core_sim.hal
+@@ -0,0 +1,18 @@
++loadrt [KINS]KINEMATICS
++loadrt [EMCMOT]EMCMOT base_period_nsec=[EMCMOT]BASE_PERIOD servo_period_nsec=[EMCMOT]SERVO_PERIOD num_joints=[KINS]JOINTS
++
++addf motion-command-handler servo-thread
++addf motion-controller servo-thread
++
++net Xpos joint.0.motor-pos-cmd => joint.0.motor-pos-fb
++net Zpos joint.1.motor-pos-cmd => joint.1.motor-pos-fb
++
++net estop-loop iocontrol.0.user-enable-out iocontrol.0.emc-enable-in
++
++net tool-prepare <= iocontrol.0.tool-prepare
++net tool-prepared => iocontrol.0.tool-prepared
++
++net tool-change <= iocontrol.0.tool-change
++net tool-changed => iocontrol.0.tool-changed
++
++setp spindle.0.at-speed true
+diff --git a/tests/g76-tapered-pitch/test-ui.py b/tests/g76-tapered-pitch/test-ui.py
+new file mode 100755
+index 0000000..b8107b9
+--- /dev/null
++++ b/tests/g76-tapered-pitch/test-ui.py
+@@ -0,0 +1,173 @@
++#!/usr/bin/env python3
++"""Check the tapered G76 pitch check against the configured axis limits.
++
++See README for how each spindle speed limit below is derived.
++"""
++
++import sys
++import time
++
++import linuxcnc
++
++
++def fail(message):
++    print("FAIL: " + message)
++    sys.exit(1)
++
++
++c = linuxcnc.command()
++s = linuxcnc.stat()
++e = linuxcnc.error_channel()
++
++
++def wait_for(predicate, message, timeout=10.0):
++    start = time.time()
++    while time.time() - start < timeout:
++        s.poll()
++        if predicate():
++            return
++        time.sleep(0.01)
++    fail(message)
++
++
++def drain_errors():
++    messages = []
++    while True:
++        error = e.poll()
++        if not error:
++            return messages
++        messages.append(error[1])
++
++
++def mdi(command):
++    if c.wait_complete(10.0) == -1:
++        fail("previous command did not complete before %r" % command)
++    c.mdi(command)
++    if c.wait_complete(30.0) != linuxcnc.RCS_DONE:
++        fail("%r failed: %s" % (command, drain_errors()))
++
++
++wait_for(lambda: s.task_state == linuxcnc.STATE_ESTOP, "LinuxCNC did not initialize")
++c.state(linuxcnc.STATE_ESTOP_RESET)
++c.state(linuxcnc.STATE_ON)
++c.wait_complete()
++c.mode(linuxcnc.MODE_MDI)
++c.wait_complete()
++
++# The X axis allows 30 mm/min and the Z axis 600 mm/min.  In G8 the thread
++# runs from X10 Z0 to X8 Z-20: the drive line moves 0.1 mm of X per mm of Z, so
++# at pitch 1.5 X needs 0.15 mm/min per RPM and the limit is 200 RPM.
++EXTERNAL = "g76 p1.5 x8 z-20 i-1 j.5 k1 h1 q29.5"
++INTERNAL = "g76 p1.5 x7 z-20 i1 j.5 k1 h1 q29.5"
++CYLINDRICAL = "g76 p1.5 z-20 i-1 j.5 k1 h1 q29.5"
++DIAMETER = "g76 p1.5 x16 z-20 i-2 j1 k2 h1 q29.5"
++
++TAPERED_X = "on the X axis, which exceeds its maximum velocity of 30"
++
++cases = [
++    # (description, setup, G76 block, None if accepted else expected text)
++    ("external tapered thread just under the limit",
++     ["g8 g97 s199 m3", "g0 x10 z0"], EXTERNAL, None),
++    ("external tapered thread just over the limit",
++     ["g8 g97 s201 m3", "g0 x10 z0"], EXTERNAL,
++     ["G76 tapered thread pitch 1.50748 at spindle speed 201 needs 30.15 per "
++      "minute", TAPERED_X]),
++    ("cylindrical thread at the same speed does not move X while synchronized",
++     ["g8 g97 s201 m3", "g0 x10 z0"], CYLINDRICAL, None),
++    ("internal tapered thread just under the limit",
++     ["g8 g97 s199 m3", "g0 x5 z0"], INTERNAL, None),
++    ("internal tapered thread just over the limit",
++     ["g8 g97 s201 m3", "g0 x5 z0"], INTERNAL,
++     ["G76 tapered thread pitch 1.50748 at spindle speed 201", TAPERED_X]),
++    ("diameter mode tapered thread just under the limit",
++     ["g7 g97 s199 m3", "g0 x20 z0"], DIAMETER, None),
++    ("diameter mode tapered thread just over the limit",
++     ["g7 g97 s201 m3", "g0 x20 z0"], DIAMETER,
++     ["G76 tapered thread pitch 1.50748 at spindle speed 201", TAPERED_X]),
++    # G96 without D: the smallest radius of any synchronized move is 6, at the
++    # end of the full-depth pass, so 200 RPM is reached at S7.53982.
++    ("G96 tapered thread just under the limit",
++     ["g8 g0 x10 z0", "g96 s7.5 m3"], EXTERNAL, None),
++    ("G96 tapered thread just over the limit",
++     ["g8 g0 x10 z0", "g96 s7.6 m3"], EXTERNAL,
++     ["G76 tapered thread pitch 1.50748 reaches spindle speed 201.596 in "
++      "constant surface speed mode", TAPERED_X]),
++    # G96 with D: radius 6 at S100 would be 2653 RPM, so D is the bound.
++    ("G96 tapered thread with D just under the limit",
++     ["g8 g0 x10 z0", "g96 s100 d199 m3"], EXTERNAL, None),
++    ("G96 tapered thread with D just over the limit",
++     ["g8 g0 x10 z0", "g96 s100 d201 m3"], EXTERNAL,
++     ["G76 tapered thread pitch 1.50748 reaches spindle speed 201 in "
++      "constant surface speed mode", TAPERED_X]),
++    ("G96 D limit stays modal for a later G76 D1",
++     ["g8 g0 x10 z0", "g96 s100 d201 m3"], EXTERNAL + " d1",
++     ["reaches spindle speed 201", TAPERED_X]),
++    # A tapered entry first feeds in along X alone at the entry lead of
++    # 1.75121, so X limits it to 17.131 RPM.
++    ("tapered entry just under the limit",
++     ["g8 g97 s17 m3", "g0 x10 z0"], EXTERNAL + " e2 l1", None),
++    ("tapered entry just over the limit",
++     ["g8 g97 s18 m3", "g0 x10 z0"], EXTERNAL + " e2 l1",
++     ["G76 entry taper pitch 1.75121 at spindle speed 18 needs 31.5218 per "
++      "minute", TAPERED_X]),
++    # The exit leaves the decreasing drive line outwards, so its X component is
++    # the thread height less the drive line's: 49.6902 RPM.
++    ("tapered exit just under the limit",
++     ["g8 g97 s49 m3", "g0 x10 z0"], EXTERNAL + " e2 l2", None),
++    ("tapered exit just over the limit",
++     ["g8 g97 s50 m3", "g0 x10 z0"], EXTERNAL + " e2 l2",
++     ["G76 exit taper pitch 1.61694 at spindle speed 50 needs 30.187 per "
++      "minute", TAPERED_X]),
++]
++
++for description, setup, block, expected in cases:
++    print("case: %s: %s" % (description, block))
++    for command in setup:
++        mdi(command)
++    s.poll()
++    if s.queue != 0:
++        fail("motion queue not empty before %r" % block)
++    stale = drain_errors()
++    if stale:
++        fail("unexpected errors before %r: %s" % (block, stale))
++
++    c.mdi(block)
++    messages = []
++    accepted = False
++    deadline = time.time() + 10.0
++    while time.time() < deadline:
++        messages = drain_errors()
++        if messages:
++            break
++        s.poll()
++        if s.queue > 0:
++            accepted = True
++            break
++        time.sleep(0.01)
++
++    if expected is None:
++        if not accepted:
++            fail("%s: rejected or not started: %s" % (description, messages))
++        # The check passed and the passes are queued; nothing more to see.
++        c.abort()
++        c.wait_complete()
++        wait_for(lambda: s.queue == 0 and s.current_vel == 0.0,
++                 "%s: did not stop after abort" % description)
++        c.mode(linuxcnc.MODE_MDI)
++        c.wait_complete()
++        late = drain_errors()
++        if late:
++            fail("%s: errors after accepting: %s" % (description, late))
++        print("  accepted")
++    else:
++        if accepted or not messages:
++            fail("%s: not rejected" % description)
++        text = " ".join(messages)
++        for part in expected:
++            if part not in text:
++                fail("%s: expected %r in %r" % (description, part, text))
++        c.wait_complete()
++        print("  rejected: %s" % text)
++
++print("g76 tapered pitch checks complete")
++sys.exit(0)
+diff --git a/tests/g76-tapered-pitch/test.ini b/tests/g76-tapered-pitch/test.ini
+new file mode 100644
+index 0000000..8c04f36
+--- /dev/null
++++ b/tests/g76-tapered-pitch/test.ini
+@@ -0,0 +1,67 @@
++[EMC]
++VERSION = 1.1
++DEBUG = 0x0
++
++[DISPLAY]
++DISPLAY = ./test-ui.py
++
++[RS274NGC]
++PARAMETER_FILE = sim.var
++
++[EMCMOT]
++EMCMOT = motmod
++COMM_TIMEOUT = 4.0
++BASE_PERIOD = 0
++SERVO_PERIOD = 1000000
++
++[TASK]
++TASK = milltask
++CYCLE_TIME = 0.001
++
++[HAL]
++HALFILE = core_sim.hal
++
++[TRAJ]
++NO_FORCE_HOMING = 1
++COORDINATES = X Z
++LINEAR_UNITS = mm
++ANGULAR_UNITS = degree
++DEFAULT_LINEAR_VELOCITY = 10
++MAX_LINEAR_VELOCITY = 50
++
++[KINS]
++KINEMATICS = trivkins coordinates=XZ
++JOINTS = 2
++
++# X is deliberately slow: 0.5 mm/s is 30 mm/min.  Z allows 600 mm/min.
++[AXIS_X]
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++MAX_VELOCITY = 0.5
++MAX_ACCELERATION = 50
++
++[JOINT_0]
++TYPE = LINEAR
++HOME = 0
++MAX_VELOCITY = 0.5
++MAX_ACCELERATION = 50
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++FERROR = 1
++MIN_FERROR = 0.25
++
++[AXIS_Z]
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++MAX_VELOCITY = 10
++MAX_ACCELERATION = 500
++
++[JOINT_1]
++TYPE = LINEAR
++HOME = 0
++MAX_VELOCITY = 10
++MAX_ACCELERATION = 500
++MIN_LIMIT = -100
++MAX_LIMIT = 100
++FERROR = 1
++MIN_FERROR = 0.25
+diff --git a/tests/g76-tapered-pitch/test.sh b/tests/g76-tapered-pitch/test.sh
+new file mode 100755
+index 0000000..411ae8c
+--- /dev/null
++++ b/tests/g76-tapered-pitch/test.sh
+@@ -0,0 +1,3 @@
++#!/bin/bash -e
++
++linuxcnc -r test.ini
 diff --git a/tests/interp/g76-tapered/README b/tests/interp/g76-tapered/README
 new file mode 100644
-index 0000000000..645af3ae97
+index 0000000..969bf22
 --- /dev/null
 +++ b/tests/interp/g76-tapered/README
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,14 @@
 +Verify that optional G76 X endpoints produce tapered XZ drive lines while
 +preserving axial P pitch.  The canonical trace covers absolute and incremental
 +endpoints, radius and diameter mode, internal and external threads, both drive
 +line slopes, entry/exit taper in both Z directions, compound infeed, and spring
 +passes. Compound-infeed coverage verifies fixed-direction D0 and
 +alternating-flank D1 on tapered and cylindrical drive lines, plus centered Q0
-+paths. Negative tests verify that G76 rejects a Y endpoint, invalid D modes,
-+and an ambiguous same-block G96 D word.
++paths. Every cycle runs inside the spindle override hold (LOCK_SPEED_OVERRIDE
++before the first pass, ENABLE_SPEED_OVERRIDE after the last). Negative tests
++verify, by message, that G76 rejects a Y endpoint, a tapered drive line with no
++Z length, invalid D modes, and a same-block G96 D word whether it looks like an
++infeed mode (D1) or a spindle limit (D2000).
++
++The pitch check against the axis velocity limits needs a machine and is tested
++in tests/g76-tapered-pitch.
 diff --git a/tests/interp/g76-tapered/expected b/tests/interp/g76-tapered/expected
 new file mode 100644
-index 0000000000..ec0ccc9fb4
+index 0000000..98bbf96
 --- /dev/null
 +++ b/tests/interp/g76-tapered/expected
-@@ -0,0 +1,377 @@
+@@ -0,0 +1,403 @@
 + N..... USE_LENGTH_UNITS(CANON_UNITS_MM)
 + N..... SET_G5X_OFFSET(1, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... SET_G92_OFFSET(0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
@@ -356,6 +884,7 @@ index 0000000000..ec0ccc9fb4
 + N..... START_SPINDLE_CLOCKWISE(0)
 + N..... COMMENT("basic external, decreasing X")
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
++ N..... LOCK_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... DISABLE_FEED_OVERRIDE()
@@ -372,9 +901,11 @@ index 0000000000..ec0ccc9fb4
 + N..... STOP_SPEED_FEED_SYNCH()
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... ENABLE_FEED_OVERRIDE()
++ N..... ENABLE_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... COMMENT("basic external, increasing X")
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
++ N..... LOCK_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... STRAIGHT_TRAVERSE(0.6100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... DISABLE_FEED_OVERRIDE()
@@ -391,10 +922,12 @@ index 0000000000..ec0ccc9fb4
 + N..... STOP_SPEED_FEED_SYNCH()
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... ENABLE_FEED_OVERRIDE()
++ N..... ENABLE_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... COMMENT("incremental endpoint")
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... COMMENT("interpreter: distance mode changed to incremental")
++ N..... LOCK_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... DISABLE_FEED_OVERRIDE()
@@ -411,11 +944,13 @@ index 0000000000..ec0ccc9fb4
 + N..... STOP_SPEED_FEED_SYNCH()
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... ENABLE_FEED_OVERRIDE()
++ N..... ENABLE_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... COMMENT("interpreter: distance mode changed to absolute")
 + N..... COMMENT("diameter mode endpoint and depths")
 + N..... COMMENT("interpreter: Lathe diameter mode changed to diameter")
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
++ N..... LOCK_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... DISABLE_FEED_OVERRIDE()
@@ -432,10 +967,12 @@ index 0000000000..ec0ccc9fb4
 + N..... STOP_SPEED_FEED_SYNCH()
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... ENABLE_FEED_OVERRIDE()
++ N..... ENABLE_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... COMMENT("radius mode endpoint and depths")
 + N..... COMMENT("interpreter: Lathe diameter mode changed to radius")
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
++ N..... LOCK_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... DISABLE_FEED_OVERRIDE()
@@ -452,9 +989,11 @@ index 0000000000..ec0ccc9fb4
 + N..... STOP_SPEED_FEED_SYNCH()
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... ENABLE_FEED_OVERRIDE()
++ N..... ENABLE_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... COMMENT("internal thread")
 + N..... STRAIGHT_TRAVERSE(0.5000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
++ N..... LOCK_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(0.4900, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... STRAIGHT_TRAVERSE(0.6900, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... DISABLE_FEED_OVERRIDE()
@@ -471,9 +1010,11 @@ index 0000000000..ec0ccc9fb4
 + N..... STOP_SPEED_FEED_SYNCH()
 + N..... STRAIGHT_TRAVERSE(0.7000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... ENABLE_FEED_OVERRIDE()
++ N..... ENABLE_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(0.7000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... COMMENT("entry and exit taper")
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
++ N..... LOCK_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... DISABLE_FEED_OVERRIDE()
 + N..... START_SPEED_FEED_SYNC(0.157731,0)
@@ -498,9 +1039,11 @@ index 0000000000..ec0ccc9fb4
 + N..... STOP_SPEED_FEED_SYNCH()
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... ENABLE_FEED_OVERRIDE()
++ N..... ENABLE_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... COMMENT("positive Z entry and exit taper")
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
++ N..... LOCK_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... DISABLE_FEED_OVERRIDE()
 + N..... START_SPEED_FEED_SYNC(0.157731,0)
@@ -525,9 +1068,11 @@ index 0000000000..ec0ccc9fb4
 + N..... STOP_SPEED_FEED_SYNCH()
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 1.0000, 0.0000, 0.0000, 0.0000)
 + N..... ENABLE_FEED_OVERRIDE()
++ N..... ENABLE_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 1.0000, 0.0000, 0.0000, 0.0000)
 + N..... COMMENT("fixed-direction compound infeed")
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
++ N..... LOCK_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(0.9998, 0.0000, -0.0510, 0.0000, 0.0000, 0.0000)
 + N..... STRAIGHT_TRAVERSE(0.7998, 0.0000, -0.0510, 0.0000, 0.0000, 0.0000)
 + N..... DISABLE_FEED_OVERRIDE()
@@ -544,9 +1089,11 @@ index 0000000000..ec0ccc9fb4
 + N..... STOP_SPEED_FEED_SYNCH()
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... ENABLE_FEED_OVERRIDE()
++ N..... ENABLE_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... COMMENT("alternating-flank compound infeed")
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
++ N..... LOCK_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(1.0666, 0.0000, -0.0170, 0.0000, 0.0000, 0.0000)
 + N..... STRAIGHT_TRAVERSE(0.8666, 0.0000, -0.0170, 0.0000, 0.0000, 0.0000)
 + N..... DISABLE_FEED_OVERRIDE()
@@ -595,9 +1142,11 @@ index 0000000000..ec0ccc9fb4
 + N..... STOP_SPEED_FEED_SYNCH()
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... ENABLE_FEED_OVERRIDE()
++ N..... ENABLE_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... COMMENT("alternating mode with centered Q0 infeed")
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
++ N..... LOCK_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(1.0700, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... STRAIGHT_TRAVERSE(0.8700, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... DISABLE_FEED_OVERRIDE()
@@ -630,9 +1179,11 @@ index 0000000000..ec0ccc9fb4
 + N..... STOP_SPEED_FEED_SYNCH()
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... ENABLE_FEED_OVERRIDE()
++ N..... ENABLE_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... COMMENT("cylindrical alternating-flank compound infeed")
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
++ N..... LOCK_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(1.0700, 0.0000, -0.0173, 0.0000, 0.0000, 0.0000)
 + N..... STRAIGHT_TRAVERSE(0.8700, 0.0000, -0.0173, 0.0000, 0.0000, 0.0000)
 + N..... DISABLE_FEED_OVERRIDE()
@@ -673,9 +1224,11 @@ index 0000000000..ec0ccc9fb4
 + N..... STOP_SPEED_FEED_SYNCH()
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... ENABLE_FEED_OVERRIDE()
++ N..... ENABLE_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... COMMENT("spring passes")
 + N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
++ N..... LOCK_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 + N..... DISABLE_FEED_OVERRIDE()
@@ -708,6 +1261,7 @@ index 0000000000..ec0ccc9fb4
 + N..... STOP_SPEED_FEED_SYNCH()
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... ENABLE_FEED_OVERRIDE()
++ N..... ENABLE_SPEED_OVERRIDE(0)
 + N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
 + N..... STOP_SPINDLE_TURNING(0)
 + N..... SET_G5X_OFFSET(1, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
@@ -722,7 +1276,7 @@ index 0000000000..ec0ccc9fb4
 + N..... ON_RESET()
 diff --git a/tests/interp/g76-tapered/invalid-d-fraction.ngc b/tests/interp/g76-tapered/invalid-d-fraction.ngc
 new file mode 100644
-index 0000000000..6eb002dc8a
+index 0000000..6eb002d
 --- /dev/null
 +++ b/tests/interp/g76-tapered/invalid-d-fraction.ngc
 @@ -0,0 +1,5 @@
@@ -733,7 +1287,7 @@ index 0000000000..6eb002dc8a
 +m2
 diff --git a/tests/interp/g76-tapered/invalid-d2.ngc b/tests/interp/g76-tapered/invalid-d2.ngc
 new file mode 100644
-index 0000000000..87e80949f9
+index 0000000..87e8094
 --- /dev/null
 +++ b/tests/interp/g76-tapered/invalid-d2.ngc
 @@ -0,0 +1,5 @@
@@ -742,9 +1296,20 @@ index 0000000000..87e80949f9
 +g0 x1 z0
 +g76 p.1 x.8 z-1 i-.1 j.09 k.1 h0 q30 d2
 +m2
+diff --git a/tests/interp/g76-tapered/invalid-g96-d-limit.ngc b/tests/interp/g76-tapered/invalid-g96-d-limit.ngc
+new file mode 100644
+index 0000000..5061982
+--- /dev/null
++++ b/tests/interp/g76-tapered/invalid-g96-d-limit.ngc
+@@ -0,0 +1,5 @@
++g21 g18 g8
++s500 m3
++g0 x10 z0
++g96 s100 d2000 g76 p1.5 x8 z-20 i-1 j.2 k1 h0 q30
++m2
 diff --git a/tests/interp/g76-tapered/invalid-g96-d.ngc b/tests/interp/g76-tapered/invalid-g96-d.ngc
 new file mode 100644
-index 0000000000..66e30e804a
+index 0000000..66e30e8
 --- /dev/null
 +++ b/tests/interp/g76-tapered/invalid-g96-d.ngc
 @@ -0,0 +1,5 @@
@@ -755,7 +1320,7 @@ index 0000000000..66e30e804a
 +m2
 diff --git a/tests/interp/g76-tapered/invalid-y.ngc b/tests/interp/g76-tapered/invalid-y.ngc
 new file mode 100644
-index 0000000000..f79aa85850
+index 0000000..f79aa85
 --- /dev/null
 +++ b/tests/interp/g76-tapered/invalid-y.ngc
 @@ -0,0 +1,5 @@
@@ -764,9 +1329,20 @@ index 0000000000..f79aa85850
 +g0 x1 y0 z0
 +g76 p.1 x.8 y.1 z-1 i-.1 j.09 k.1 h0 q0
 +m2
+diff --git a/tests/interp/g76-tapered/invalid-zero-z.ngc b/tests/interp/g76-tapered/invalid-zero-z.ngc
+new file mode 100644
+index 0000000..9384803
+--- /dev/null
++++ b/tests/interp/g76-tapered/invalid-zero-z.ngc
+@@ -0,0 +1,5 @@
++g20 g18 g8
++s100 m3
++g0 x1 z0
++g76 p.1 x.8 z0 i-.1 j.09 k.1 h0 q0
++m2
 diff --git a/tests/interp/g76-tapered/test.ngc b/tests/interp/g76-tapered/test.ngc
 new file mode 100644
-index 0000000000..fc3f9a5545
+index 0000000..fc3f9a5
 --- /dev/null
 +++ b/tests/interp/g76-tapered/test.ngc
 @@ -0,0 +1,63 @@
@@ -835,10 +1411,10 @@ index 0000000000..fc3f9a5545
 +m2
 diff --git a/tests/interp/g76-tapered/test.sh b/tests/interp/g76-tapered/test.sh
 new file mode 100644
-index 0000000000..949e9fdf47
+index 0000000..70f3986
 --- /dev/null
 +++ b/tests/interp/g76-tapered/test.sh
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,31 @@
 +#!/bin/bash
 +
 +rs274 -g test.ngc | awk '{$1=""; print}'
@@ -847,9 +1423,26 @@ index 0000000000..949e9fdf47
 +    exit "$result"
 +fi
 +
++# Each invalid program must be rejected with its own message.
++declare -A expected_error=(
++    [invalid-d-fraction.ngc]="In G76, D must be 0 or 1"
++    [invalid-d2.ngc]="In G76, D must be 0 or 1"
++    [invalid-g96-d.ngc]="D cannot select both G76 infeed mode and G96 spindle limit in the same block"
++    [invalid-g96-d-limit.ngc]="D cannot select both G76 infeed mode and G96 spindle limit in the same block"
++    [invalid-y.ngc]="Cannot move Y axis with G76"
++    [invalid-zero-z.ngc]="In G76, a tapered drive line must have nonzero Z length"
++)
++
 +for invalid_program in invalid-*.ngc; do
-+    if rs274 -g "$invalid_program" >/dev/null 2>&1; then
-+        echo "$invalid_program unexpectedly succeeded" >&2
++    message=${expected_error[$invalid_program]}
++    if [[ -z $message ]]; then
++        echo "$invalid_program has no expected error message" >&2
++        exit 1
++    fi
++    output=$(rs274 -g "$invalid_program" 2>&1)
++    if ! grep -qxF "$message" <<< "$output"; then
++        echo "$invalid_program was not rejected with: $message" >&2
++        echo "$output" >&2
 +        exit 1
 +    fi
 +done
