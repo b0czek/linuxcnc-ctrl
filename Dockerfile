@@ -42,9 +42,9 @@ RUN cd /src/linuxcnc/src \
     && ./configure \
       --prefix=/opt/linuxcnc \
       --with-realtime=uspace \
-      --enable-headless \
+      --disable-gui \
       --disable-build-documentation \
-      --disable-build-manpages \
+      --disable-manpages \
     && make -j"${build_jobs}" \
     && make DESTDIR=/linuxcnc-root install
 
