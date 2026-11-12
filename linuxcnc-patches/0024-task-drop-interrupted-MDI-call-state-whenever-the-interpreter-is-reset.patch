@@ -69,10 +69,10 @@ index 5a1e60e..67edc9b 100644
  }
  
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 154c362..72e16f1 100644
+index b69eb5a..6941bbd 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -776,7 +776,7 @@ interpret_again:
+@@ -779,7 +779,7 @@ interpret_again:
  		}		// if interp len is less than max
  }
  
@@ -81,7 +81,7 @@ index 154c362..72e16f1 100644
  {
      int queued_mdi_commands;
  
-@@ -3097,6 +3097,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -3159,6 +3159,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	break;
  
      case EMC_TASK_PLAN_INIT_TYPE:

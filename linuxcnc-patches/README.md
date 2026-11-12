@@ -195,10 +195,22 @@ The command is exposed as Python `command.program_stop()`, protobuf
 reported as `EMC_TASK_STOP_STATE` (`IDLE`, `STOPPING`, `STOPPED`, `STARTING`)
 through Python `stop_state` and the task-status protobuf.
 
-Spindle and coolant are restored without adding a task-level spindle-at-speed
-wait. A next-feed at-speed wait that was pending before Stop still holds after
-Resume, and a later `S` word change still arms one. Resume or Run during a Stop
-leaves single-step mode entered by an earlier Step.
+Resume, Run and Single Step from `STOPPED` restore spindle and coolant and
+then wait, in `STARTING`, until every spindle that Stop switched off reports
+at-speed before motion continues, so an interrupted feed or rapid never
+restarts on a spindle that is still spinning up. An at-speed signal left over
+from before the restore does not count: once the spindle has been seen not at
+speed with its output on, task requires `spindle.N.at-speed` to drop and rise
+again after the restore. A spindle whose at-speed has never read false (not
+connected, or tied true) does not hold Resume. A second Stop, Abort, E-stop or
+Machine Off end the wait. A next-feed at-speed wait that was pending before
+Stop still holds after Resume, and a later `S` word change still arms one.
+Resume or Run during a Stop leaves single-step mode entered by an earlier Step.
+
+While Stop waits for motion to come to rest, task issues only commands that
+add to the motion queue. Spindle, coolant, I/O, dwell, tool-change and other
+commands read behind the stopping motion run once, in program order, after
+Resume, so an `M5` or `S` word after a thread is not undone by Resume's restore.
 
 `STOPPED` also clears the planner's record of the current spindle
 synchronization, so a `G33` that follows velocity-synchronized motion waits
@@ -206,13 +218,15 @@ for a fresh index after Resume instead of catching up the revolutions turned
 during the Stop. Stop's spindle-off and spindle-on leave the at-speed and
 spindle-state bookkeeping of later spindle commands untouched.
 
-The `tests/resumable-stop` LinuxCNC regression runs 25 scenarios with the
-jerk-limited planner and repeats four of them with the trapezoidal planner.
-They cover Stop/Resume and Stop/Single-Step preserving the queued program,
-spindle and coolant handling, the at-speed cases above, `G33` threading
-including a chain of `G33` moves and `G33`/`G95`/`G33`, `G33.1` rigid tapping,
-Stop during and after an interrupted `G28.2`, and that `STOPPED` is never
-reported while moving.
+The `tests/resumable-stop` LinuxCNC regressions run as four tests
+(`general`, `threading`, `g76-stop`, `g76-step`) that share one driver, so they
+run in parallel. With patches 0009 and 0011 they hold 37 scenarios with the
+jerk-limited planner and four re-runs with the trapezoidal planner. They cover
+Stop/Resume and Stop/Single-Step preserving the queued program, spindle and
+coolant handling, the at-speed wait on Resume including a stale at-speed
+signal, commands queued behind a thread, `G33` threading including a chain of
+`G33` moves and `G33`/`G95`/`G33`, `G33.1` rigid tapping, Stop during and after
+an interrupted `G28.2`, and that `STOPPED` is never reported while moving.
 
 ### 0005 — Headless backend-only builds on top of `--disable-gui`
 
@@ -366,9 +380,8 @@ prequeued by readahead.
 The temporary exact boundary is restored if Step is canceled by Resume or Stop.
 Existing paused source-line stepping and two-stage G76 stepping remain intact.
 Two additional runtime scenarios arm Step during an ordinary block with three
-later blocks queued and during an active G76 cut with later passes queued,
-bringing the resumable-stop suite to 35 scenarios plus four trapezoidal re-runs
-on v2.10.0-pre2. During an
+later blocks queued and during an active G76 cut with later passes queued;
+they are part of the resumable-stop tests described under patch 0004. During an
 in-flight step, `single_stepping` reports the armed/active state while task and
 motion remain unpaused; both paused flags become true only after motion reaches
 the boundary.

@@ -306,7 +306,7 @@ index 5d61f0b..f1ce1d7 100644
  
  #ifdef __cplusplus
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index 9a37b35..373f426 100644
+index 3472aa9..d9f17ac 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
 @@ -157,6 +157,19 @@ STATIC int spindle_range_is_available(int first, int last)
@@ -353,10 +353,10 @@ index 9a37b35..373f426 100644
  	    /* do a continuous jog, implemented as an incremental jog to the
  	       limit.  When the user lets go of the button an abort will
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index 26b5b1d..0b54c9f 100644
+index e26daea..2bc4061 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
-@@ -1982,7 +1982,14 @@ static void get_pos_cmds(long period)
+@@ -1990,7 +1990,14 @@ static void get_pos_cmds(long period)
  	break;
  
      case EMCMOT_MOTION_TELEOP:
@@ -416,7 +416,7 @@ index 51b58d1..6d99597 100644
      sp_scurve_cleanup();
      /* free shared memory */
 diff --git a/src/emc/motion/motion.h b/src/emc/motion/motion.h
-index 05ee23d..092beca 100644
+index 1153fc5..3b6d1d1 100644
 --- a/src/emc/motion/motion.h
 +++ b/src/emc/motion/motion.h
 @@ -184,6 +184,7 @@ extern "C" {
@@ -653,7 +653,7 @@ index f70a5e0..b2b729a 100644
  *	NML/CMS Update function for EMC_JOG_CONT
  */
 diff --git a/src/emc/nml_intf/emc.hh b/src/emc/nml_intf/emc.hh
-index f2679d9..915aa58 100644
+index 81ab9e6..003be39 100644
 --- a/src/emc/nml_intf/emc.hh
 +++ b/src/emc/nml_intf/emc.hh
 @@ -75,6 +75,7 @@ struct PM_CARTESIAN;
@@ -695,10 +695,10 @@ index c03bfc3..05a29fe 100644
    public:
      EMC_JOG_CONT()
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 01e2b62..154c362 100644
+index 170f044..b69eb5a 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -1364,6 +1364,7 @@ static int emcTaskPlan(void)
+@@ -1426,6 +1426,7 @@ static int emcTaskPlan(void)
  	    case EMC_JOINT_HOME_TYPE:
  	    case EMC_JOINT_UNHOME_TYPE:
  	    case EMC_JOG_CONT_TYPE:
@@ -706,7 +706,7 @@ index 01e2b62..154c362 100644
  	    case EMC_JOG_INCR_TYPE:
  	    case EMC_JOG_ABS_TYPE:
  	    case EMC_JOG_STOP_TYPE:
-@@ -2265,6 +2266,13 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2327,6 +2328,13 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
                              jog_stop_msg->jjogmode);
  	break;
  
@@ -721,7 +721,7 @@ index 01e2b62..154c362 100644
  	jog_incr_msg = reinterpret_cast<EMC_JOG_INCR *>(cmd);
  	retval = emcJogIncr(jog_incr_msg->joint_or_axis,
 diff --git a/src/emc/task/taskintf.cc b/src/emc/task/taskintf.cc
-index 6dc8665..58c9c7c 100644
+index 6e10ffb..0e26533 100644
 --- a/src/emc/task/taskintf.cc
 +++ b/src/emc/task/taskintf.cc
 @@ -889,6 +889,18 @@ int emcJogCont(int nr, double vel, int jjogmode)

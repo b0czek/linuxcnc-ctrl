@@ -24,22 +24,26 @@ Ported to v2.10.0-pre2. Differences from the patch on the old base:
  docs/src/gui/halui.adoc                       |    3 +-
  docs/src/man/man1/halui.1.adoc                |    5 +-
  src/emc/motion-logger/motion-logger.c         |    4 +
- src/emc/motion/command.c                      |   38 +-
- src/emc/motion/control.c                      |   13 +
+ src/emc/motion/command.c                      |   45 +-
+ src/emc/motion/control.c                      |   21 +
  src/emc/motion/motion.c                       |    1 +
- src/emc/motion/motion.h                       |    3 +
+ src/emc/motion/motion.h                       |    7 +
  src/emc/nml_intf/emc.cc                       |   24 +
- src/emc/nml_intf/emc.hh                       |   10 +
+ src/emc/nml_intf/emc.hh                       |   14 +
  src/emc/nml_intf/emc_nml.hh                   |   22 +
  src/emc/nml_intf/emcops.cc                    |    4 +
- src/emc/task/emctaskmain.cc                   |  358 ++++-
- src/emc/task/taskintf.cc                      |   40 +-
+ src/emc/task/emctaskmain.cc                   |  422 ++++-
+ src/emc/task/taskintf.cc                      |   67 +-
  src/emc/tp/tp.c                               |  133 +-
  src/emc/tp/tp_types.h                         |   12 +
  src/emc/usr_intf/axis/extensions/emcmodule.cc |   14 +
  src/emc/usr_intf/halui.cc                     |    9 +-
- tests/resumable-stop/README                   |   37 +
+ tests/resumable-stop/README                   |   51 +
  tests/resumable-stop/after-abort.ngc          |    4 +
+ tests/resumable-stop/after-tap-m5.ngc         |    7 +
+ tests/resumable-stop/after-thread-m5.ngc      |    7 +
+ tests/resumable-stop/after-thread-m9.ngc      |    8 +
+ tests/resumable-stop/after-thread-s.ngc       |    7 +
  tests/resumable-stop/checkresult              |    4 +
  tests/resumable-stop/core_sim.hal             |   42 +
  tests/resumable-stop/css.ngc                  |    6 +
@@ -54,22 +58,27 @@ Ported to v2.10.0-pre2. Differences from the patch on the old base:
  tests/resumable-stop/orient.ngc               |    6 +
  tests/resumable-stop/pause.ngc                |    7 +
  tests/resumable-stop/rapid-then-feed.ngc      |    7 +
+ tests/resumable-stop/resume-atspeed.ngc       |    7 +
  tests/resumable-stop/single-step.ngc          |   10 +
  tests/resumable-stop/speed-change.ngc         |    9 +
  tests/resumable-stop/spindle-state.ngc        |   10 +
  tests/resumable-stop/tap.ngc                  |    7 +
- tests/resumable-stop/test-ui.py               | 1259 +++++++++++++++++
+ tests/resumable-stop/test-ui.py               | 1492 +++++++++++++++++
  tests/resumable-stop/test.ini                 |   98 ++
  tests/resumable-stop/test.ngc                 |    9 +
- tests/resumable-stop/test.sh                  |   72 +
+ tests/resumable-stop/test.sh                  |   74 +
  tests/resumable-stop/thread-chain.ngc         |    8 +
  tests/resumable-stop/thread-g95-thread.ngc    |    9 +
  tests/resumable-stop/thread-then-steps.ngc    |   10 +
  tests/resumable-stop/thread.ngc               |    7 +
  tests/resumable-stop/tool.tbl                 |    1 +
- 47 files changed, 2352 insertions(+), 24 deletions(-)
+ 52 files changed, 2750 insertions(+), 25 deletions(-)
  create mode 100644 tests/resumable-stop/README
  create mode 100644 tests/resumable-stop/after-abort.ngc
+ create mode 100644 tests/resumable-stop/after-tap-m5.ngc
+ create mode 100644 tests/resumable-stop/after-thread-m5.ngc
+ create mode 100644 tests/resumable-stop/after-thread-m9.ngc
+ create mode 100644 tests/resumable-stop/after-thread-s.ngc
  create mode 100755 tests/resumable-stop/checkresult
  create mode 100644 tests/resumable-stop/core_sim.hal
  create mode 100644 tests/resumable-stop/css.ngc
@@ -84,6 +93,7 @@ Ported to v2.10.0-pre2. Differences from the patch on the old base:
  create mode 100644 tests/resumable-stop/orient.ngc
  create mode 100644 tests/resumable-stop/pause.ngc
  create mode 100644 tests/resumable-stop/rapid-then-feed.ngc
+ create mode 100644 tests/resumable-stop/resume-atspeed.ngc
  create mode 100644 tests/resumable-stop/single-step.ngc
  create mode 100644 tests/resumable-stop/speed-change.ngc
  create mode 100644 tests/resumable-stop/spindle-state.ngc
@@ -174,7 +184,7 @@ index 36b77e5..24d0fea 100644
                  log_print("RESUME\n");
                  break;
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index e2ecb07..4c0b914 100644
+index e2ecb07..35cf0db 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
 @@ -536,6 +536,16 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
@@ -222,20 +232,28 @@ index e2ecb07..4c0b914 100644
  	    break;
  
  	case EMCMOT_STEP:
-@@ -1800,7 +1822,11 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1799,8 +1821,19 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+ 	            emcmotStatus->spindle_status[n].brake = 0; //disengage brake
              }
              apply_spindle_limits(&emcmotStatus->spindle_status[n]);
-         }
--        emcmotStatus->atspeed_next_feed = emcmotCommand->wait_for_spindle_at_speed;
++            if (emcmotCommand->wait_for_spindle_at_speed ==
++                    EMCMOT_SPINDLE_AT_SPEED_PRESERVE && emcmotCommand->state) {
++                /* A resumable Stop restoring this spindle: task waits for
++                   an at-speed sampled after this point. */
++                emcmotStatus->spindle_status[n].stop_restore_seq++;
++                emcmotStatus->spindle_status[n].stop_restore_atspeed_dropped = 0;
++            }
++        }
 +        if (emcmotCommand->wait_for_spindle_at_speed !=
 +                EMCMOT_SPINDLE_AT_SPEED_PRESERVE) {
 +            emcmotStatus->atspeed_next_feed =
 +                emcmotCommand->wait_for_spindle_at_speed;
-+        }
+         }
+-        emcmotStatus->atspeed_next_feed = emcmotCommand->wait_for_spindle_at_speed;
  
         // check whether it's passed correctly
         if (!emcmotStatus->atspeed_next_feed){
-@@ -1839,8 +1865,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1839,8 +1872,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
          }
          /* Optionally make the spindle stop an at-speed barrier: the next feed
             move waits until at-speed reflects the stopped state. Safe when
@@ -253,10 +271,25 @@ index e2ecb07..4c0b914 100644
  
  	case EMCMOT_SPINDLE_ORIENT:
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index 17fb96b..7a85db9 100644
+index 17fb96b..ccd0f34 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
-@@ -2071,6 +2071,19 @@ static void output_to_hal(void)
+@@ -417,6 +417,14 @@ static void process_inputs(void)
+ 				hal_get_real(emcmot_hal_data->spindle[spindle_num].spindle_speed_in);
+ 		emcmotStatus->spindle_status[spindle_num].at_speed =
+ 				hal_get_bool(emcmot_hal_data->spindle[spindle_num].spindle_is_atspeed);
++		/* Sampled every servo period for resumable Stop: a short false
++		   between a Stop restore and at-speed would be missed by task. */
++		if (!emcmotStatus->spindle_status[spindle_num].at_speed) {
++			emcmotStatus->spindle_status[spindle_num].stop_restore_atspeed_dropped = 1;
++			if (emcmotStatus->spindle_status[spindle_num].state) {
++				emcmotStatus->spindle_status[spindle_num].atspeed_feedback = 1;
++			}
++		}
+     }
+     /* compute net feed and spindle scale factors */
+     if ( emcmotStatus->motion_state == EMCMOT_MOTION_COORD ) {
+@@ -2071,6 +2079,19 @@ static void output_to_hal(void)
          hal_set_real(emcmot_hal_data->requested_vel, 0.0);
      }
  
@@ -289,7 +322,7 @@ index 30ce42a..067711a 100644
      SET_MOTION_INPOS_FLAG(1);
      SET_MOTION_ENABLE_FLAG(0);
 diff --git a/src/emc/motion/motion.h b/src/emc/motion/motion.h
-index b98bfc0..eb11553 100644
+index b98bfc0..1915616 100644
 --- a/src/emc/motion/motion.h
 +++ b/src/emc/motion/motion.h
 @@ -81,6 +81,7 @@ to another.
@@ -308,7 +341,18 @@ index b98bfc0..eb11553 100644
  	EMCMOT_REVERSE,		/* run reverse motion */
  	EMCMOT_FORWARD,		/* run reverse motion */
  	EMCMOT_RESUME,		/* resume motion */
-@@ -645,6 +647,7 @@ Suggestion: Split this in to an Error and a Status flag register..
+@@ -547,6 +549,10 @@ Suggestion: Split this in to an Error and a Status flag register..
+ 	double spindleRevs;     /* position of spindle in revolutions */
+ 	double spindleSpeedIn;  /* velocity of spindle in revolutions per minute */
+ 	int at_speed;
++	/* Resumable Stop's at-speed wait (see process_inputs()). */
++	int atspeed_feedback;	/* at-speed has read false while the spindle was on */
++	unsigned int stop_restore_seq; /* Stop restores (preserving spindle-ons) handled */
++	int stop_restore_atspeed_dropped; /* at-speed read false since the last restore */
+ 	int fault; /* amplifier fault */
+ 	double max_pos_speed; /* spindle speed limits */
+ 	double min_pos_speed; /* signed values, so max_neg = 0 */
+@@ -645,6 +651,7 @@ Suggestion: Split this in to an Error and a Status flag register..
  	int activeDepth;	/* depth of active blend elements */
  	int queueFull;		/* Flag to indicate the tc queue is full */
  	int paused;		/* Flag to signal motion paused */
@@ -415,7 +459,7 @@ index ec54d4e..25e5f5a 100644
  *	NML/CMS Update function for EMC_AUX_STAT_MSG
  *	Automatically generated by NML CodeGen Java Applet.
 diff --git a/src/emc/nml_intf/emc.hh b/src/emc/nml_intf/emc.hh
-index c2f4d1b..6c61f5a 100644
+index c2f4d1b..f28481b 100644
 --- a/src/emc/nml_intf/emc.hh
 +++ b/src/emc/nml_intf/emc.hh
 @@ -93,6 +93,7 @@ struct PM_CARTESIAN;
@@ -456,6 +500,17 @@ index c2f4d1b..6c61f5a 100644
  extern int emcTrajReverse();
  extern int emcTrajForward();
  extern int emcTrajStep();
+@@ -436,6 +446,10 @@ extern int emcSpindleSpeed(int spindle, double speed, double factor, double xoff
+ extern int emcSpindleOn(int spindle, double speed, double factor, double xoffset,int wait_for_atspeed = 1);
+ extern int emcSpindleOrient(int spindle, double orientation, int direction);
+ extern int emcSpindleOff(int spindle, int wait_for_atspeed = 0);
++// Resumable Stop: count of Stop spindle restores motion has handled, and
++// whether the spindle reported at-speed after the restore with that count.
++extern unsigned int emcSpindleStopRestoreSeq(int spindle);
++extern bool emcSpindleStopRestoreAtSpeed(int spindle, unsigned int seq);
+ extern int emcSpindleIncrease(int spindle);
+ extern int emcSpindleDecrease(int spindle);
+ extern int emcSpindleConstant(int spindle);
 diff --git a/src/emc/nml_intf/emc_nml.hh b/src/emc/nml_intf/emc_nml.hh
 index 3d8c617..0d4ab6c 100644
 --- a/src/emc/nml_intf/emc_nml.hh
@@ -561,10 +616,10 @@ index ed6a962..a6b2345 100644
  {
  }
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index a3b5256..564e4a1 100644
+index a3b5256..124eaf2 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -124,6 +124,37 @@ static int emcTaskEager = 0;
+@@ -124,6 +124,40 @@ static int emcTaskEager = 0;
  static int no_force_homing = 0; // forces the user to home first before allowing MDI and Program run
  //can be overridden by [TRAJ]NO_FORCE_HOMING=1
  
@@ -578,6 +633,9 @@ index a3b5256..564e4a1 100644
 +    int orient_mode;
 +    double orient_timeout;
 +    double orient_deadline;
++    // STARTING waits for at-speed after the restore motion counts as seq.
++    bool restore_wait_at_speed;
++    unsigned int restore_seq;
 +};
 +
 +struct SpindleOrientRequest {
@@ -602,7 +660,7 @@ index a3b5256..564e4a1 100644
  // delay counter
  static double taskExecDelayTimeout = 0.0;
  
-@@ -414,6 +445,10 @@ static double homingIssueTime = 0.0;     // etime() when issued, for the start-t
+@@ -414,6 +448,10 @@ static double homingIssueTime = 0.0;     // etime() when issued, for the start-t
  // vary widely in duration, same as a GUI just watching .homing/.homed).
  static const double HOMING_START_TIMEOUT = 2.0;
  static EMC_TRAJ_MODE homingPriorMode = EMC_TRAJ_MODE::FREE; // mode to restore on success
@@ -613,7 +671,7 @@ index a3b5256..564e4a1 100644
  // True only while emcTaskExecute() is issuing a command taken off the
  // interp_list. emcTaskIssueCommand() serves both that queued path and the
  // immediate commands emcTaskPlan() sends straight through (the GUI's Home
-@@ -522,6 +557,9 @@ extern int emcTaskMopup();
+@@ -522,6 +560,9 @@ extern int emcTaskMopup();
  
  void readahead_reading(void)
  {
@@ -623,7 +681,7 @@ index a3b5256..564e4a1 100644
      int readRetval;
      int execRetval;
  
-@@ -737,6 +775,9 @@ static void mdi_execute_hook(void)
+@@ -737,6 +778,9 @@ static void mdi_execute_hook(void)
  
  void readahead_waiting(void)
  {
@@ -633,10 +691,50 @@ index a3b5256..564e4a1 100644
  	// now handle call logic
  	// check for subsystems done
  	if (interp_list.len() == 0 &&
-@@ -781,6 +822,197 @@ static bool allow_while_idle_type() {
+@@ -781,6 +825,256 @@ static bool allow_while_idle_type() {
      return 0;
  }
  
++/*
++ * While Stop is in progress, queued commands that only add to the coordinated
++ * motion queue may still be issued: the planner holds whatever Stop does not
++ * let finish, and a synchronized run or a latched G76 pass may need its
++ * remaining segments. Every other command (spindle, coolant, I/O, dwell, tool
++ * change, homing, program end, a G76 pass-group fence ...) waits until after
++ * Resume, so that it neither runs behind the output state Stop records and
++ * restores nor runs out of program order.
++ */
++static bool emcTaskStopAllowsIssue(const NMLmsg *cmd)
++{
++    switch (emcStatus->task.stopState) {
++    case EMC_TASK_STOP_STATE::IDLE:
++        return true;
++    case EMC_TASK_STOP_STATE::STOPPING:
++        break;
++    default:
++        return false;
++    }
++    switch (cmd->_type) {
++    case EMC_TRAJ_LINEAR_MOVE_TYPE:
++    case EMC_TRAJ_CIRCULAR_MOVE_TYPE:
++    case EMC_TRAJ_SET_VELOCITY_TYPE:
++    case EMC_TRAJ_SET_ACCELERATION_TYPE:
++    case EMC_TRAJ_SET_TERM_COND_TYPE:
++    case EMC_TRAJ_SET_SPINDLESYNC_TYPE:
++    case EMC_TRAJ_SET_FO_ENABLE_TYPE:
++    case EMC_TRAJ_SET_FH_ENABLE_TYPE:
++    case EMC_TRAJ_SET_SO_ENABLE_TYPE:
++        return true;
++    case EMC_MOTION_SET_DOUT_TYPE:
++        // Synchronized outputs travel with the next queued move.
++        return !reinterpret_cast<const EMC_MOTION_SET_DOUT *>(cmd)->now;
++    case EMC_MOTION_SET_AOUT_TYPE:
++        return !reinterpret_cast<const EMC_MOTION_SET_AOUT *>(cmd)->now;
++    default:
++        return false;
++    }
++}
++
 +static void emcTaskResumeInterpreter()
 +{
 +    if (emcStatus->task.interpState == EMC_TASK_INTERP::PAUSED) {
@@ -707,11 +805,14 @@ index a3b5256..564e4a1 100644
 +        emcCoolantFloodOn();
 +    }
 +    for (int s = 0; s < emcStatus->motion.traj.spindles; ++s) {
++        stop_spindles[s].restore_wait_at_speed = false;
 +        if (stop_spindles[s].running) {
-+            emcSpindleOn(s, stop_spindles[s].speed,
++            stop_spindles[s].restore_seq = emcSpindleStopRestoreSeq(s);
++            stop_spindles[s].restore_wait_at_speed =
++                emcSpindleOn(s, stop_spindles[s].speed,
 +                    stop_spindles[s].css_factor,
 +                    stop_spindles[s].css_xoffset,
-+                    EMCMOT_SPINDLE_AT_SPEED_PRESERVE);
++                    EMCMOT_SPINDLE_AT_SPEED_PRESERVE) == 0;
 +        }
 +        if (stop_spindles[s].orienting) {
 +            emcSpindleOrient(s, stop_spindles[s].orientation,
@@ -812,6 +913,22 @@ index a3b5256..564e4a1 100644
 +                }
 +            }
 +        }
++        /*
++         * Motion continues only once every spindle Stop switched off and
++         * Resume switched back on is at speed again, so an interrupted feed
++         * does not restart cutting while the spindle spins up. Like
++         * upstream's own at-speed waits this has no timeout; Stop, Abort,
++         * E-stop and machine off leave STARTING. See
++         * emcSpindleStopRestoreAtSpeed() for why a stale at-speed does not
++         * count.
++         */
++        for (int s = 0; s < emcStatus->motion.traj.spindles; ++s) {
++            if (stop_spindles[s].restore_wait_at_speed &&
++                    !emcSpindleStopRestoreAtSpeed(s,
++                        stop_spindles[s].restore_seq)) {
++                return;
++            }
++        }
 +        if (stop_single_step) {
 +            emcTrajStep();
 +        } else {
@@ -831,7 +948,7 @@ index a3b5256..564e4a1 100644
  /*
    emcTaskPlan()
  
-@@ -809,6 +1041,29 @@ static int emcTaskPlan(void)
+@@ -809,6 +1103,29 @@ static int emcTaskPlan(void)
  	return retval;
      }
  
@@ -861,7 +978,7 @@ index a3b5256..564e4a1 100644
      // handle any new command
      switch (emcStatus->task.state) {
      case EMC_TASK_STATE::OFF:
-@@ -1734,6 +1989,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -1734,6 +2051,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	    // found to have been rejected), invisibly to the task-level
  	    // MDI/AUTO/MANUAL state.
  	    homingPriorMode = emcStatus->motion.traj.mode;
@@ -869,7 +986,7 @@ index a3b5256..564e4a1 100644
  	    if (homingPriorMode != EMC_TRAJ_MODE::FREE) {
  		emcTrajSetMode(EMC_TRAJ_MODE::FREE);
  	    }
-@@ -1937,6 +2193,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -1937,6 +2255,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	retval = emcTrajPause();
  	break;
  
@@ -881,7 +998,7 @@ index a3b5256..564e4a1 100644
      case EMC_TRAJ_RESUME_TYPE:
  	emcStatus->task.task_paused = 0;
  	retval = emcTrajResume();
-@@ -2039,6 +2300,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2039,6 +2362,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_SPINDLE_WAIT_ORIENT_COMPLETE_TYPE:
  	wait_spindle_orient_complete_msg = reinterpret_cast<EMC_SPINDLE_WAIT_ORIENT_COMPLETE *>(cmd);
@@ -893,7 +1010,7 @@ index a3b5256..564e4a1 100644
  	taskExecDelayTimeout = etime() + wait_spindle_orient_complete_msg->timeout;
  	break;
  
-@@ -2099,6 +2365,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2099,6 +2427,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_SPINDLE_ORIENT_TYPE:
  	spindle_orient_msg = reinterpret_cast<EMC_SPINDLE_ORIENT *>(cmd);
@@ -908,7 +1025,7 @@ index a3b5256..564e4a1 100644
  	retval = emcSpindleOrient(spindle_orient_msg->spindle, spindle_orient_msg->orientation,
  			spindle_orient_msg->mode);
  	break;
-@@ -2191,7 +2465,52 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2191,7 +2527,52 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
  	// task commands
  
@@ -961,7 +1078,7 @@ index a3b5256..564e4a1 100644
  	// abort everything
  	emcTaskAbort();
  	// KLUDGE call motion abort before state restore to make absolutely sure no
-@@ -2215,6 +2534,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2215,6 +2596,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	    mode_msg->mode != EMC_TASK_MODE::AUTO) {
  	    emcOperatorError(_("Can't switch mode while mode is AUTO and interpreter is not IDLE"));
  	} else { // we can honour the modeswitch
@@ -971,7 +1088,7 @@ index a3b5256..564e4a1 100644
  	    if (mode_msg->mode == EMC_TASK_MODE::MANUAL &&
  		emcStatus->task.mode != EMC_TASK_MODE::MANUAL) {
  		// leaving auto or mdi mode for manual
-@@ -2259,6 +2581,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2259,6 +2643,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_TASK_SET_STATE_TYPE:
  	state_msg = reinterpret_cast<EMC_TASK_SET_STATE *>(cmd);
@@ -981,7 +1098,7 @@ index a3b5256..564e4a1 100644
  	retval = emcTaskSetState(state_msg->state);
  	break;
  
-@@ -2484,11 +2809,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2484,11 +2871,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_TASK_PLAN_RESUME_TYPE:
  	emcTrajResume();
@@ -994,7 +1111,7 @@ index a3b5256..564e4a1 100644
  	retval = 0;
  	break;
  
-@@ -2701,6 +3023,7 @@ static int emcTaskExecute(void)
+@@ -2701,6 +3085,7 @@ static int emcTaskExecute(void)
  
      switch (emcStatus->task.execState) {
      case EMC_TASK_EXEC::ERROR:
@@ -1002,7 +1119,7 @@ index a3b5256..564e4a1 100644
  
  	/*! \todo FIXME-- duplicate code for abort,
  	   also near end of main, when aborting on subordinate errors,
-@@ -2746,7 +3069,9 @@ static int emcTaskExecute(void)
+@@ -2746,7 +3131,9 @@ static int emcTaskExecute(void)
      case EMC_TASK_EXEC::DONE:
  	STEPPING_CHECK();
  	if (!emcStatus->motion.traj.queueFull &&
@@ -1013,7 +1130,16 @@ index a3b5256..564e4a1 100644
  	    if (NULL == emcTaskCommand) {
  		// need a new command
  		emcTaskCommand = interp_list.get();
-@@ -3040,6 +3365,18 @@ static int emcTaskExecute(void)
+@@ -2767,7 +3154,7 @@ static int emcTaskExecute(void)
+ 			emcStatus->task.execState = emcTaskCheckPreconditions(emcTaskCommand.get());
+ 		    }
+ 		}
+-	    } else {
++	    } else if (emcTaskStopAllowsIssue(emcTaskCommand.get())) {
+ 		// have an outstanding command
+ 		// This is the one emcTaskIssueCommand() call site followed by
+ 		// emcTaskCheckPostconditions(), i.e. the only one whose commands
+@@ -3040,6 +3427,18 @@ static int emcTaskExecute(void)
  
      case EMC_TASK_EXEC::WAITING_FOR_DELAY:
  	STEPPING_CHECK();
@@ -1032,7 +1158,7 @@ index a3b5256..564e4a1 100644
  	// check if delay has passed
  	emcStatus->task.delayLeft = taskExecDelayTimeout - etime();
  	if (etime() >= taskExecDelayTimeout) {
-@@ -3626,6 +3963,7 @@ int main(int argc, char *argv[])
+@@ -3626,6 +4025,7 @@ int main(int argc, char *argv[])
  	prev_traj_enabled = emcStatus->motion.traj.enabled;
  	// synchronize subordinate states
  	if (emcStatus->io.aux.estop) {
@@ -1040,7 +1166,7 @@ index a3b5256..564e4a1 100644
  	    if (emcStatus->motion.traj.enabled) {
  		emcTrajDisable();
  		emcTaskAbort();
-@@ -3707,6 +4045,7 @@ int main(int argc, char *argv[])
+@@ -3707,6 +4107,7 @@ int main(int argc, char *argv[])
  	    // 	emcOperatorError("wait for orient complete timed out");
  	    // }
  
@@ -1048,7 +1174,7 @@ index a3b5256..564e4a1 100644
              // abort everything
              emcTaskAbort();
              emcIoAbort(EMC_ABORT::MOTION_OR_IO_RCS_ERROR);
-@@ -3742,6 +4081,12 @@ int main(int argc, char *argv[])
+@@ -3742,6 +4143,12 @@ int main(int argc, char *argv[])
  	    emcTaskQueueTaskPlanSynchCmd();
  	}
  
@@ -1061,7 +1187,7 @@ index a3b5256..564e4a1 100644
  	// update task-specific status
  	emcTaskUpdate(&emcStatus->task);
  
-@@ -3762,6 +4107,9 @@ int main(int argc, char *argv[])
+@@ -3762,6 +4169,9 @@ int main(int argc, char *argv[])
  	    emcStatus->io.status == RCS_STATUS::ERROR) {
  	    emcStatus->status = RCS_STATUS::ERROR;
  	    emcStatus->task.status = RCS_STATUS::ERROR;
@@ -1072,7 +1198,7 @@ index a3b5256..564e4a1 100644
  		   emcStatus->task.execState == EMC_TASK_EXEC::DONE &&
  		   emcStatus->motion.status == RCS_STATUS::DONE &&
 diff --git a/src/emc/task/taskintf.cc b/src/emc/task/taskintf.cc
-index 4215d22..7db2314 100644
+index 4215d22..3f66a0b 100644
 --- a/src/emc/task/taskintf.cc
 +++ b/src/emc/task/taskintf.cc
 @@ -1497,6 +1497,13 @@ int emcTrajPause()
@@ -1097,7 +1223,7 @@ index 4215d22..7db2314 100644
      stat->scale = emcmotStatus.feed_scale;
      stat->rapid_scale = emcmotStatus.rapid_scale;
  
-@@ -2065,25 +2073,42 @@ int emcSpindleOrient(int spindle, double orientation, int mode)
+@@ -2065,25 +2073,69 @@ int emcSpindleOrient(int spindle, double orientation, int mode)
  }
  
  
@@ -1143,10 +1269,37 @@ index 4215d22..7db2314 100644
 -    emcmotCommand.wait_for_spindle_at_speed = wait_for_at_speed;
 -    return usrmotWriteEmcmotCommand(&emcmotCommand);
 +    return writeSpindleCommand(0, wait_for_at_speed);
++}
++
++unsigned int emcSpindleStopRestoreSeq(int spindle)
++{
++    if (spindle < 0 || spindle >= EMCMOT_MAX_SPINDLES) {
++        return 0;
++    }
++    return emcmotStatus.spindle_status[spindle].stop_restore_seq;
++}
++
++/*
++ * True once motion has handled the restore that followed seq and has since
++ * read spindle.N.at-speed true, with that true not left over from before the
++ * restore: motion must also have read at-speed false at some servo period
++ * after the restore (the first sample after it still reflects the stopped
++ * spindle). That false is not required while at-speed has never read false
++ * with the spindle on (unconnected, or tied true, as in a simulation or a
++ * machine without feedback): there is nothing to wait for.
++ */
++bool emcSpindleStopRestoreAtSpeed(int spindle, unsigned int seq)
++{
++    if (spindle < 0 || spindle >= EMCMOT_MAX_SPINDLES) {
++        return true;
++    }
++    const auto &status = emcmotStatus.spindle_status[spindle];
++    return status.stop_restore_seq != seq && status.at_speed &&
++        (status.stop_restore_atspeed_dropped || !status.atspeed_feedback);
  }
  
  int emcSpindleBrakeRelease(int spindle)
-@@ -2137,6 +2162,9 @@ int emcSpindleUpdate(EMC_SPINDLE_STAT stat[], int num_spindles){
+@@ -2137,6 +2189,9 @@ int emcSpindleUpdate(EMC_SPINDLE_STAT stat[], int num_spindles){
  		stat[s].orient_state = emcmotStatus.spindle_status[s].orient_state;
  		stat[s].orient_fault = emcmotStatus.spindle_status[s].orient_fault;
  		stat[s].spindle_scale = emcmotStatus.spindle_status[s].scale;
@@ -1468,10 +1621,10 @@ index 1d0cb6e..65b890a 100644
      counts = new_halui_data.mv_counts;
 diff --git a/tests/resumable-stop/README b/tests/resumable-stop/README
 new file mode 100644
-index 0000000..e5da45f
+index 0000000..29da7fe
 --- /dev/null
 +++ b/tests/resumable-stop/README
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,51 @@
 +Verify resumable Stop preserves an active AUTO program and resumes or
 +single-steps it.
 +
@@ -1507,6 +1660,20 @@ index 0000000..e5da45f
 +for G33 and checks that the program then runs on without single-stepping.
 +The g95-between-g33 scenario stops during a G95 move between two G33 moves
 +and checks that the second G33 waits for a fresh spindle index after Resume.
++The command-after-sync scenario stops during a G33 followed by M5, an S-word
++or M9, and during a rigid tap followed by M5, and checks that the command
++takes effect after Resume, in program order.
++The resume-atspeed scenario checks that Resume, and Single Step from STOPPED,
++wait in STARTING until the restored spindle reports at-speed before motion
++continues: not at all while spindle.0.at-speed has never read false with the
++spindle on (tied true), until at-speed goes true when it was false while
++stopped, and, when at-speed stayed true through the Stop, until it has
++dropped after the restore and come back. It also checks that a second Stop
++returns to STOPPED and that Abort ends the program while waiting. Since
++Resume waits for at-speed, rapid-no-atspeed checks that an interrupted rapid
++also waits and that the feed after it still waits for the program's M3
++barrier, and queued-g33 drops and restores at-speed after Resume as a
++spindle would while spinning up.
 +The spindle-state scenario checks that an S-word for a spindle stopped by M5
 +leaves it stopped after a Stop and Resume of the other spindle.
 diff --git a/tests/resumable-stop/after-abort.ngc b/tests/resumable-stop/after-abort.ngc
@@ -1519,15 +1686,68 @@ index 0000000..df711f6
 +F600
 +G1 X6
 +M2
+diff --git a/tests/resumable-stop/after-tap-m5.ngc b/tests/resumable-stop/after-tap-m5.ngc
+new file mode 100644
+index 0000000..f8fa1b5
+--- /dev/null
++++ b/tests/resumable-stop/after-tap-m5.ngc
+@@ -0,0 +1,7 @@
++G21 G18 G90
++G0 X0 Z0
++S300 M3
++G33.1 Z-5 K1
++M5
++G1 X5 F60
++M2
+diff --git a/tests/resumable-stop/after-thread-m5.ngc b/tests/resumable-stop/after-thread-m5.ngc
+new file mode 100644
+index 0000000..db6cb3d
+--- /dev/null
++++ b/tests/resumable-stop/after-thread-m5.ngc
+@@ -0,0 +1,7 @@
++G21 G18 G90
++G0 X0 Z0
++S300 M3
++G33 Z-10 K1
++M5
++G1 X5 F60
++M2
+diff --git a/tests/resumable-stop/after-thread-m9.ngc b/tests/resumable-stop/after-thread-m9.ngc
+new file mode 100644
+index 0000000..30b558d
+--- /dev/null
++++ b/tests/resumable-stop/after-thread-m9.ngc
+@@ -0,0 +1,8 @@
++G21 G18 G90
++G0 X0 Z0
++M8
++S300 M3
++G33 Z-10 K1
++M9
++G1 X5 F60
++M2
+diff --git a/tests/resumable-stop/after-thread-s.ngc b/tests/resumable-stop/after-thread-s.ngc
+new file mode 100644
+index 0000000..336d6be
+--- /dev/null
++++ b/tests/resumable-stop/after-thread-s.ngc
+@@ -0,0 +1,7 @@
++G21 G18 G90
++G0 X0 Z0
++S300 M3
++G33 Z-10 K1
++S500
++G1 X5 F60
++M2
 diff --git a/tests/resumable-stop/checkresult b/tests/resumable-stop/checkresult
 new file mode 100755
-index 0000000..c40d14c
+index 0000000..5586b64
 --- /dev/null
 +++ b/tests/resumable-stop/checkresult
 @@ -0,0 +1,4 @@
 +#!/bin/sh
 +set -e
-+test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 29
++test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 31
 +grep -q '^resumable stop scenarios complete$' "$1"
 diff --git a/tests/resumable-stop/core_sim.hal b/tests/resumable-stop/core_sim.hal
 new file mode 100644
@@ -1724,6 +1944,19 @@ index 0000000..c562a57
 +G1 X90
 +M5
 +M2
+diff --git a/tests/resumable-stop/resume-atspeed.ngc b/tests/resumable-stop/resume-atspeed.ngc
+new file mode 100644
+index 0000000..cf66123
+--- /dev/null
++++ b/tests/resumable-stop/resume-atspeed.ngc
+@@ -0,0 +1,7 @@
++G21 G90
++G0 X0
++F60
++S300 M3
++G1 X4
++M5
++M2
 diff --git a/tests/resumable-stop/single-step.ngc b/tests/resumable-stop/single-step.ngc
 new file mode 100644
 index 0000000..8955e51
@@ -1786,10 +2019,10 @@ index 0000000..3060ac4
 +M2
 diff --git a/tests/resumable-stop/test-ui.py b/tests/resumable-stop/test-ui.py
 new file mode 100755
-index 0000000..aa7c6a3
+index 0000000..0b39992
 --- /dev/null
 +++ b/tests/resumable-stop/test-ui.py
-@@ -0,0 +1,1259 @@
+@@ -0,0 +1,1492 @@
 +#!/usr/bin/env python3
 +
 +import math
@@ -1877,8 +2110,10 @@ index 0000000..aa7c6a3
 +        fail("rejected program Stop changed Stop state")
 +
 +
-+def resume_and_wait_for_x_motion(stopped_x, on_poll=None):
++def resume_and_wait_for_x_motion(stopped_x, on_poll=None, on_resume=None):
 +    c.auto(linuxcnc.AUTO_RESUME)
++    if on_resume:
++        on_resume()
 +
 +    saw_restored_spindle = False
 +    saw_restored_coolant = False
@@ -1905,6 +2140,20 @@ index 0000000..aa7c6a3
 +    )
 +
 +    return saw_restored_coolant
++
++
++def spin_up_after_restore(message):
++    # at-speed has read false with the spindle on earlier, so after a Stop
++    # restore task waits for at-speed to drop and come back, as a real
++    # spindle reports it while spinning up again.
++    wait_for(
++        lambda: s.stop_state == linuxcnc.STOP_STARTING
++        and hal.get_value("spindle.0.on"),
++        "%s: Resume did not restore the spindle and wait for at-speed" % message,
++    )
++    hal.set_p("spindle.0.at-speed", "false")
++    time.sleep(0.05)
++    hal.set_p("spindle.0.at-speed", "true")
 +
 +
 +def run_ordinary_stop_resume_test():
@@ -2044,11 +2293,26 @@ index 0000000..aa7c6a3
 +    stopped_x = s.position[0]
 +    c.auto(linuxcnc.AUTO_RESUME)
 +
++    # Resume waits for the restored spindle to report at-speed before any
++    # motion continues, also an interrupted rapid.
++    wait_for(
++        lambda: s.stop_state == linuxcnc.STOP_STARTING
++        and hal.get_value("spindle.0.speed-out") > 0.0,
++        "Resume did not restore the spindle and wait for at-speed",
++    )
++    time.sleep(0.25)
++    s.poll()
++    if s.stop_state != linuxcnc.STOP_STARTING or \
++            abs(s.position[0] - stopped_x) > 0.001:
++        fail("rapid resumed before the restored spindle was at speed")
++    hal.set_p("spindle.0.at-speed", "true")
 +    wait_for(
 +        lambda: s.stop_state == linuxcnc.STOP_IDLE
 +        and s.position[0] > stopped_x + 0.05,
-+        "rapid resume incorrectly waited for spindle at-speed",
++        "rapid did not resume once the spindle was at speed",
 +    )
++    # The program's own M3 barrier still holds the following feed.
++    hal.set_p("spindle.0.at-speed", "false")
 +
 +    wait_for(
 +        lambda: math.isclose(s.position[0], 80.0, abs_tol=0.05)
@@ -2368,7 +2632,9 @@ index 0000000..aa7c6a3
 +    if not math.isclose(s.position[2], 0.0, abs_tol=0.001):
 +        fail("queued G33 moved while stopped: Z=%.6f" % s.position[2])
 +
-+    resume_and_wait_for_x_motion(s.position[0])
++    resume_and_wait_for_x_motion(
++        s.position[0],
++        on_resume=lambda: spin_up_after_restore("queued G33"))
 +    wait_for_program_complete(10.0, expected_z=-5.0)
 +    assert_outputs_stopped_after_program()
 +
@@ -2517,8 +2783,24 @@ index 0000000..aa7c6a3
 +
 +    c.auto(linuxcnc.AUTO_RESUME)
 +    wait_for(
-+        lambda: s.stop_state == linuxcnc.STOP_IDLE
-+        and s.exec_state != linuxcnc.EXEC_WAITING_FOR_DELAY
++        lambda: s.stop_state == linuxcnc.STOP_STARTING
++        and hal.get_value("spindle.0.speed-out") > 0.0,
++        "Resume did not restore the spindle and wait for at-speed",
++    )
++    # Resume waits for at-speed; once it is reached, the spindle drops out of
++    # speed again before the dwell ends, and the barrier armed by M3 must
++    # still hold the feed.
++    hal.set_p("spindle.0.at-speed", "true")
++    wait_for(
++        lambda: s.stop_state == linuxcnc.STOP_IDLE,
++        "program did not resume once the spindle was at speed",
++    )
++    hal.set_p("spindle.0.at-speed", "false")
++    s.poll()
++    if s.exec_state != linuxcnc.EXEC_WAITING_FOR_DELAY:
++        fail("G4 ended before the test could drop at-speed again")
++    wait_for(
++        lambda: s.exec_state != linuxcnc.EXEC_WAITING_FOR_DELAY
 +        and s.queue > 0,
 +        "feed after G4 was not queued after Resume",
 +    )
@@ -2533,6 +2815,188 @@ index 0000000..aa7c6a3
 +    hal.set_p("spindle.0.at-speed", "true")
 +    wait_for_program_complete(5.0)
 +    assert_outputs_stopped_after_program()
++
++
++def run_command_after_sync_motion_test():
++    # Stop lets a G33 or rigid tap finish. The program's next command (M5,
++    # an S-word or M9) must not run while Stop is still completing: it must
++    # take effect once, after Resume, in program order.
++    cases = (
++        ("after-thread-m5.ngc", lambda: s.position[2] < -1.0 and s.position[2] > -8.0,
++         lambda: not hal.get_value("spindle.0.on"), "M5 after G33"),
++        ("after-thread-s.ngc", lambda: s.position[2] < -1.0 and s.position[2] > -8.0,
++         lambda: hal.get_value("spindle.0.on")
++         and math.isclose(hal.get_value("spindle.0.speed-out"), 500.0, abs_tol=1.0),
++         "S500 after G33"),
++        ("after-thread-m9.ngc", lambda: s.position[2] < -1.0 and s.position[2] > -8.0,
++         lambda: not hal.get_value("iocontrol.0.coolant-flood"), "M9 after G33"),
++        ("after-tap-m5.ngc", lambda: s.position[2] < -1.0,
++         lambda: not hal.get_value("spindle.0.on"), "M5 after G33.1"),
++    )
++    for program, during_sync, expected_after, name in cases:
++        open_auto_program(program)
++        c.auto(linuxcnc.AUTO_RUN, 0)
++        wait_for(
++            lambda: hal.get_value("spindle.0.speed-out") > 0.0 and during_sync(),
++            "%s: synchronized motion did not start" % name,
++            timeout=15.0,
++        )
++        c.program_stop()
++        wait_for(
++            lambda: s.stop_state == linuxcnc.STOP_STOPPED and s.task_paused,
++            "%s: task did not enter STOPPED" % name,
++            timeout=15.0,
++        )
++        if s.position[0] > 0.1:
++            fail("%s: the move after the command started before STOPPED" % name)
++        if hal.get_value("spindle.0.on"):
++            fail("%s: spindle on while STOPPED" % name)
++
++        c.auto(linuxcnc.AUTO_RESUME)
++        wait_for(
++            lambda: s.stop_state == linuxcnc.STOP_IDLE and s.position[0] > 0.5,
++            "%s: program did not resume to the following move" % name,
++        )
++        s.poll()
++        if not expected_after():
++            fail(
++                "%s: outputs after Resume do not match the program: "
++                "spindle.on=%d speed-out=%.1f flood=%d"
++                % (name, hal.get_value("spindle.0.on"),
++                   hal.get_value("spindle.0.speed-out"),
++                   hal.get_value("iocontrol.0.coolant-flood"))
++            )
++        wait_for_program_complete(5.0, expected_z=s.position[2], timeout=15.0)
++
++
++def stop_feed_at(min_x, message):
++    wait_for(
++        lambda: s.stop_state == linuxcnc.STOP_IDLE
++        and hal.get_value("spindle.0.on")
++        and s.current_vel > 0.0
++        and min_x < s.position[0] < 3.5,
++        "%s: feed did not reach X%.1f" % (message, min_x),
++    )
++    c.program_stop()
++    wait_complete("%s: Stop command did not complete" % message)
++    wait_for(
++        lambda: s.stop_state == linuxcnc.STOP_STOPPED and s.task_paused,
++        "%s: task did not enter STOPPED" % message,
++    )
++    if hal.get_value("spindle.0.on"):
++        fail("%s: spindle on while STOPPED" % message)
++    return s.position[0]
++
++
++def assert_held_in_starting(stopped_x, message, hold=0.4):
++    # The spindle is back on, but motion must not continue before at-speed.
++    wait_for(
++        lambda: s.stop_state == linuxcnc.STOP_STARTING
++        and hal.get_value("spindle.0.on")
++        and hal.get_value("spindle.0.speed-out") > 0.0,
++        "%s: Resume did not restore the spindle and wait in STARTING" % message,
++    )
++    time.sleep(hold)
++    s.poll()
++    if s.stop_state != linuxcnc.STOP_STARTING:
++        fail("%s: left STARTING before spindle at-speed" % message)
++    if abs(s.position[0] - stopped_x) > 0.001:
++        fail("%s: feed moved before spindle at-speed: %.6f -> %.6f"
++             % (message, stopped_x, s.position[0]))
++
++
++def wait_resumed_after_atspeed(stopped_x, message):
++    wait_for(
++        lambda: s.stop_state == linuxcnc.STOP_IDLE
++        and s.position[0] > stopped_x + 0.05,
++        "%s: feed did not continue once the spindle was at speed" % message,
++    )
++
++
++def run_resume_atspeed_wait_test():
++    # Resume restarts an interrupted feed only once the restored spindle
++    # reports at-speed again, and an at-speed left over from the stopped
++    # spindle does not count.
++    open_auto_program("resume-atspeed.ngc")
++    c.auto(linuxcnc.AUTO_RUN, 0)
++
++    # 1. at-speed has never read false with the spindle on (tied true, as in
++    # a simulation or a machine without feedback): Resume does not wait.
++    stopped_x = stop_feed_at(0.3, "tied at-speed")
++    c.auto(linuxcnc.AUTO_RESUME)
++    wait_for(
++        lambda: s.stop_state == linuxcnc.STOP_IDLE
++        and s.position[0] > stopped_x + 0.05,
++        "tied at-speed: Resume waited although at-speed never dropped",
++        timeout=3.0,
++    )
++
++    # 2. at-speed false while stopped (a speed-reached output): the feed
++    # waits in STARTING until it goes true.
++    stopped_x = stop_feed_at(stopped_x + 0.3, "at-speed false while stopped")
++    hal.set_p("spindle.0.at-speed", "false")
++    c.auto(linuxcnc.AUTO_RESUME)
++    assert_held_in_starting(stopped_x, "at-speed false while stopped")
++    hal.set_p("spindle.0.at-speed", "true")
++    wait_resumed_after_atspeed(stopped_x, "at-speed false while stopped")
++
++    # 3. at-speed true throughout the Stop (a stopped spindle reported as at
++    # speed, or a VFD that reports late): the stale true does not release
++    # the feed; at-speed must drop after the restore and come back.
++    stopped_x = stop_feed_at(stopped_x + 0.3, "stale at-speed")
++    c.auto(linuxcnc.AUTO_RESUME)
++    assert_held_in_starting(stopped_x, "stale at-speed")
++    hal.set_p("spindle.0.at-speed", "false")
++    assert_held_in_starting(stopped_x, "stale at-speed, then false", hold=0.2)
++    hal.set_p("spindle.0.at-speed", "true")
++    wait_resumed_after_atspeed(stopped_x, "stale at-speed")
++
++    # 4. A second Stop while waiting leaves STARTING for STOPPED with the
++    # spindle off; Single Step from there waits for at-speed again.
++    stopped_x = stop_feed_at(stopped_x + 0.3, "Stop while waiting")
++    c.auto(linuxcnc.AUTO_RESUME)
++    assert_held_in_starting(stopped_x, "Stop while waiting")
++    c.program_stop()
++    wait_complete("Stop while waiting: Stop command did not complete")
++    wait_for(
++        lambda: s.stop_state == linuxcnc.STOP_STOPPED
++        and not hal.get_value("spindle.0.on"),
++        "Stop while waiting: second Stop did not return to STOPPED",
++    )
++    c.auto(linuxcnc.AUTO_STEP)
++    assert_held_in_starting(stopped_x, "Step after Stop while waiting")
++    hal.set_p("spindle.0.at-speed", "false")
++    time.sleep(0.05)
++    hal.set_p("spindle.0.at-speed", "true")
++    wait_for(
++        lambda: s.stop_state == linuxcnc.STOP_IDLE
++        and math.isclose(s.position[0], 4.0, abs_tol=0.001)
++        and abs(s.current_vel) < 1e-9
++        and s.task_paused,
++        "Step after Stop while waiting: feed did not step to its end",
++    )
++    c.auto(linuxcnc.AUTO_RESUME)
++    wait_for_program_complete(4.0)
++    assert_outputs_stopped_after_program()
++
++    # 5. Abort while waiting ends the program cleanly.
++    open_auto_program("resume-atspeed.ngc")
++    c.auto(linuxcnc.AUTO_RUN, 0)
++    stopped_x = stop_feed_at(0.3, "Abort while waiting")
++    c.auto(linuxcnc.AUTO_RESUME)
++    assert_held_in_starting(stopped_x, "Abort while waiting")
++    c.abort()
++    wait_for(
++        lambda: s.stop_state == linuxcnc.STOP_IDLE
++        and s.interp_state == linuxcnc.INTERP_IDLE
++        and s.queue == 0
++        and not hal.get_value("spindle.0.on"),
++        "Abort while waiting did not end the program",
++    )
++    time.sleep(0.25)
++    s.poll()
++    if abs(s.position[0] - stopped_x) > 0.001:
++        fail("Abort while waiting: the feed moved")
 +
 +
 +def run_multi_spindle_stop_resume_test():
@@ -2871,7 +3335,7 @@ index 0000000..aa7c6a3
 +
 +    c.auto(linuxcnc.AUTO_RESUME)
 +    wait_for(
-+        lambda: s.stop_state == linuxcnc.STOP_IDLE
++        lambda: s.stop_state != linuxcnc.STOP_STOPPED
 +        and hal.get_value("spindle.0.speed-out") > 0.0,
 +        "Resume did not restore the spindle",
 +    )
@@ -3030,6 +3494,8 @@ index 0000000..aa7c6a3
 +    "orientation": run_spindle_orientation_stop_test,
 +    "dwell": run_dwell_stop_resume_test,
 +    "dwell-atspeed": run_dwell_atspeed_barrier_test,
++    "command-after-sync": run_command_after_sync_motion_test,
++    "resume-atspeed": run_resume_atspeed_wait_test,
 +    "multi-spindle": run_multi_spindle_stop_resume_test,
 +    "css": run_css_stop_resume_test,
 +    "homing": run_homing_stop_resume_test,
@@ -3170,10 +3636,10 @@ index 0000000..416044b
 +M2
 diff --git a/tests/resumable-stop/test.sh b/tests/resumable-stop/test.sh
 new file mode 100755
-index 0000000..6c37e51
+index 0000000..c70a720
 --- /dev/null
 +++ b/tests/resumable-stop/test.sh
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,74 @@
 +#!/bin/bash -e
 +
 +set -o pipefail
@@ -3199,6 +3665,8 @@ index 0000000..6c37e51
 +    orientation
 +    dwell
 +    dwell-atspeed
++    command-after-sync
++    resume-atspeed
 +    multi-spindle
 +    css
 +    homing

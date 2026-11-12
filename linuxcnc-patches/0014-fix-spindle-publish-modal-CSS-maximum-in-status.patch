@@ -40,10 +40,10 @@ index 513c932..d6e8437 100644
  
  template <class MSG=EMC_SPINDLE_ON>
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index dc34e1a..ba88a24 100644
+index f8ffe7c..7923ce4 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -970,7 +970,7 @@ static void emcTaskStopProgress()
+@@ -1016,7 +1016,7 @@ static void emcTaskStopProgress()
          bool spindle_output_active = false;
          for (int s = 0; s < emcStatus->motion.traj.spindles; ++s) {
              const auto &status = emcStatus->motion.spindle[s];
@@ -53,10 +53,10 @@ index dc34e1a..ba88a24 100644
                  stop_spindles[s].running = spindle_running;
                  stop_spindles[s].speed = status.speed;
 diff --git a/src/emc/task/taskintf.cc b/src/emc/task/taskintf.cc
-index 533265a..4ea2592 100644
+index 3328659..aa63ab4 100644
 --- a/src/emc/task/taskintf.cc
 +++ b/src/emc/task/taskintf.cc
-@@ -2157,7 +2157,7 @@ int emcSpindleUpdate(EMC_SPINDLE_STAT stat[], int num_spindles){
+@@ -2184,7 +2184,7 @@ int emcSpindleUpdate(EMC_SPINDLE_STAT stat[], int num_spindles){
  
      for (s = 0; s < num_spindles; s++){
  		stat[s].spindle_override_enabled = enables & SS_ENABLED;
