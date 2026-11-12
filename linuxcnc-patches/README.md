@@ -643,3 +643,21 @@ are not supported.
 
 Known limitation, shared with the existing thread `tmax` and `time` handling:
 a failure while creating the parameters leaves a partially created thread.
+
+### 0024 — Drop interrupted MDI call state on every interpreter reset
+
+An MDI command whose remap or O-word call has to wait for its queue to drain
+leaves task with continuation state that resumes the call once the queue is
+empty. Only some abort paths cleared it: E-stop, machine off, a mode change
+to MDI or AUTO, a drop out of the ON state and an `EMC_TASK_PLAN_INIT` reset
+or re-initialise the interpreter, which unwinds the call, but kept the state.
+When the machine was back in MDI, task resumed a call that no longer existed,
+which crashed milltask in `Interp::execute_call()` for a Python remap and
+left an NGC remap's MDI command hanging. Commands queued behind it also
+survived and ran after the machine was re-enabled; they are now dropped.
+
+`emcTaskAbort()` now runs `mdi_execute_abort()` after its interpreter reset,
+and `EMC_TASK_PLAN_INIT` runs it before re-initialising the interpreter.
+`tests/remap/mdi-remap-abort` interrupts a waiting NGC and Python remap with
+each of these and checks that MDI still works. The bug is present in plain
+v2.10.0-pre2; the fix touches only upstream code paths.
