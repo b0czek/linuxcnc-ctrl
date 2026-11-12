@@ -9,27 +9,13 @@ The series is based on the LinuxCNC checkout currently used by this workspace:
 
 - Repository: <https://github.com/LinuxCNC/linuxcnc>
 - Revision: the commit recorded in [`base-revision`](./base-revision)
-- Version line: LinuxCNC 2.10 development
+- Version line: LinuxCNC 2.10, tag `v2.10.0-pre2`
 
 `base-revision` is the single source of truth used by the stack tooling and
 CI. Patch files remain the reviewable source of truth in this repository, but
 they are materialized into LinuxCNC as a linear Git history with exactly one
 commit per patch. Changing the baseline requires rebasing and validating the
 complete series.
-
-## Migration to v2.10.0-pre2 (in progress)
-
-This branch moves the series from the previous base (`888cb941fbf23ee32fc8e15ca180997d99a39117`) to the
-`v2.10.0-pre2` tag.
-
-- Patches in this directory have been ported and apply to the new base.
-- Patches still waiting to be ported are kept unchanged under
-  [`pending-pre2/`](./pending-pre2). They apply only to the previous base and
-  the tooling ignores them.
-- A patch leaves `pending-pre2/` when its port is accepted. It keeps its number
-  and filename.
-
-Remove this section and the directory once `pending-pre2/` is empty.
 
 ## Continuous integration
 
@@ -510,6 +496,12 @@ Availability-controlled joints cannot define `HOME_SEQUENCE`; Home All skips
 unavailable controlled joints and continues with its ordinary sequence.
 Controlled joints are homed individually only by acquisition and reject user
 HOME and UNHOME commands, so AVAILABLE implies a valid homed state.
+Acquisition homing uses the home cycle LinuxCNC provides for `G28.2`: task
+queues the joint home, waits in its homing state with the usual start timeout,
+and restores the task mode afterwards. Abort, E-stop and Machine Off cancel it
+as they cancel a `G28.2`, and a resumable Stop (patch 0004) during it is
+accepted and stays `STOPPING` until homing ends. A failed acquisition homing
+reports the `G28.2` homing messages; the motion fault code is set as before.
 Other resources can continue operating while a joint or spindle is released.
 Coordinated and teleop motion are permitted only when inverse kinematics leaves
 every unavailable joint at its held command position. Commands requiring an
@@ -569,6 +561,13 @@ into an active global sequence. Duplicate requests for an active joint are
 rejected. An abort or homing error affects only that joint during independent
 homing, while sequence-controlled operations preserve their group-wide abort
 behavior. No NML or protobuf interface changes are required.
+
+On v2.10.0-pre2 an independently homed joint finishes upstream's bounded
+homing return on its own, without waiting for other joints. A `G28.2` for one
+joint completes when the aggregate homing status clears, so it also waits for
+any other joint homing at the same time. Acquisition homing (patch 0017) and
+independent user homing never overlap: each refuses to start while the other
+is active.
 
 ### 0020 — Native lathe power jogging
 

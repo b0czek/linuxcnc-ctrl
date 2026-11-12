@@ -1,0 +1,607 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dariusz Majnert <dariusz.majnert@gmail.com>
+Date: Tue, 22 Sep 2026 21:15:00 +0200
+Subject: [PATCH] hal: expose native thread period statistics
+
+Ported to the getter/setter HAL API of v2.10.0-pre2. The statistics are
+now sint parameters (64-bit, printed in decimal by halcmd) instead of u32
+and s64 ones, and stats-reset is a bool parameter. The measurement keeps
+its values in the thread structure and publishes them to the parameters
+once per cycle.
+---
+ docs/src/hal/basic-hal.adoc                   |  23 ++++
+ src/hal/hal_lib.c                             |  98 +++++++++++++++
+ src/hal/hal_period_stats.h                    | 118 ++++++++++++++++++
+ src/hal/hal_priv.h                            |   7 +-
+ tests/halmodule/halquery/expected             |  16 +++
+ tests/save.0/expected                         |   1 +
+ .../arithmetic.c                              | 109 ++++++++++++++++
+ tests/thread-period-stats-arithmetic/expected |   0
+ tests/thread-period-stats-arithmetic/test.sh  |   9 ++
+ tests/thread-period-stats/README              |   4 +
+ tests/thread-period-stats/checkresult         |  29 +++++
+ tests/thread-period-stats/test.hal            |  11 ++
+ 12 files changed, 424 insertions(+), 1 deletion(-)
+ create mode 100644 src/hal/hal_period_stats.h
+ create mode 100644 tests/thread-period-stats-arithmetic/arithmetic.c
+ create mode 100644 tests/thread-period-stats-arithmetic/expected
+ create mode 100644 tests/thread-period-stats-arithmetic/test.sh
+ create mode 100644 tests/thread-period-stats/README
+ create mode 100755 tests/thread-period-stats/checkresult
+ create mode 100644 tests/thread-period-stats/test.hal
+
+diff --git a/docs/src/hal/basic-hal.adoc b/docs/src/hal/basic-hal.adoc
+index 5cf2078..667f4be 100644
+--- a/docs/src/hal/basic-hal.adoc
++++ b/docs/src/hal/basic-hal.adoc
+@@ -383,6 +383,29 @@ These allow you to scope the execution time of a component.
+ 
+ `tmax` is a read/write parameter so the user can set it to 0 to get rid of the first time initialization on the function's execution time.
+ 
++[[sec:hal-thread-parameters]]
++== HAL Thread Parameters
++
++(((HAL Thread Parameters)))
++Each realtime thread measures the interval between the starts of consecutive
++cycles and publishes the results as parameters named after the thread, for
++example `servo-thread.period-max`.
++All times are in nanoseconds.
++
++[horizontal]
++`.period-target` (sint, RO):: Configured period.
++`.period-last`, `.period-min`, `.period-max`, `.period-avg` (sint, RO):: Latest, shortest, longest and average measured interval.
++`.jitter`, `.jitter-avg`, `.jitter-max` (sint, RO):: Latest, average and largest absolute difference between the measured interval and the configured period.
++`.exec-avg`, `.exec-max` (sint, RO):: Average and longest time to run the thread's functions.
++`.outlier-q`, `.outlier-h` (sint, RO):: Number of intervals whose jitter was at least a quarter or a half of the period.
++`.outlier-at` (sint, RO):: Value of `samples` at the latest quarter-period outlier.
++`.missed` (sint, RO):: Number of intervals longer than two periods.
++`.samples` (sint, RO):: Number of measured intervals.
++`.stats-reset` (bool, RW):: Set to true to clear the statistics. The thread clears them, and this parameter, at the start of its next cycle.
++
++The first cycle and intervals during which threads were stopped are not measured.
++Thread names longer than 41 characters leave no room for the parameter suffixes, so such threads are created without statistics and a warning is logged.
++
+ [[sec:hal-logic-components]]
+ == Basic Logic Components
+ 
+diff --git a/src/hal/hal_lib.c b/src/hal/hal_lib.c
+index 0839355..2820c07 100644
+--- a/src/hal/hal_lib.c
++++ b/src/hal/hal_lib.c
+@@ -2093,6 +2093,72 @@ int hal_export_funct(const char *name, void (*funct) (void *, long),
+     return 0;
+ }
+ 
++/* Parameter name suffixes of the period statistics, indexed by
++   enum hal_period_stat. */
++static const char *const period_stat_names[HAL_PERIOD_STAT_COUNT] = {
++    [HAL_PERIOD_STAT_PERIOD_TARGET] = "period-target",
++    [HAL_PERIOD_STAT_PERIOD_LAST]   = "period-last",
++    [HAL_PERIOD_STAT_PERIOD_MIN]    = "period-min",
++    [HAL_PERIOD_STAT_PERIOD_MAX]    = "period-max",
++    [HAL_PERIOD_STAT_JITTER]        = "jitter",
++    [HAL_PERIOD_STAT_PERIOD_AVG]    = "period-avg",
++    [HAL_PERIOD_STAT_JITTER_AVG]    = "jitter-avg",
++    [HAL_PERIOD_STAT_JITTER_MAX]    = "jitter-max",
++    [HAL_PERIOD_STAT_EXEC_AVG]      = "exec-avg",
++    [HAL_PERIOD_STAT_EXEC_MAX]      = "exec-max",
++    [HAL_PERIOD_STAT_OUTLIER_Q]     = "outlier-q",
++    [HAL_PERIOD_STAT_OUTLIER_H]     = "outlier-h",
++    [HAL_PERIOD_STAT_OUTLIER_AT]    = "outlier-at",
++    [HAL_PERIOD_STAT_MISSED]        = "missed",
++    [HAL_PERIOD_STAT_SAMPLES]       = "samples",
++};
++#define PERIOD_STATS_RESET_NAME "stats-reset"
++
++/* Create the period statistic parameters of a thread. Returns 0 when they
++   were created, 1 when the thread name leaves no room for their suffixes,
++   or a negative error code. */
++static int create_period_stat_params(hal_thread_t *thread)
++{
++    size_t longest_suffix = strlen(PERIOD_STATS_RESET_NAME);
++    int i, retval;
++
++    for (i = 0; i < HAL_PERIOD_STAT_COUNT; i++) {
++        if (strlen(period_stat_names[i]) > longest_suffix)
++            longest_suffix = strlen(period_stat_names[i]);
++    }
++    /* "<thread>.<suffix>"; ".period-target" is the longest at 14
++       characters, so thread names of up to HAL_NAME_LEN - 14 = 41
++       characters receive statistics. */
++    if (strlen(thread->name) + 1 + longest_suffix > HAL_NAME_LEN) {
++        rtapi_print_msg(RTAPI_MSG_WARN,
++            "HAL: thread '%s' name is too long for period statistics\n",
++            thread->name);
++        return 1;
++    }
++
++    thread->period_stats.value[HAL_PERIOD_STAT_PERIOD_TARGET] = thread->period;
++    for (i = 0; i < HAL_PERIOD_STAT_COUNT; i++) {
++        if ((retval = hal_param_new_sint(thread->comp_id, HAL_RO,
++                &(thread->period_stat_params[i]),
++                thread->period_stats.value[i],
++                "%s.%s", thread->name, period_stat_names[i])) < 0) {
++            rtapi_print_msg(RTAPI_MSG_ERR,
++                "HAL: ERROR: fail to create param '%s.%s'\n",
++                thread->name, period_stat_names[i]);
++            return retval;
++        }
++    }
++    if ((retval = hal_param_new_bool(thread->comp_id, HAL_RW,
++            &(thread->period_stats_reset), 0,
++            "%s." PERIOD_STATS_RESET_NAME, thread->name)) < 0) {
++        rtapi_print_msg(RTAPI_MSG_ERR,
++            "HAL: ERROR: fail to create param '%s." PERIOD_STATS_RESET_NAME "'\n",
++            thread->name);
++        return retval;
++    }
++    return 0;
++}
++
+ int hal_create_thread(const char *name, unsigned long period_nsec)
+ {
+     int next, cmp, prev_priority;
+@@ -2269,6 +2335,12 @@ int hal_create_thread(const char *name, unsigned long period_nsec)
+         return retval;
+     }
+ 
++    // A name too long for the statistics still creates the thread.
++    if ((retval = create_period_stat_params(new)) < 0) {
++        return retval;
++    }
++    new->period_stats_published = (retval == 0);
++
+     hal_ready(new->comp_id);
+ 
+     rtapi_print_msg(RTAPI_MSG_DBG, "HAL: thread created\n");
+@@ -3187,6 +3259,7 @@ static void thread_task(void *arg)
+     hal_funct_entry_t *funct_root, *funct_entry;
+     long long int start_time, end_time;
+     long long int thread_start_time;
++    int recorded_sample;
+ 
+     thread = arg;
+     while (1) {
+@@ -3210,6 +3283,8 @@ static void thread_task(void *arg)
+                 funct_entry = SHMPTR(funct_entry->links.next);
+             }
+             rtapi_task_self_resync();
++            /* the init cycle and the resync are not a measured interval */
++            thread->period_stats.previous_start_ns = 0;
+             thread->init_done = 1;
+             /* drain the list now that the init pass is complete */
+             funct_entry = SHMPTR(funct_root->links.next);
+@@ -3227,6 +3302,14 @@ static void thread_task(void *arg)
+ 	    start_time = rtapi_get_time();
+ 	    end_time = start_time;
+ 	    thread_start_time = start_time;
++	    recorded_sample = 0;
++	    if (thread->period_stats_published) {
++	        if (hal_get_bool(thread->period_stats_reset)) {
++	            hal_period_stats_clear(&thread->period_stats);
++	            hal_set_bool(thread->period_stats_reset, 0);
++	        }
++	        recorded_sample = hal_period_stats_record_start(&thread->period_stats, thread_start_time);
++	    }
+ 	    /* run thru function list */
+ 	    while (funct_entry != funct_root) {
+ 		/* call the function */
+@@ -3254,6 +3337,20 @@ static void thread_task(void *arg)
+ 	        hal_set_si32(thread->maxtime, runtime);
+ 	    }
+             hal_set_sint(thread->threadbeat, ++thread->beatcnt);
++	    if (thread->period_stats_published) {
++	        int i;
++	        if (recorded_sample) {
++	            hal_period_stats_record_execution(&thread->period_stats,
++	                end_time - thread_start_time);
++	        }
++	        for (i = 0; i < HAL_PERIOD_STAT_COUNT; i++) {
++	            hal_set_sint(thread->period_stat_params[i],
++	                thread->period_stats.value[i]);
++	        }
++	    }
++	} else {
++	    /* intervals while threads are stopped are not measured */
++	    thread->period_stats.previous_start_ns = 0;
+ 	}
+ 	/* wait until next period */
+ 	rtapi_wait();
+@@ -3613,6 +3710,7 @@ static hal_thread_t *alloc_thread_struct(void)
+     }
+     if (p) {
+ 	/* make sure it's empty */
++	memset(p, 0, sizeof(*p));
+ 	p->next_ptr = 0;
+ 	p->period = 0;
+ 	p->priority = 0;
+diff --git a/src/hal/hal_period_stats.h b/src/hal/hal_period_stats.h
+new file mode 100644
+index 0000000..f38db05
+--- /dev/null
++++ b/src/hal/hal_period_stats.h
+@@ -0,0 +1,118 @@
++#ifndef HAL_PERIOD_STATS_H
++#define HAL_PERIOD_STATS_H
++
++/* Thread period statistics, measured by the HAL thread task and published
++   as <thread>.<suffix> parameters by hal_lib.c. This header only does the
++   arithmetic on plain values, so it can be used from a kernel module and
++   tested without HAL. Times are in nanoseconds. */
++
++#include <rtapi_stdint.h>
++
++enum hal_period_stat {
++    HAL_PERIOD_STAT_PERIOD_TARGET,
++    HAL_PERIOD_STAT_PERIOD_LAST,
++    HAL_PERIOD_STAT_PERIOD_MIN,
++    HAL_PERIOD_STAT_PERIOD_MAX,
++    HAL_PERIOD_STAT_JITTER,
++    HAL_PERIOD_STAT_PERIOD_AVG,
++    HAL_PERIOD_STAT_JITTER_AVG,
++    HAL_PERIOD_STAT_JITTER_MAX,
++    HAL_PERIOD_STAT_EXEC_AVG,
++    HAL_PERIOD_STAT_EXEC_MAX,
++    HAL_PERIOD_STAT_OUTLIER_Q,
++    HAL_PERIOD_STAT_OUTLIER_H,
++    HAL_PERIOD_STAT_OUTLIER_AT,
++    HAL_PERIOD_STAT_MISSED,
++    HAL_PERIOD_STAT_SAMPLES,
++    HAL_PERIOD_STAT_COUNT
++};
++
++typedef struct {
++    rtapi_sint value[HAL_PERIOD_STAT_COUNT];
++    rtapi_s64 previous_start_ns;    /* 0: no interval start to measure from */
++    rtapi_u64 period_sum_ns;
++    rtapi_u64 jitter_sum_ns;
++    rtapi_u64 execution_sum_ns;
++} hal_period_stats_t;
++
++/* Clear everything except the configured period. The next interval is
++   measured from the next start, not from the one before the clear. */
++static inline void hal_period_stats_clear(hal_period_stats_t *stats)
++{
++    int i;
++
++    for (i = 0; i < HAL_PERIOD_STAT_COUNT; i++) {
++        if (i != HAL_PERIOD_STAT_PERIOD_TARGET)
++            stats->value[i] = 0;
++    }
++    stats->previous_start_ns = 0;
++    stats->period_sum_ns = 0;
++    stats->jitter_sum_ns = 0;
++    stats->execution_sum_ns = 0;
++}
++
++static inline void hal_period_stats_saturating_increment(rtapi_sint *value)
++{
++    if (*value < RTAPI_SINT_MAX)
++        (*value)++;
++}
++
++/* Record the start of a cycle. Returns nonzero when the interval since the
++   previous start was measured, so the cycle's execution time is recorded
++   too. */
++static inline int hal_period_stats_record_start(hal_period_stats_t *stats,
++                                                rtapi_s64 start_ns)
++{
++    rtapi_sint *value = stats->value;
++    rtapi_u64 period = value[HAL_PERIOD_STAT_PERIOD_TARGET];
++    rtapi_u64 actual_period, jitter;
++    int recorded = 0;
++
++    if (stats->previous_start_ns > 0 && start_ns >= stats->previous_start_ns) {
++        actual_period = start_ns - stats->previous_start_ns;
++        jitter = actual_period > period
++            ? actual_period - period : period - actual_period;
++        value[HAL_PERIOD_STAT_PERIOD_LAST] = actual_period;
++        value[HAL_PERIOD_STAT_JITTER] = jitter;
++        if (value[HAL_PERIOD_STAT_SAMPLES] == 0 ||
++                actual_period < (rtapi_u64)value[HAL_PERIOD_STAT_PERIOD_MIN])
++            value[HAL_PERIOD_STAT_PERIOD_MIN] = actual_period;
++        if (actual_period > (rtapi_u64)value[HAL_PERIOD_STAT_PERIOD_MAX])
++            value[HAL_PERIOD_STAT_PERIOD_MAX] = actual_period;
++        if (jitter > (rtapi_u64)value[HAL_PERIOD_STAT_JITTER_MAX])
++            value[HAL_PERIOD_STAT_JITTER_MAX] = jitter;
++        hal_period_stats_saturating_increment(&value[HAL_PERIOD_STAT_SAMPLES]);
++        recorded = 1;
++        stats->period_sum_ns += actual_period;
++        stats->jitter_sum_ns += jitter;
++        value[HAL_PERIOD_STAT_PERIOD_AVG] =
++            stats->period_sum_ns / (rtapi_u64)value[HAL_PERIOD_STAT_SAMPLES];
++        value[HAL_PERIOD_STAT_JITTER_AVG] =
++            stats->jitter_sum_ns / (rtapi_u64)value[HAL_PERIOD_STAT_SAMPLES];
++        if (jitter >= (period + 3) / 4) {
++            hal_period_stats_saturating_increment(&value[HAL_PERIOD_STAT_OUTLIER_Q]);
++            value[HAL_PERIOD_STAT_OUTLIER_AT] = value[HAL_PERIOD_STAT_SAMPLES];
++        }
++        if (jitter >= (period + 1) / 2)
++            hal_period_stats_saturating_increment(&value[HAL_PERIOD_STAT_OUTLIER_H]);
++        if (actual_period > period * 2)
++            hal_period_stats_saturating_increment(&value[HAL_PERIOD_STAT_MISSED]);
++    }
++    stats->previous_start_ns = start_ns;
++    return recorded;
++}
++
++/* Record the execution time of a cycle whose start was recorded. */
++static inline void hal_period_stats_record_execution(hal_period_stats_t *stats,
++                                                     rtapi_u64 execution_ns)
++{
++    rtapi_sint *value = stats->value;
++
++    if (execution_ns > (rtapi_u64)value[HAL_PERIOD_STAT_EXEC_MAX])
++        value[HAL_PERIOD_STAT_EXEC_MAX] = execution_ns;
++    stats->execution_sum_ns += execution_ns;
++    value[HAL_PERIOD_STAT_EXEC_AVG] =
++        stats->execution_sum_ns / (rtapi_u64)value[HAL_PERIOD_STAT_SAMPLES];
++}
++
++#endif
+diff --git a/src/hal/hal_priv.h b/src/hal/hal_priv.h
+index c465dcc..5196348 100644
+--- a/src/hal/hal_priv.h
++++ b/src/hal/hal_priv.h
+@@ -100,6 +100,7 @@
+ 
+ #include <rtapi.h>
+ #include <rtapi_mutex.h>
++#include "hal_period_stats.h"
+ 
+ /* IMPORTANT:  If any of the structures in this file are changed, the
+    version code (HAL_VER) must be incremented, to ensure that 
+@@ -124,7 +125,7 @@
+ */
+ 
+ #define HAL_KEY   0x48414C32	/* key used to open HAL shared memory */
+-#define HAL_VER   0x00000015	/* version code */
++#define HAL_VER   0x00000016	/* version code */
+ #define HAL_SIZE  (2*256*4096)
+ 
+ /* These pointers are set by hal_init() to point to the shmem block
+@@ -427,6 +428,10 @@ struct hal_thread_t {
+     hal_sint_t maxtime;              // (param) duration of longest run, in ns
+     hal_sint_t threadbeat;           // (pin) visible monotonic loop beat counter
+     rtapi_sint beatcnt;              // Thread monotonic increasing loop beat counter (so we don't need to read/write volatile)
++    hal_period_stats_t period_stats; // period statistics, measured by the thread
++    hal_sint_t period_stat_params[HAL_PERIOD_STAT_COUNT]; // (params) published period_stats values
++    hal_bool_t period_stats_reset;   // (param) clear period_stats on the next cycle
++    int period_stats_published;      // nonzero once the period statistic params exist
+     hal_list_t funct_list;           // list of functions to run
+     hal_list_t init_funct_list;      // list of init functions, run once before first cyclic cycle
+     int init_done;                   // 0 = init pending, 1 = init cycle has executed
+diff --git a/tests/halmodule/halquery/expected b/tests/halmodule/halquery/expected
+index 84bb9e1..892ac12 100644
+--- a/tests/halmodule/halquery/expected
++++ b/tests/halmodule/halquery/expected
+@@ -18,6 +18,22 @@ and2.0.tmax {'haltype': 'parameter', 'name': 'and2.0.tmax', 'type': <Type.SINT>,
+ and2.0.tmax-increased {'haltype': 'parameter', 'name': 'and2.0.tmax-increased', 'type': <Type.BOOL>, 'dir': <Dir.RO>, 'value': False, 'alias': None, 'comp': 'and2', 'comp_id': 'ID'}
+ or2.0.tmax {'haltype': 'parameter', 'name': 'or2.0.tmax', 'type': <Type.SINT>, 'dir': <Dir.RW>, 'value': 0, 'alias': None, 'comp': 'or2', 'comp_id': 'ID'}
+ or2.0.tmax-increased {'haltype': 'parameter', 'name': 'or2.0.tmax-increased', 'type': <Type.BOOL>, 'dir': <Dir.RO>, 'value': False, 'alias': None, 'comp': 'or2', 'comp_id': 'ID'}
++testthread.exec-avg {'haltype': 'parameter', 'name': 'testthread.exec-avg', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.exec-max {'haltype': 'parameter', 'name': 'testthread.exec-max', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.jitter {'haltype': 'parameter', 'name': 'testthread.jitter', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.jitter-avg {'haltype': 'parameter', 'name': 'testthread.jitter-avg', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.jitter-max {'haltype': 'parameter', 'name': 'testthread.jitter-max', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.missed {'haltype': 'parameter', 'name': 'testthread.missed', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.outlier-at {'haltype': 'parameter', 'name': 'testthread.outlier-at', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.outlier-h {'haltype': 'parameter', 'name': 'testthread.outlier-h', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.outlier-q {'haltype': 'parameter', 'name': 'testthread.outlier-q', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.period-avg {'haltype': 'parameter', 'name': 'testthread.period-avg', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.period-last {'haltype': 'parameter', 'name': 'testthread.period-last', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.period-max {'haltype': 'parameter', 'name': 'testthread.period-max', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.period-min {'haltype': 'parameter', 'name': 'testthread.period-min', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.period-target {'haltype': 'parameter', 'name': 'testthread.period-target', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 1000000, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.samples {'haltype': 'parameter', 'name': 'testthread.samples', 'type': <Type.SINT>, 'dir': <Dir.RO>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
++testthread.stats-reset {'haltype': 'parameter', 'name': 'testthread.stats-reset', 'type': <Type.BOOL>, 'dir': <Dir.RW>, 'value': False, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
+ testthread.tmax {'haltype': 'parameter', 'name': 'testthread.tmax', 'type': <Type.SINT>, 'dir': <Dir.RW>, 'value': 0, 'alias': None, 'comp': '__testthread', 'comp_id': 'ID'}
+ xor2.0.tmax {'haltype': 'parameter', 'name': 'xor2.0.tmax', 'type': <Type.SINT>, 'dir': <Dir.RW>, 'value': 0, 'alias': None, 'comp': 'xor2', 'comp_id': 'ID'}
+ xor2.0.tmax-increased {'haltype': 'parameter', 'name': 'xor2.0.tmax-increased', 'type': <Type.BOOL>, 'dir': <Dir.RO>, 'value': False, 'alias': None, 'comp': 'xor2', 'comp_id': 'ID'}
+diff --git a/tests/save.0/expected b/tests/save.0/expected
+index 6b849eb..cfbf203 100644
+--- a/tests/save.0/expected
++++ b/tests/save.0/expected
+@@ -11,6 +11,7 @@ newsig unlinked bool
+ net dir stepgen.0.dir => sampler.0.pin.0
+ net step stepgen.0.step => sampler.0.pin.1
+ # parameter values
++setp fast.stats-reset                FALSE
+ setp fast.tmax                    0
+ setp sampler.0.tmax                    0
+ setp stepgen.0.dirhold   0x0000000000000001
+diff --git a/tests/thread-period-stats-arithmetic/arithmetic.c b/tests/thread-period-stats-arithmetic/arithmetic.c
+new file mode 100644
+index 0000000..1c0b04e
+--- /dev/null
++++ b/tests/thread-period-stats-arithmetic/arithmetic.c
+@@ -0,0 +1,109 @@
++#include <assert.h>
++#include <string.h>
++
++#include "hal_period_stats.h"
++
++#define V(name) (stats.value[HAL_PERIOD_STAT_##name])
++
++int main(void)
++{
++    hal_period_stats_t stats;
++
++    memset(&stats, 0, sizeof(stats));
++    V(PERIOD_TARGET) = 1000000;
++
++    assert(!hal_period_stats_record_start(&stats, 1000000));
++    assert(V(SAMPLES) == 0);
++
++    assert(hal_period_stats_record_start(&stats, 2100000));
++    hal_period_stats_record_execution(&stats, 80000);
++    assert(V(PERIOD_LAST) == 1100000);
++    assert(V(JITTER) == 100000);
++    assert(V(PERIOD_MIN) == 1100000);
++    assert(V(PERIOD_MAX) == 1100000);
++    assert(V(OUTLIER_Q) == 0);
++    assert(V(MISSED) == 0);
++
++    assert(hal_period_stats_record_start(&stats, 3700000));
++    hal_period_stats_record_execution(&stats, 120000);
++    assert(V(SAMPLES) == 2);
++    assert(V(PERIOD_AVG) == 1350000);
++    assert(V(JITTER_AVG) == 350000);
++    assert(V(JITTER_MAX) == 600000);
++    assert(V(OUTLIER_Q) == 1);
++    assert(V(OUTLIER_H) == 1);
++    assert(V(OUTLIER_AT) == 2);
++    assert(V(EXEC_AVG) == 100000);
++    assert(V(EXEC_MAX) == 120000);
++
++    assert(hal_period_stats_record_start(&stats, 6800000));
++    hal_period_stats_record_execution(&stats, 40000);
++    assert(V(SAMPLES) == 3);
++    assert(V(PERIOD_LAST) == 3100000);
++    assert(V(PERIOD_MIN) == 1100000);
++    assert(V(PERIOD_MAX) == 3100000);
++    assert(V(JITTER) == 2100000);
++    assert(V(PERIOD_AVG) == 1933333);
++    assert(V(JITTER_AVG) == 933333);
++    assert(V(JITTER_MAX) == 2100000);
++    assert(V(OUTLIER_Q) == 2);
++    assert(V(OUTLIER_H) == 2);
++    assert(V(OUTLIER_AT) == 3);
++    assert(V(MISSED) == 1);
++    assert(V(EXEC_AVG) == 80000);
++    assert(V(EXEC_MAX) == 120000);
++
++    /* A shorter interval lowers the minimum; a quarter-period outlier that
++       is below half a period counts only as a quarter outlier. */
++    assert(hal_period_stats_record_start(&stats, 7500000));
++    hal_period_stats_record_execution(&stats, 40000);
++    assert(V(PERIOD_MIN) == 700000);
++    assert(V(JITTER) == 300000);
++    assert(V(OUTLIER_Q) == 3);
++    assert(V(OUTLIER_H) == 2);
++    assert(V(OUTLIER_AT) == 4);
++
++    /* A reset clears everything except the target, and the next start only
++       begins a new interval. */
++    hal_period_stats_clear(&stats);
++    assert(V(SAMPLES) == 0);
++    assert(V(PERIOD_MAX) == 0);
++    assert(V(PERIOD_MIN) == 0);
++    assert(V(JITTER_MAX) == 0);
++    assert(V(EXEC_MAX) == 0);
++    assert(V(OUTLIER_Q) == 0);
++    assert(V(MISSED) == 0);
++    assert(V(PERIOD_TARGET) == 1000000);
++    assert(!hal_period_stats_record_start(&stats, 7800000));
++    assert(V(SAMPLES) == 0);
++
++    assert(hal_period_stats_record_start(&stats, 8800000));
++    hal_period_stats_record_execution(&stats, 60000);
++    assert(V(SAMPLES) == 1);
++    assert(V(PERIOD_AVG) == 1000000);
++    assert(V(JITTER_AVG) == 0);
++    assert(V(EXEC_AVG) == 60000);
++
++    /* Values are 64-bit: counts and times beyond 32 bits are kept. */
++    V(SAMPLES) = 4294967295LL;
++    assert(hal_period_stats_record_start(&stats, 9800000));
++    hal_period_stats_record_execution(&stats, 200000);
++    assert(V(SAMPLES) == 4294967296LL);
++    assert(V(EXEC_MAX) == 200000);
++
++    assert(hal_period_stats_record_start(&stats, 9800000 + 5000000000LL));
++    assert(V(PERIOD_LAST) == 5000000000LL);
++    assert(V(PERIOD_MAX) == 5000000000LL);
++
++    /* Counters saturate instead of wrapping. */
++    V(SAMPLES) = RTAPI_SINT_MAX;
++    V(MISSED) = RTAPI_SINT_MAX;
++    assert(hal_period_stats_record_start(&stats, 9800000 + 15000000000LL));
++    assert(V(SAMPLES) == RTAPI_SINT_MAX);
++    assert(V(MISSED) == RTAPI_SINT_MAX);
++
++    /* Time going backwards is not an interval. */
++    assert(!hal_period_stats_record_start(&stats, 1000000));
++
++    return 0;
++}
+diff --git a/tests/thread-period-stats-arithmetic/expected b/tests/thread-period-stats-arithmetic/expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/thread-period-stats-arithmetic/test.sh b/tests/thread-period-stats-arithmetic/test.sh
+new file mode 100644
+index 0000000..09d59c2
+--- /dev/null
++++ b/tests/thread-period-stats-arithmetic/test.sh
+@@ -0,0 +1,9 @@
++#!/bin/sh
++set -eu
++
++test_dir=$(mktemp -d)
++trap 'rm -rf -- "$test_dir"' EXIT
++cc -std=gnu11 -Wall -Wextra -Werror -DULAPI -I"$EMC2_HOME/src/hal" -I"$EMC2_HOME/src/rtapi" \
++    -I"$EMC2_HOME/src" -I"$EMC2_HOME/src/include" \
++    -o "$test_dir/arithmetic" arithmetic.c
++"$test_dir/arithmetic"
+diff --git a/tests/thread-period-stats/README b/tests/thread-period-stats/README
+new file mode 100644
+index 0000000..dd01bec
+--- /dev/null
++++ b/tests/thread-period-stats/README
+@@ -0,0 +1,4 @@
++Period statistics use fixed short suffixes. A 41-character thread name is the
++longest that holds them within HAL_NAME_LEN; a longer valid name still creates
++its thread, without statistics. The sample counter is a 64-bit decimal HAL
++parameter and advances after the thread starts.
+diff --git a/tests/thread-period-stats/checkresult b/tests/thread-period-stats/checkresult
+new file mode 100755
+index 0000000..753ff32
+--- /dev/null
++++ b/tests/thread-period-stats/checkresult
+@@ -0,0 +1,29 @@
++#!/usr/bin/env python3
++import sys
++
++samples = {"servo-thread.samples": [], "period-statistics-boundary-thread-name-41.samples": []}
++resets = {"servo-thread.stats-reset": False, "period-statistics-boundary-thread-name-41.stats-reset": False}
++unpublished = []
++with open(sys.argv[1], encoding="utf-8") as output:
++    for line in output:
++        fields = line.split()
++        if len(fields) < 5:
++            continue
++        if fields[-1] in samples:
++            if fields[1] != "sint" or fields[2] != "RO":
++                raise SystemExit("sample counter has an unexpected type")
++            samples[fields[-1]].append(int(fields[-2], 0))
++        if fields[-1] in resets:
++            resets[fields[-1]] = fields[1] == "bool" and fields[2] == "RW"
++        if fields[-1].startswith("period-statistics-boundary-thread-name-41x."):
++            unpublished.append(fields[-1])
++
++if not all(resets.values()):
++    raise SystemExit("thread reset parameter was not published")
++for name, observed in samples.items():
++    if len(observed) != 2 or observed[0] != 0 or observed[1] <= 0:
++        raise SystemExit("sample counter did not advance after thread start: " + name)
++if any(name not in ("period-statistics-boundary-thread-name-41x.time", "period-statistics-boundary-thread-name-41x.tmax") for name in unpublished):
++    raise SystemExit("statistics published for a name that cannot hold them: " + str(unpublished))
++if "period-statistics-boundary-thread-name-41x.tmax" not in unpublished:
++    raise SystemExit("thread with a long name was not created")
+diff --git a/tests/thread-period-stats/test.hal b/tests/thread-period-stats/test.hal
+new file mode 100644
+index 0000000..452dd58
+--- /dev/null
++++ b/tests/thread-period-stats/test.hal
+@@ -0,0 +1,11 @@
++setexact_for_test_suite_only
++loadrt threads name1=servo-thread period1=1000000 name2=period-statistics-boundary-thread-name-41 period2=2000000 name3=period-statistics-boundary-thread-name-41x period3=2000000
++show param servo-thread.samples
++show param servo-thread.stats-reset
++show param period-statistics-boundary-thread-name-41.samples
++show param period-statistics-boundary-thread-name-41.stats-reset
++show param period-statistics-boundary-thread-name-41x.
++start
++loadusr -w sleep 0.05
++show param servo-thread.samples
++show param period-statistics-boundary-thread-name-41.samples
