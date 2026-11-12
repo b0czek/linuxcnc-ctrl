@@ -1,0 +1,689 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: linuxcnc-node maintainers <maintainers@linuxcnc-node.local>
+Date: Tue, 21 Jul 2026 20:00:00 +0200
+Subject: [PATCH] Complete headless backend-only builds on top of --disable-gui
+
+Upstream's --disable-gui and --disable-manpages configure options provide
+the headless build itself.  Fill in what a backend-only installation
+still needs on top of them:
+
+- Without a GUI, Tcl is optional instead of skipped: when tclConfig.sh is
+  found, the Tcl HAL and LinuxCNC bindings (tcl/hal.so, tcl/linuxcnc.so,
+  built without Tk and Xinerama) and the Tcl runtime used by haltcl, .tcl
+  HAL files and [HAL]TWOPASS are built and installed.  Tk, X11 and the GUI
+  runtime checks are still never needed.
+- The desktop menu entries, which start GUI programs, are not installed.
+- The launcher requires an explicit INI path instead of starting the
+  graphical configuration picker, keeps its output on stdout and stderr
+  when not attached to a terminal, and never runs wish, while still
+  executing an external [DISPLAY] DISPLAY command.
+- The Debian build profile pkg.linuxcnc.headless configures with
+  --disable-gui, uses a backend-only package manifest and drops the GUI
+  build and runtime dependencies; the nodoc profile configures with
+  --disable-build-documentation --disable-manpages, skips manpage
+  installation and no longer needs asciidoctor.
+
+Builds without these options or profiles are unchanged.
+---
+ debian/.gitignore                         |  1 +
+ debian/configure                          | 19 ++++++-
+ debian/control.main-pkg.in                | 22 +-------
+ debian/control.top.in                     | 67 ++++++++++++-----------
+ debian/linuxcnc-headless.install.in       | 16 ++++++
+ debian/linuxcnc-headless.not-installed.in |  4 ++
+ debian/rules.in                           | 29 ++++++++++
+ scripts/linuxcnc.in                       | 18 ++++--
+ src/Makefile                              | 20 +++++--
+ src/Makefile.inc.in                       |  1 +
+ src/configure.ac                          | 54 +++++++++++-------
+ src/emc/usr_intf/Submakefile              | 10 +++-
+ src/emc/usr_intf/emcsh.cc                 |  8 +++
+ src/hal/utils/Submakefile                 |  4 +-
+ 14 files changed, 187 insertions(+), 86 deletions(-)
+ create mode 100644 debian/linuxcnc-headless.install.in
+ create mode 100644 debian/linuxcnc-headless.not-installed.in
+
+diff --git a/debian/.gitignore b/debian/.gitignore
+index 7654817..0f88137 100644
+--- a/debian/.gitignore
++++ b/debian/.gitignore
+@@ -13,6 +13,7 @@ linuxcnc-doc-*/
+ # generated from `.in` by debian/configure
+ linuxcnc-uspace.install
+ linuxcnc-uspace.manpages
++not-installed
+ 
+ *.debhelper
+ shlibs.local
+diff --git a/debian/configure b/debian/configure
+index 096b3f4..da87935 100755
+--- a/debian/configure
++++ b/debian/configure
+@@ -122,6 +122,14 @@ TCLTK_VERSION=8.6
+ PYTHON_IMAGING=python3-pil
+ PYTHON_IMAGING_TK=python3-pil.imagetk
+ QTVCP_DEPENDS="python3-qtpy,\n    python3-pyqt5,\n    python3-pyqt5.qsci,\n    python3-pyqt5.qtsvg,\n    python3-pyqt5.qtopengl,\n    python3-opencv,\n    python3-dbus,\n    python3-espeak,\n    python3-dbus.mainloop.pyqt5,\n    python3-pyqt5.qtwebengine,\n    espeak-ng,\n    pyqt5-dev-tools,\n    gstreamer1.0-tools,\n    espeak,\n    sound-theme-freedesktop"
++# Runtime packages that only LinuxCNC's GUIs need.  The pkg.linuxcnc.headless
++# build profile (configure --disable-gui) does not depend on them.
++GUI_RUNTIME_DEPENDS="blt,\n    mesa-utils,\n    python3-tk,\n    python3-cairo,\n    python3-gi-cairo,\n    python3-opengl,\n    python3-configobj,\n    python3-xlib,\n    libgtksourceview-4-dev,\n    tk@TCLTK_VERSION@,\n    bwidget (>= 1.7),\n    tclx,\n    $QTVCP_DEPENDS"
++GUI_RUNTIME_RECOMMENDS="linuxcnc-doc-en | linuxcnc-doc,\n    librsvg2-dev,\n    x11-xserver-utils,\n    $PYTHON_IMAGING,\n    $PYTHON_IMAGING_TK"
++if [[ " ${DEB_BUILD_PROFILES:-} " == *" pkg.linuxcnc.headless "* ]]; then
++    GUI_RUNTIME_DEPENDS=''
++    GUI_RUNTIME_RECOMMENDS=''
++fi
+ YAPPS_RUNTIME="python3-yapps"
+ DEBHELPER="debhelper (>= 12)"
+ COMPAT="12"
+@@ -172,6 +180,8 @@ sed \
+     -e "s#@DOC_DEPENDS@#$DOC_DEPENDS#g" \
+     -e "s#@EXTRA_BUILD@#$EXTRA_BUILD#g" \
+     -e "s#@EXTRA_RECOMMENDS@#$EXTRA_RECOMMENDS#g" \
++    -e "s#@GUI_RUNTIME_DEPENDS@#$GUI_RUNTIME_DEPENDS#g" \
++    -e "s#@GUI_RUNTIME_RECOMMENDS@#$GUI_RUNTIME_RECOMMENDS#g" \
+     -e "s#@KERNEL_DEPENDS@#$KERNEL_DEPENDS#g" \
+     -e "s#@KERNEL_DEPENDS_BUILD@#$KERNEL_DEPENDS_BUILD#g" \
+     -e "s#@KERNEL_HEADERS@#$KERNEL_HEADERS#g" \
+@@ -209,7 +219,14 @@ subst control.top.in > control
+ echo >> control
+ subst control.main-pkg.in >> control
+ 
+-subst linuxcnc.install.in > ${MAIN_PACKAGE_NAME}.install
++if [[ " ${DEB_BUILD_PROFILES:-} " == *" pkg.linuxcnc.headless "* ]]; then
++    subst linuxcnc-headless.install.in > ${MAIN_PACKAGE_NAME}.install
++    # GUI assets the build still installs but the headless package omits
++    subst linuxcnc-headless.not-installed.in > not-installed
++else
++    subst linuxcnc.install.in > ${MAIN_PACKAGE_NAME}.install
++    rm -f not-installed
++fi
+ subst linuxcnc.lintian-overrides.in > ${MAIN_PACKAGE_NAME}.lintian-overrides
+ subst linuxcnc.manpages.in > ${MAIN_PACKAGE_NAME}.manpages
+ 
+diff --git a/debian/control.main-pkg.in b/debian/control.main-pkg.in
+index e964cbb..7017e20 100644
+--- a/debian/control.main-pkg.in
++++ b/debian/control.main-pkg.in
+@@ -13,32 +13,16 @@ Depends:
+     ${shlibs:Depends},
+     @KERNEL_DEPENDS@,
+     @MODUTILS_DEPENDS@,
+-    blt,
+-    mesa-utils,
+-    python3-tk,
++    @GUI_RUNTIME_DEPENDS@,
+     python3-numpy,
+-    python3-cairo,
+-    python3-gi-cairo,
+-    python3-opengl,
+-    python3-configobj,
+-    python3-xlib,
+-    libgtksourceview-4-dev,
+     tcl@TCLTK_VERSION@,
+-    tk@TCLTK_VERSION@,
+-    bwidget (>= 1.7),
+     tclreadline,
+-    tclx,
+-    @QTVCP_DEPENDS@,
+     procps, psmisc,
+     udev
+ Recommends:
+-    linuxcnc-doc-en | linuxcnc-doc,
+-    librsvg2-dev,
+-    x11-xserver-utils,
++    @GUI_RUNTIME_RECOMMENDS@,
+     python3-paho-mqtt,
+-    @EXTRA_RECOMMENDS@,
+-    @PYTHON_IMAGING@,
+-    @PYTHON_IMAGING_TK@
++    @EXTRA_RECOMMENDS@
+ Suggests:
+     mesaflash,
+     python3-poppler-qt5,
+diff --git a/debian/control.top.in b/debian/control.top.in
+index f08b047..64b4665 100644
+--- a/debian/control.top.in
++++ b/debian/control.top.in
+@@ -14,63 +14,64 @@ Build-Depends:
+     @EXTRA_BUILD@,
+     groff-base <!nodoc>,
+     imagemagick <!nodoc>,
+-    asciidoctor,
++    asciidoctor <!nodoc>,
+     libunicode-linebreak-perl <!nodoc>,
+     autoconf,
+     automake,
+-    bwidget (>= 1.7),
+-    desktop-file-utils,
++    bwidget (>= 1.7) <!pkg.linuxcnc.headless>,
++    desktop-file-utils <!pkg.linuxcnc.headless>,
+     intltool,
+     libboost-python-dev,
+-    libepoxy-dev,
+-    libgl-dev | libgl1-mesa-dev,
+-    libglu1-mesa-dev,
+-    libgtk-3-dev,
++    libepoxy-dev <!pkg.linuxcnc.headless>,
++    libgl-dev <!pkg.linuxcnc.headless> | libgl1-mesa-dev <!pkg.linuxcnc.headless>,
++    libglu1-mesa-dev <!pkg.linuxcnc.headless>,
++    libgtk-3-dev <!pkg.linuxcnc.headless>,
+     libcap-dev,
+     libmodbus-dev (>= 3.0),
+     libgpiod-dev,
+     @LIBREADLINE_DEV@,
+     libtirpc-dev,
+     libusb-1.0-0-dev,
+-    libxmu-dev,
++    libxmu-dev <!pkg.linuxcnc.headless>,
+     netcat-traditional | netcat-openbsd | netcat,
+-    netpbm,
++    netpbm <!pkg.linuxcnc.headless>,
+     po4a <!nodoc>,
+     procps,
+     psmisc,
+     python3,
+     python3-dev,
+     python3-pybind11,
+-    python3-tk,
+-    python3-xlib,
++    python3-tk <!pkg.linuxcnc.headless>,
++    python3-xlib <!pkg.linuxcnc.headless>,
+     tcl,
+     tcl@TCLTK_VERSION@-dev,
+-    tclx,
+-    tk@TCLTK_VERSION@-dev,
+-    xvfb <!nocheck>,
+-    x11-xserver-utils <!nocheck>,
+-    x11-utils <!nocheck>,
++    tclx <!pkg.linuxcnc.headless>,
++    tk@TCLTK_VERSION@-dev <!pkg.linuxcnc.headless>,
++    xvfb <!nocheck !pkg.linuxcnc.headless>,
++    x11-xserver-utils <!nocheck !pkg.linuxcnc.headless>,
++    x11-utils <!nocheck !pkg.linuxcnc.headless>,
+     gdb <!nocheck>,
+-    imagemagick <!nocheck>,
+-    python3-opengl <!nocheck>,
+-    python3-pyqt5 <!nocheck>,
+-    python3-pyqt5.qsci <!nocheck>,
+-    python3-pyqt5.qtsvg <!nocheck>,
+-    python3-pyqt5.qtopengl <!nocheck>,
+-    python3-pyqt5.qtwebengine <!nocheck>,
+-    pyqt5-dev-tools <!nocheck>,
+-    python3-dbus <!nocheck>,
+-    python3-dbus.mainloop.pyqt5 <!nocheck>,
+-    python3-qtpy <!nocheck>,
++    imagemagick <!nocheck !pkg.linuxcnc.headless>,
++    python3-opengl <!nocheck !pkg.linuxcnc.headless>,
++    python3-pyqt5 <!nocheck !pkg.linuxcnc.headless>,
++    python3-pyqt5.qsci <!nocheck !pkg.linuxcnc.headless>,
++    python3-pyqt5.qtsvg <!nocheck !pkg.linuxcnc.headless>,
++    python3-pyqt5.qtopengl <!nocheck !pkg.linuxcnc.headless>,
++    python3-pyqt5.qtwebengine <!nocheck !pkg.linuxcnc.headless>,
++    pyqt5-dev-tools <!nocheck !pkg.linuxcnc.headless>,
++    python3-dbus <!nocheck !pkg.linuxcnc.headless>,
++    python3-dbus.mainloop.pyqt5 <!nocheck !pkg.linuxcnc.headless>,
++    python3-qtpy <!nocheck !pkg.linuxcnc.headless>,
+     python3-zmq <!nocheck>,
+-    python3-cairo <!nocheck>,
+-    python3-gi <!nocheck>,
+-    python3-gi-cairo <!nocheck>,
+-    gir1.2-gtk-3.0 <!nocheck>,
+-    gir1.2-gtksource-4 <!nocheck>,
++    python3-cairo <!nocheck !pkg.linuxcnc.headless>,
++    python3-gi <!nocheck !pkg.linuxcnc.headless>,
++    python3-gi-cairo <!nocheck !pkg.linuxcnc.headless>,
++    gir1.2-gtk-3.0 <!nocheck !pkg.linuxcnc.headless>,
++    gir1.2-gtksource-4 <!nocheck !pkg.linuxcnc.headless>,
+     python3-numpy <!nocheck>,
+-    python3-configobj <!nocheck>,
++    python3-configobj <!nocheck !pkg.linuxcnc.headless>,
+     libfmt-dev,
++    libglib2.0-dev,
+     yapps2
+ Build-Depends-Indep:
+     @DOC_DEPENDS@,
+diff --git a/debian/linuxcnc-headless.install.in b/debian/linuxcnc-headless.install.in
+new file mode 100644
+index 0000000..1491d02
+--- /dev/null
++++ b/debian/linuxcnc-headless.install.in
+@@ -0,0 +1,16 @@
++etc
++
++usr/bin
++usr/lib/lib*.so.*
++usr/lib/linuxcnc
++usr/lib/python3
++usr/share/tcltk
++
++usr/share/linuxcnc/hallib/
++usr/share/linuxcnc/linuxcnc_big.nml
++usr/share/linuxcnc/linuxcnc.nml
++usr/share/linuxcnc/ncfiles/
++
++usr/share/locale/*/LC_MESSAGES/linuxcnc.mo
++
++debian/extras/lib /usr
+diff --git a/debian/linuxcnc-headless.not-installed.in b/debian/linuxcnc-headless.not-installed.in
+new file mode 100644
+index 0000000..c1d5866
+--- /dev/null
++++ b/debian/linuxcnc-headless.not-installed.in
+@@ -0,0 +1,4 @@
++usr/share/linuxcnc/linuxcnc-wizard.gif
++usr/share/linuxcnc/linuxcnc.gif
++usr/share/linuxcnc/linuxcncicon.png
++usr/share/locale/*/LC_MESSAGES/gmoccapy.mo
+diff --git a/debian/rules.in b/debian/rules.in
+index a7cf564..dee33e7 100644
+--- a/debian/rules.in
++++ b/debian/rules.in
+@@ -32,6 +32,15 @@ export TIME:=$(shell LANG=C date --date='@$(TIMESTAMP)' '+%T')
+ 
+ kernel_version = @KERNEL_VERSION@
+ configure_realtime_arg = @CONFIGURE_REALTIME_ARG@
++# Build profiles: pkg.linuxcnc.headless builds without LinuxCNC's GUIs (run
++# debian/configure with the same DEB_BUILD_PROFILES so the package manifest
++# and dependencies match); nodoc builds neither documentation nor manpages.
++ifneq (,$(filter pkg.linuxcnc.headless,$(DEB_BUILD_PROFILES)))
++configure_profile_args += --disable-gui
++endif
++ifneq (,$(filter nodoc,$(DEB_BUILD_PROFILES)))
++configure_profile_args += --disable-build-documentation --disable-manpages
++endif
+ ifeq (,$(filter nodocs,$(DEB_BUILD_OPTIONS)))
+ enable_build_documentation = @ENABLE_BUILD_DOCUMENTATION@ \
+     --enable-build-documentation-translation
+@@ -52,6 +61,7 @@ override_dh_auto_configure:
+ 	    --mandir=/usr/share/man \
+ 	    $(configure_realtime_arg) \
+ 	    $(enable_build_documentation) \
++	    $(configure_profile_args) \
+ 	    --disable-check-runtime-deps
+ 
+ override_dh_auto_build-arch:
+@@ -83,7 +93,9 @@ override_dh_auto_install-arch:
+ 	DESTDIR=$(DESTDIR) $(MAKE) -C src install-software
+ 	py3clean .
+ 
++ifeq (,$(filter pkg.linuxcnc.headless,$(DEB_BUILD_PROFILES)))
+ 	desktop-file-validate $(shell find debian/extras/ share/applications/ -name *.desktop);
++endif
+ 
+ 	# some clean-up
+ 	rm -f $(DESTDIR)/usr/share/doc/@MAIN_PACKAGE_NAME@/examples/sample-configs/*/*position*.txt
+@@ -96,7 +108,12 @@ override_dh_installdocs-arch:
+ 	# script looks for them, and that's inconvenient to change.
+ 	dh_installdocs --doc-main-package=@MAIN_PACKAGE_NAME@ --package=@MAIN_PACKAGE_NAME@
+ 	mkdir -p debian/@MAIN_PACKAGE_NAME@/usr/share/doc/linuxcnc
++ifeq (,$(filter nodoc,$(DEB_BUILD_PROFILES)))
+ 	mv debian/@MAIN_PACKAGE_NAME@/usr/share/doc/@MAIN_PACKAGE_NAME@/examples debian/@MAIN_PACKAGE_NAME@/usr/share/doc/linuxcnc
++else
++	# dh_installdocs installs no .docs entries under the nodoc build profile.
++	cp -a $(DESTDIR)/usr/share/doc/linuxcnc/examples debian/@MAIN_PACKAGE_NAME@/usr/share/doc/linuxcnc
++endif
+ 
+ 	dh_installdocs --doc-main-package=@MAIN_PACKAGE_NAME@ --package=@MAIN_PACKAGE_NAME@-dev
+ 
+@@ -139,6 +156,18 @@ else
+ 	$(RM) -fr debian/tmp/usr/share/doc/
+ endif
+ 
++override_dh_install:
++	dh_install
++ifneq (,$(filter pkg.linuxcnc.headless,$(DEB_BUILD_PROFILES)))
++	# The headless manifest installs all of usr/bin; halcompile belongs to -dev.
++	rm -f debian/@MAIN_PACKAGE_NAME@/usr/bin/halcompile
++endif
++
++override_dh_installman:
++ifeq (,$(filter nodoc,$(DEB_BUILD_PROFILES)))
++	dh_installman
++endif
++
+ override_dh_compress:
+ 	dh_compress -X.pdf -X.txt -X.hal -X.ini -X.clp -X.var -X.nml -X.tbl -X.xml -Xsample-configs
+ 
+diff --git a/scripts/linuxcnc.in b/scripts/linuxcnc.in
+index 3ab645d..027e3b3 100644
+--- a/scripts/linuxcnc.in
++++ b/scripts/linuxcnc.in
+@@ -47,6 +47,8 @@ PS=@PS@
+ AWK=@AWK@
+ GREP=@GREP@
+ KILL=@KILL@
++# "no" in a build configured with --disable-gui
++BUILD_GUI=@BUILD_GUI@
+ 
+ LINUXCNC_HOME=@EMC2_HOME@; export LINUXCNC_HOME
+ 
+@@ -127,7 +129,7 @@ Usage:
+     This help
+ 
+   $ $P [Options]
+-    Choose the configuration INI file graphically
++    Choose the configuration INI file graphically (not in builds without a GUI)
+ 
+   $ $P [Options] path/to/your_ini_file
+     Name the configuration INI file using its path
+@@ -235,7 +237,9 @@ EOF
+     fi
+ esac
+ 
+-if [ -z "$RUNTESTS" ]; then
++# Without a GUI there is no error dialog to show the logs, so output always
++# goes to stdout/stderr (e.g. a service manager or container log).
++if [ -z "$RUNTESTS" ] && [ "$BUILD_GUI" = yes ]; then
+ if ! tty -s; then
+     exec 2>> "$DEBUG_FILE"
+     exec >> "$PRINT_FILE"
+@@ -246,12 +250,12 @@ fi
+ # shellcheck disable=SC2317,SC2329
+ function ErrorCheck () {
+     result=$?
+-    if [ -n "$DISPLAY" ]; then
++    if [ "$BUILD_GUI" = yes ] && [ -n "$DISPLAY" ]; then
+         echo "catch {send -async popimage destroy .}; destroy ." | @WISH@
+     fi
+ 
+     if [ "$result" -ne 0 ]; then
+-        if tty -s || [ -z "$DISPLAY" ] ; then
++        if tty -s || [ -z "$DISPLAY" ] || [ "$BUILD_GUI" != yes ]; then
+             if [ -f "$DEBUG_FILE" ]; then
+                 cp "$DEBUG_FILE" "$HOME/linuxcnc_debug.txt"
+             else
+@@ -343,6 +347,12 @@ if [ -n "$USE_LAST_INIFILE" ]; then
+     echo "Using previous INI file: $INIFILE" >> "$PRINT_FILE"
+ fi
+ 
++if [ -z "$INIFILE" ] && [ "$BUILD_GUI" != yes ]; then
++    echo "LinuxCNC was built without a GUI and needs an explicit INI file path." >&2
++    usage >&2
++    exit 2
++fi
++
+ if [ -z "$INIFILE" ] ; then
+     # nothing specified, get from the user
+     # it returns either a path, or nothing at all
+diff --git a/src/Makefile b/src/Makefile
+index 927b122..af616fb 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -24,7 +24,7 @@ default: build-software
+ 
+ install: install-software install-docs
+ 
+-install-software: install-kernel-dep install-kernel-indep install-menu
++install-software: install-kernel-dep install-kernel-indep
+ 
+ ifeq ($(origin KERNELRELEASE), undefined)
+ #MAKEFLAGS += --warn-undefined-variables
+@@ -121,6 +121,12 @@ ifeq ($(RTPREFIX),)
+ $(error Makefile.inc must specify RTPREFIX and other variables)
+ endif
+ 
++# The desktop menu entries launch GUI programs, so a build without a GUI
++# does not install them.
++ifeq ($(BUILD_GUI),yes)
++install-software: install-menu
++endif
++
+ ifeq ($(TOOL_NML),yes)
+   TOOL_NML_FLAG := -DTOOL_NML
+   $(info TOOL_NML_FLAG =$(TOOL_NML_FLAG))
+@@ -705,7 +711,7 @@ ifeq ($(BUILD_MANPAGES),yes)
+ 	$(FILE) $(wildcard ../docs/build/man/man3/*.3) $(DESTDIR)$(mandir)/man3
+ 	$(FILE) $(wildcard ../docs/build/man/man9/*.9) $(DESTDIR)$(mandir)/man9
+ endif
+-ifeq ($(BUILD_GUI),yes)
++ifeq ($(BUILD_TCL),yes)
+ 	$(FILE) objects/*.msg $(DESTDIR)$(tcldir)/msgs
+ endif
+ 	$(EXE) ../scripts/realtime $(DESTDIR)$(prefix)/lib/linuxcnc
+@@ -753,12 +759,16 @@ endif
+ ifeq ($(BUILD_GUI),yes)
+ 	$(EXE) $(TCL) $(DESTDIR)$(tcldir)
+ 	$(FILE) ../tcl/TkLinuxCNC $(DESTDIR)/etc/X11/app-defaults
+-	$(FILE) ../tcl/hal.so $(DESTDIR)$(tcldir)
+-	$(FILE) ../tcl/linuxcnc.so $(DESTDIR)$(tcldir)
+-	$(FILE) ../tcl/pkgIndex.tcl $(DESTDIR)$(tcldir)
+ 	$(EXE) $(TCL_BIN) $(DESTDIR)$(tcldir)/bin
+ 	$(FILE) ../tcl/scripts/balloon.tcl ../tcl/scripts/emchelp.tcl $(DESTDIR)$(tcldir)/scripts
+ 	$(EXE) ../tcl/scripts/Set_Coordinates.tcl $(DESTDIR)$(tcldir)/scripts
++else ifeq ($(BUILD_TCL),yes)
++	# Without a GUI only the Tcl runtime that haltcl, .tcl HAL files and
++	# [HAL]TWOPASS use is installed.
++	$(EXE) ../tcl/linuxcnc.tcl ../tcl/twopass.tcl $(DESTDIR)$(tcldir)
++endif
++ifeq ($(BUILD_TCL),yes)
++	$(FILE) ../tcl/hal.so ../tcl/linuxcnc.so ../tcl/pkgIndex.tcl $(DESTDIR)$(tcldir)
+ endif
+ ifeq ($(BUILD_GUI),yes)
+ 	$(FILE) ../share/linuxcnc/*.glade $(DESTDIR)$(prefix)/share/linuxcnc
+diff --git a/src/Makefile.inc.in b/src/Makefile.inc.in
+index ffaaa80..3e21a48 100644
+--- a/src/Makefile.inc.in
++++ b/src/Makefile.inc.in
+@@ -81,6 +81,7 @@ ULFLAGS = -Wall -g -I. -I@RTDIR@/include -DULAPI -D_GNU_SOURCE -O2 -DLOCALE_DIR=
+ MODULE_EXT = @MODEXT@
+ BUILD_SYS = @BUILD_SYS@
+ BUILD_GUI = @BUILD_GUI@
++BUILD_TCL = @BUILD_TCL@
+ CC = @CC@
+ MANDB = @MANDB@
+ HIDRAW_H_USABLE = @HIDRAW_H_USABLE@
+diff --git a/src/configure.ac b/src/configure.ac
+index 88d7959..901de31 100644
+--- a/src/configure.ac
++++ b/src/configure.ac
+@@ -817,7 +817,7 @@ fi
+ 
+ 
+ AC_ARG_ENABLE(gui,
+-    AS_HELP_STRING([--disable-gui], [Disable building graphical user interfaces (Tk, Tcl, X11, Xinerama, GTK)]),
++    AS_HELP_STRING([--disable-gui], [Disable building graphical user interfaces (Tk, X11, Xinerama, GTK); the Tcl bindings are still built if Tcl is found]),
+     [BUILD_GUI=$enableval],
+     [BUILD_GUI=yes])
+ AC_SUBST([BUILD_GUI])
+@@ -1383,8 +1383,13 @@ AH_BOTTOM(#endif
+ # Test for tcl/tk headers fails if they are not in /usr/include              #
+ # so testing is done by finding tclConfig.sh and tkConfig.sh                 #
+ # if the search fails the traditional check is done                          #
++#                                                                            #
++# Tcl is required with a GUI.  Without one (--disable-gui) Tk, X11 and the   #
++# GUI runtime checks are skipped, and Tcl is optional: when tclConfig.sh is  #
++# found, the Tcl HAL and LinuxCNC bindings and the Tcl runtime that haltcl,  #
++# .tcl HAL files and [HAL]TWOPASS need are still built (BUILD_TCL).          #
+ ##############################################################################
+-if test "$BUILD_GUI" = "yes"; then
++BUILD_TCL=no
+ 
+ AC_MSG_CHECKING([for tcl])
+ 
+@@ -1408,10 +1413,15 @@ if (test "x$TCLCONFIG" = "x"); then
+ fi
+ 
+ if (test "x$TCLCONFIG" = "x"); then
++  if test "$BUILD_GUI" = "yes"; then
+    AC_MSG_RESULT([tclConfig.sh not found, trying tcl.h and libs.
+ 		  If it doesn't work try running ./configure --with-tclConfig=<path to tclConfig.sh>])
+    AC_CHECK_HEADERS([tcl.h])
+    AC_SEARCH_LIBS(Tcl_Init,[tcl tcl8.7 tcl8.6],[],[AC_MSG_ERROR([tcl lib not found])])
++   BUILD_TCL=yes
++  else
++   AC_MSG_RESULT([tclConfig.sh not found, building without the Tcl bindings])
++  fi
+ else
+ # tclConfig.sh found,
+ # extracting vars
+@@ -1419,8 +1429,31 @@ else
+    . "$TCLCONFIG"
+    TCL_CFLAGS="$TCL_INCLUDE_SPEC -DUSE_TCL_STUBS"
+    TCL_LIBS="$TCL_STUB_LIB_SPEC"
++   BUILD_TCL=yes
+ fi
+ 
++if test "$BUILD_TCL" = "yes"; then
++if test -z "$TCL_MAJOR_VERSION" || test -z "$TCL_MINOR_VERSION" ; then
++    AC_MSG_ERROR([tclConfig was not found or did not export TCL_MAJOR_VERSION/TCL_MINOR_VERSION. Cannot determine exact Tcl version.])
++fi
++
++if test "(" "$TCL_MAJOR_VERSION" -lt 8 ")" -o "(" "(" "$TCL_MAJOR_VERSION" -eq 8 ")" -a "(" "$TCL_MINOR_VERSION" -lt 4 ")" ")" ; then
++    AC_MSG_ERROR([Tcl version must be 8.4 or better. Your Tcl version ${TCL_MAJOR_VERSION}.${TCL_MINOR_VERSION} is too old.])
++fi
++
++if test -f $TCL_EXEC_PREFIX/bin/tclsh$TCL_VERSION; then
++    TCLSH=$TCL_EXEC_PREFIX/bin/tclsh$TCL_VERSION
++elif test -f $TCL_EXEC_PREFIX/bin/tclsh; then
++    TCLSH=$TCL_EXEC_PREFIX/bin/tclsh
++else
++    TCLSH=tclsh
++fi
++else
++    TCLSH=tclsh
++fi
++AC_SUBST([BUILD_TCL])
++
++if test "$BUILD_GUI" = "yes"; then
+ AC_MSG_CHECKING([for tk])
+ 
+ AC_ARG_WITH(tkConfig,
+@@ -1467,14 +1500,6 @@ Tcl $TCL_VERSION and Tk $TK_VERSION.  You can use --with-tkConfig= and --with-tc
+ to override the autodetected versions.])
+ fi
+ 
+-if test -z "$TCL_MAJOR_VERSION" || test -z "$TCL_MINOR_VERSION" ; then
+-    AC_MSG_ERROR([tclConfig was not found or did not export TCL_MAJOR_VERSION/TCL_MINOR_VERSION. Cannot determine exact Tcl version.])
+-fi
+-
+-if test "(" "$TCL_MAJOR_VERSION" -lt 8 ")" -o "(" "(" "$TCL_MAJOR_VERSION" -eq 8 ")" -a "(" "$TCL_MINOR_VERSION" -lt 4 ")" ")" ; then
+-    AC_MSG_ERROR([Tcl version must be 8.4 or better. Your Tcl version ${TCL_MAJOR_VERSION}.${TCL_MINOR_VERSION} is too old.])
+-fi
+-
+ if test -f $TCL_EXEC_PREFIX/bin/wish$TCL_VERSION; then
+     WISH=$TCL_EXEC_PREFIX/bin/wish$TCL_VERSION
+ elif test -f $TCL_EXEC_PREFIX/bin/wish; then
+@@ -1483,14 +1508,6 @@ else
+     WISH=wish
+ fi
+ 
+-if test -f $TCL_EXEC_PREFIX/bin/tclsh$TCL_VERSION; then
+-    TCLSH=$TCL_EXEC_PREFIX/bin/tclsh$TCL_VERSION
+-elif test -f $TCL_EXEC_PREFIX/bin/tclsh; then
+-    TCLSH=$TCL_EXEC_PREFIX/bin/tclsh
+-else
+-    TCLSH=tclsh
+-fi
+-
+ AC_ARG_ENABLE(check-runtime-deps,
+     AS_HELP_STRING(
+         [--disable-check-runtime-deps],
+@@ -1543,7 +1560,6 @@ install with "sudo apt-get install python3-gi"])
+ fi
+ 
+ else
+-    TCLSH=tclsh
+     WISH=wish
+ fi
+ 
+diff --git a/src/emc/usr_intf/Submakefile b/src/emc/usr_intf/Submakefile
+index cb99070..5437969 100644
+--- a/src/emc/usr_intf/Submakefile
++++ b/src/emc/usr_intf/Submakefile
+@@ -18,12 +18,16 @@ HALUISRCS := emc/usr_intf/halui.cc \
+ 
+ USERSRCS += $(EMCSHSRCS) $(EMCRSHSRCS) $(EMCSCHEDSRCS) $(EMCLCDSRCS) $(USRMOTSRCS) $(HALUISRCS)
+ 
+-$(call TOOBJSDEPS, $(EMCSHSRCS)) : EXTRAFLAGS = $(ULFLAGS) $(TCL_CFLAGS) -fPIC
++# Without a GUI the Tcl binding is built without Tk and Xinerama (no
++# "multihead" command) whenever Tcl itself was found.
++$(call TOOBJSDEPS, $(EMCSHSRCS)) : EXTRAFLAGS = $(ULFLAGS) $(TCL_CFLAGS) -fPIC \
++	$(if $(filter yes,$(BUILD_GUI)),,-DLINUXCNC_HEADLESS)
+ 
+ ../tcl/linuxcnc.so: $(call TOOBJS, $(EMCSHSRCS)) ../lib/liblinuxcnc.a ../lib/liblinuxcncini.so.1 ../lib/libnml.so.0
+ 	$(ECHO) Linking $(notdir $@)
+-	$(Q)$(CXX) -shared $(LDFLAGS) -o $@ $(ULFLAGS) $(TCL_CFLAGS) $^ $(TCL_LIBS) -lXinerama
+-ifeq ($(BUILD_GUI),yes)
++	$(Q)$(CXX) -shared $(LDFLAGS) -o $@ $(ULFLAGS) $(TCL_CFLAGS) $^ $(TCL_LIBS) \
++		$(if $(filter yes,$(BUILD_GUI)),-lXinerama)
++ifeq ($(BUILD_TCL),yes)
+ TARGETS += ../tcl/linuxcnc.so
+ endif
+ 
+diff --git a/src/emc/usr_intf/emcsh.cc b/src/emc/usr_intf/emcsh.cc
+index b040345..8e71c3f 100644
+--- a/src/emc/usr_intf/emcsh.cc
++++ b/src/emc/usr_intf/emcsh.cc
+@@ -20,7 +20,9 @@
+ #include <signal.h>
+ #include <math.h>
+ #include <tcl.h>
++#ifndef LINUXCNC_HEADLESS
+ #include <tk.h>
++#endif
+ 
+ #include <linuxcnc.h>
+ #include <posemath.h>		// PM_POSE, TO_RAD
+@@ -3543,12 +3545,14 @@ static int localint(ClientData /*clientdata*/,
+     return TCL_OK;
+ }
+ 
++#ifndef LINUXCNC_HEADLESS
+ static const char *one_head(int x0, int y0, int x1, int y1)
+ {
+     static char buf[100];
+     snprintf(buf, sizeof(buf), "%d %d %d %d", x0, y0, x1, y1);
+     return buf;
+ }
++#endif
+ 
+ // "round", as in "round 3.9" which returns 4
+ static int localround(ClientData /*clientdata*/,
+@@ -3581,6 +3585,7 @@ static int localround(ClientData /*clientdata*/,
+     return TCL_OK;
+ }
+ 
++#ifndef LINUXCNC_HEADLESS
+ #include <X11/extensions/Xinerama.h>
+ 
+ static int multihead(ClientData /*clientdata*/,
+@@ -3620,6 +3625,7 @@ static int multihead(ClientData /*clientdata*/,
+     }
+     return TCL_OK;
+ }
++#endif
+ 
+ static void sigQuit(int /*sig*/)
+ {
+@@ -3995,8 +4001,10 @@ int Linuxcnc_Init(Tcl_Interp * interp)
+     Tcl_CreateObjCommand(interp, "round", localround, (ClientData) NULL,
+ 			 (Tcl_CmdDeleteProc *) NULL);
+ 
++#ifndef LINUXCNC_HEADLESS
+     Tcl_CreateObjCommand(interp, "multihead", multihead, (ClientData) NULL,
+                          (Tcl_CmdDeleteProc*) NULL);
++#endif
+ 
+     /*
+      * Specify a user-specific startup file to invoke if the application
+diff --git a/src/hal/utils/Submakefile b/src/hal/utils/Submakefile
+index b3dcdcf..a356d8a 100644
+--- a/src/hal/utils/Submakefile
++++ b/src/hal/utils/Submakefile
+@@ -13,7 +13,7 @@ HALSHSRCS := \
+ ifneq ($(READLINE_LIBS),)
+ HALCMDSRCS += hal/utils/halcmd_completion.c
+ endif
+-ifeq ($(BUILD_GUI),yes)
++ifeq ($(BUILD_TCL),yes)
+ USERSRCS += $(sort $(HALCMDSRCS) $(HALSHSRCS))
+ else
+ USERSRCS += $(sort $(HALCMDSRCS))
+@@ -24,7 +24,7 @@ $(call TOOBJSDEPS, hal/utils/halsh.c) : EXTRAFLAGS += $(TCL_CFLAGS)
+ ../tcl/hal.so: $(call TOOBJS, $(HALSHSRCS)) ../lib/liblinuxcncini.so.1 ../lib/liblinuxcnchal.so.0
+ 	$(ECHO) Linking $(notdir $@)
+ 	$(Q)$(CXX) $(LDFLAGS) -shared $^  $(TCL_LIBS) -o $@ -lfmt
+-ifeq ($(BUILD_GUI),yes)
++ifeq ($(BUILD_TCL),yes)
+ TARGETS += ../tcl/hal.so
+ endif
+ 

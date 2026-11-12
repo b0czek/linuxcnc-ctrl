@@ -190,30 +190,63 @@ must issue `EMC_TASK_ABORT` explicitly when execution should be terminated.
 Abort, E-stop, faults, mode changes, M0/M1, and Pause retain their existing
 behavior.
 
+Motion that cannot be interrupted part way runs to completion before Stop
+reaches `STOPPED`:
+
+- A position-synchronized move (`G33`, `G33.1`), together with the
+  position-synchronized moves that follow it and continue the same spindle
+  synchronization. Halting at the start of the next `G33` would leave the axis
+  behind the turning spindle.
+- A homing cycle queued from G-code with `G28.2`. Stop is accepted during it
+  and stays in `STOPPING` until homing finishes.
+
+`STOPPED` is reported only once the axes are at rest. While stopping, the
+planner does not start a held move from rest, so a pending spindle at-speed
+wait or a `G33` index search is not consumed while Stop has the spindle off.
+
 The command is exposed as Python `command.program_stop()`, protobuf
 `stop_program`, and `halui.program.stop`. Stop progress is
 reported as `EMC_TASK_STOP_STATE` (`IDLE`, `STOPPING`, `STOPPED`, `STARTING`)
-through Python `stop_state` and the task-status protobuf. The patch adds a
-`tests/resumable-stop` LinuxCNC regression that verifies active AUTO
-Stop/Resume and Stop/Single-Step preserve the queued program, disable
-spindle/coolant while stopped, restore them without adding a task-level spindle-at-speed
-wait, preserves the normal next-feed at-speed wait after rapid motion,
-completes the same program, and waits for active `G33` threading and `G33.1`
-rigid-tap synchronized motion to finish before entering `STOPPED`.
+through Python `stop_state` and the task-status protobuf.
 
-### 0005 — Headless and documentation-free build options
+Spindle and coolant are restored without adding a task-level spindle-at-speed
+wait. A next-feed at-speed wait that was pending before Stop still holds after
+Resume, and a later `S` word change still arms one. Resume or Run during a Stop
+leaves single-step mode entered by an earlier Step.
 
-Adds the Autoconf-standard `--enable-headless` option for backend-only builds
-and the independent `--disable-build-manpages` option. Headless builds retain
-the controller, realtime/HAL stack, interpreters, remote interfaces, and core
-Python and Tcl APIs while omitting LinuxCNC-supplied GUIs, graphical probes,
-assets, samples, and desktop integration. The launcher requires an explicit
-INI path but continues to execute an external `[DISPLAY] DISPLAY` command.
+The `tests/resumable-stop` LinuxCNC regression runs 23 scenarios with the
+jerk-limited planner and repeats three of them with the trapezoidal planner.
+They cover Stop/Resume and Stop/Single-Step preserving the queued program,
+spindle and coolant handling, the at-speed cases above, `G33` threading
+including a chain of `G33` moves, `G33.1` rigid tapping, Stop during and after
+an interrupted `G28.2`, and that `STOPPED` is never reported while moving.
 
-The Debian build profiles `pkg.linuxcnc.headless` and `nodoc` select the
-corresponding configure options and packaging manifests. With no new options
-or profiles, the existing GUI, documentation, manpage, and packaging behavior
-is unchanged.
+### 0005 — Headless backend-only builds on top of `--disable-gui`
+
+Upstream LinuxCNC provides the headless build itself through
+`--disable-gui` and `--disable-manpages`. This patch adds what a backend-only
+installation still needs on top of them. It no longer defines
+`--enable-headless` or `--disable-build-manpages`.
+
+- Without a GUI, Tcl is optional instead of skipped. When `tclConfig.sh` is
+  found, the Tcl HAL and LinuxCNC bindings are built without Tk or Xinerama,
+  and the Tcl runtime used by `haltcl`, `.tcl` HAL files, and `[HAL]TWOPASS` is
+  installed. Tk, X11, and GL are never needed.
+- Desktop menu entries are not installed.
+- The launcher requires an explicit INI path, keeps its output on stdout and
+  stderr when not attached to a terminal, and never runs `wish`. It still
+  executes an external `[DISPLAY] DISPLAY` command.
+- The Debian build profile `pkg.linuxcnc.headless` configures with
+  `--disable-gui`, uses a backend-only package manifest, and drops the GUI
+  build and runtime dependencies. The `nodoc` profile configures with
+  `--disable-build-documentation --disable-manpages` and no longer needs
+  `asciidoctor`.
+
+A headless `make install` follows upstream's install rules, so it also
+contains the sample configurations, `nc_files`, and some GUI-only helper
+scripts; the Debian headless package leaves those out. With no options or
+profiles, the existing GUI, documentation, manpage, and packaging behavior is
+unchanged.
 
 ### 0006 — Ordered realtime component search path
 
