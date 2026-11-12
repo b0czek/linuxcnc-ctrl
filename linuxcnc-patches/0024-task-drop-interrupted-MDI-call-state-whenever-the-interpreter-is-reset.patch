@@ -1,0 +1,423 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dariusz Majnert <dariusz.majnert@gmail.com>
+Date: Thu, 12 Nov 2026 14:09:33 +0100
+Subject: [PATCH] task: drop interrupted MDI call state whenever the
+ interpreter is reset
+
+An MDI command that runs a remap (or an O-word call) and has to wait for
+its queue to drain leaves task with continuation state: mdi_execute_level,
+mdi_execute_wait and mdi_execute_next, which make task call
+interp.execute(NULL) to resume the call once the queue is empty.
+mdi_execute_abort() clears that state, but only some abort paths call it.
+
+emcTaskAbort() closes and resets the interpreter, which unwinds the call
+stack, yet the callers in emctask.cc cannot reach the static
+mdi_execute_abort(): emcTaskSetState() for E-stop, machine off and E-stop
+reset, emcTaskSetMode() for MDI and AUTO, the ON to not-ON edge in
+emcTaskUpdate() and the error path of emcTaskPlanSynch(). An
+EMC_TASK_PLAN_INIT re-initializes the interpreter without any of it. In
+all of these the stale state survives, and when the machine is back on in
+MDI mode task resumes a call that no longer exists. For a Python remap
+that segfaults milltask in Interp::execute_call() (no executing remap);
+for an NGC remap the MDI command never finishes. Commands queued behind
+the interrupted one also survived and ran after the machine was
+re-enabled.
+
+Make mdi_execute_abort() visible to emctask.cc and call it at the end of
+emcTaskAbort(), right after the interpreter reset, and before
+emcTaskPlanInit() for EMC_TASK_PLAN_INIT. The existing explicit calls next
+to emcTaskAbort() are left as they are; a second call is a no-op.
+
+tests/remap/mdi-remap-abort interrupts a waiting NGC and a waiting Python
+remap with each of E-stop, machine off, interpreter re-init and a mode
+change, and checks that milltask survives and MDI works afterwards.
+---
+ src/emc/task/emctask.cc                 |   4 +
+ src/emc/task/emctaskmain.cc             |   5 +-
+ src/emc/task/task.hh                    |   1 +
+ tests/remap/mdi-remap-abort/README      |  12 +++
+ tests/remap/mdi-remap-abort/checkresult |   2 +
+ tests/remap/mdi-remap-abort/m400.ngc    |   5 +
+ tests/remap/mdi-remap-abort/remap.py    |   9 ++
+ tests/remap/mdi-remap-abort/test-ui.py  | 138 ++++++++++++++++++++++++
+ tests/remap/mdi-remap-abort/test.ini    | 101 +++++++++++++++++
+ tests/remap/mdi-remap-abort/test.sh     |   2 +
+ tests/remap/mdi-remap-abort/toplevel.py |   1 +
+ 11 files changed, 279 insertions(+), 1 deletion(-)
+ create mode 100644 tests/remap/mdi-remap-abort/README
+ create mode 100755 tests/remap/mdi-remap-abort/checkresult
+ create mode 100644 tests/remap/mdi-remap-abort/m400.ngc
+ create mode 100644 tests/remap/mdi-remap-abort/remap.py
+ create mode 100755 tests/remap/mdi-remap-abort/test-ui.py
+ create mode 100644 tests/remap/mdi-remap-abort/test.ini
+ create mode 100755 tests/remap/mdi-remap-abort/test.sh
+ create mode 100644 tests/remap/mdi-remap-abort/toplevel.py
+
+diff --git a/src/emc/task/emctask.cc b/src/emc/task/emctask.cc
+index 5a1e60e..67edc9b 100644
+--- a/src/emc/task/emctask.cc
++++ b/src/emc/task/emctask.cc
+@@ -282,6 +282,10 @@ int emcTaskAbort()
+ 	}
+     }
+ 
++    // the reset above unwound any call an interrupted MDI command was
++    // inside of, so its continuation and queued MDI commands go too
++    mdi_execute_abort();
++
+     return 0;
+ }
+ 
+diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
+index 154c362..72e16f1 100644
+--- a/src/emc/task/emctaskmain.cc
++++ b/src/emc/task/emctaskmain.cc
+@@ -776,7 +776,7 @@ interpret_again:
+ 		}		// if interp len is less than max
+ }
+ 
+-static void mdi_execute_abort(void)
++void mdi_execute_abort(void)
+ {
+     int queued_mdi_commands;
+ 
+@@ -3097,6 +3097,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+ 	break;
+ 
+     case EMC_TASK_PLAN_INIT_TYPE:
++	// re-initializing the interpreter drops any call an interrupted MDI
++	// command is still inside of
++	mdi_execute_abort();
+ 	retval = emcTaskPlanInit();
+ 	if (retval > INTERP_MIN_ERROR) {
+ 	    retval = -1;
+diff --git a/src/emc/task/task.hh b/src/emc/task/task.hh
+index 223886e..1a7a999 100644
+--- a/src/emc/task/task.hh
++++ b/src/emc/task/task.hh
+@@ -34,6 +34,7 @@ int emcTaskInit();
+ int emcTaskHalt();
+ int emcTaskStateRestore();
+ int emcTaskAbort();
++void mdi_execute_abort(void);
+ void emcTaskCancelAvailability();
+ int emcTaskSetMode(EMC_TASK_MODE mode);
+ int emcTaskSetState(EMC_TASK_STATE state);
+diff --git a/tests/remap/mdi-remap-abort/README b/tests/remap/mdi-remap-abort/README
+new file mode 100644
+index 0000000..4d3f7c0
+--- /dev/null
++++ b/tests/remap/mdi-remap-abort/README
+@@ -0,0 +1,12 @@
++Interrupt an MDI command whose remap is mid-execution with an E-stop, a
++machine off, an interpreter re-init (EMC_TASK_PLAN_INIT) and a mode change
++to AUTO and back, instead of an operator abort, then bring the machine back
++and check that milltask is still alive and MDI still works.
++
++Each of these resets the interpreter, which unwinds the remap's call frame.
++Task used to keep its MDI continuation state (mdi_execute_next/_wait/_level)
++and resumed the unwound call once the machine was back in MDI, which
++crashed milltask in Interp::execute_call() for a Python remap.
++
++M400 is an NGC remap that waits on M66; M401 is a Python generator remap
++that keeps yielding INTERP_EXECUTE_FINISH.
+diff --git a/tests/remap/mdi-remap-abort/checkresult b/tests/remap/mdi-remap-abort/checkresult
+new file mode 100755
+index 0000000..24dc9aa
+--- /dev/null
++++ b/tests/remap/mdi-remap-abort/checkresult
+@@ -0,0 +1,2 @@
++#!/bin/sh
++exit 0 # test failure is indicated by test.sh exit value
+diff --git a/tests/remap/mdi-remap-abort/m400.ngc b/tests/remap/mdi-remap-abort/m400.ngc
+new file mode 100644
+index 0000000..b841fc7
+--- /dev/null
++++ b/tests/remap/mdi-remap-abort/m400.ngc
+@@ -0,0 +1,5 @@
++o<m400> sub
++  (wait up to 3 s for digital input 0, which nothing sets)
++  M66 P0 L3 Q3
++o<m400> endsub
++M2
+diff --git a/tests/remap/mdi-remap-abort/remap.py b/tests/remap/mdi-remap-abort/remap.py
+new file mode 100644
+index 0000000..b616b52
+--- /dev/null
++++ b/tests/remap/mdi-remap-abort/remap.py
+@@ -0,0 +1,9 @@
++import emccanon
++from interpreter import INTERP_EXECUTE_FINISH
++
++
++def m401(self, **words):
++    # Keep the remap mid-execution: dwell, wait for it to finish, repeat.
++    while True:
++        emccanon.DWELL(0.05)
++        yield INTERP_EXECUTE_FINISH
+diff --git a/tests/remap/mdi-remap-abort/test-ui.py b/tests/remap/mdi-remap-abort/test-ui.py
+new file mode 100755
+index 0000000..b67b7c7
+--- /dev/null
++++ b/tests/remap/mdi-remap-abort/test-ui.py
+@@ -0,0 +1,138 @@
++#!/usr/bin/env python3
++#
++# Interrupt an MDI command whose remap is mid-execution in every way that
++# resets the interpreter without an operator abort (E-stop, machine off,
++# interpreter re-init, mode change), then bring the machine back and check
++# that task is still alive and MDI still works.
++
++import os
++import sys
++import time
++
++import linuxcnc
++
++c = linuxcnc.command()
++s = linuxcnc.stat()
++
++
++def fail(msg):
++    print("FAIL: %s" % msg)
++    sys.exit(1)
++
++
++def task_alive():
++    for pid in os.listdir("/proc"):
++        if not pid.isdigit():
++            continue
++        try:
++            with open("/proc/%s/comm" % pid) as f:
++                if f.read().strip() == "milltask":
++                    return True
++        except OSError:
++            pass
++    return False
++
++
++def wait_for(cond, what, timeout=10.0):
++    start = time.time()
++    while time.time() - start < timeout:
++        s.poll()
++        if cond():
++            return
++        time.sleep(0.02)
++    if not task_alive():
++        fail("milltask died (waiting for %s)" % what)
++    fail("timeout waiting for %s: task_state=%d mode=%d interp_state=%d "
++         "exec_state=%d call_level=%d" % (what, s.task_state, s.task_mode,
++         s.interp_state, s.exec_state, s.call_level))
++
++
++def set_state(state, reported=None):
++    c.state(state)
++    c.wait_complete()
++    if reported is None:
++        reported = state
++    wait_for(lambda: s.task_state == reported, "task state %d" % reported)
++
++
++def set_mode(mode):
++    c.mode(mode)
++    c.wait_complete()
++    wait_for(lambda: s.task_mode == mode, "task mode %d" % mode)
++
++
++def machine_on():
++    set_state(linuxcnc.STATE_ESTOP_RESET)
++    set_state(linuxcnc.STATE_ON)
++
++
++def estop():
++    set_state(linuxcnc.STATE_ESTOP)
++    machine_on()
++
++
++def machine_off():
++    # task reports a machine that is out of E-stop but off as ESTOP_RESET
++    set_state(linuxcnc.STATE_OFF, linuxcnc.STATE_ESTOP_RESET)
++    set_state(linuxcnc.STATE_ON)
++
++
++def plan_init():
++    c.reset_interpreter()
++    c.wait_complete()
++
++
++def mode_auto():
++    set_mode(linuxcnc.MODE_AUTO)
++    set_mode(linuxcnc.MODE_MDI)
++
++
++target = [0.0]
++
++
++def check_mdi_works(name):
++    # The machine may have dropped out of MDI mode; select it as a GUI would,
++    # then give task's main loop time to act on any stale MDI state.
++    set_mode(linuxcnc.MODE_MDI)
++    time.sleep(0.5)
++    if not task_alive():
++        fail("%s: milltask died" % name)
++    target[0] = 1.0 if target[0] != 1.0 else 2.0
++    c.mdi("G0 X%.1f" % target[0])
++    c.wait_complete()
++    wait_for(lambda: abs(s.position[0] - target[0]) < 1e-6
++             and s.interp_state == linuxcnc.INTERP_IDLE,
++             "%s: MDI G0 X%.1f" % (name, target[0]))
++    if not task_alive():
++        fail("%s: milltask died" % name)
++
++
++def scenario(name, code, interrupt):
++    set_mode(linuxcnc.MODE_MDI)
++    c.mdi(code)
++    wait_for(lambda: s.interp_state != linuxcnc.INTERP_IDLE,
++             "%s: %s to start" % (name, code))
++    # M400 waits for 3 s, M401 until interrupted; make sure it is waiting.
++    time.sleep(0.3)
++    s.poll()
++    if s.interp_state == linuxcnc.INTERP_IDLE:
++        fail("%s: %s is not waiting inside its remap" % (name, code))
++    interrupt()
++    check_mdi_works(name)
++    print("%s: ok" % name)
++
++
++wait_for(lambda: s.task_state == linuxcnc.STATE_ESTOP, "task to start")
++machine_on()
++set_mode(linuxcnc.MODE_MDI)
++check_mdi_works("startup")
++
++for code in ("M400", "M401"):
++    scenario("%s E-stop" % code, code, estop)
++    scenario("%s machine off" % code, code, machine_off)
++    scenario("%s interpreter re-init" % code, code, plan_init)
++    scenario("%s mode change" % code, code, mode_auto)
++
++print("all scenarios passed")
++set_state(linuxcnc.STATE_ESTOP)
++sys.exit(0)
+diff --git a/tests/remap/mdi-remap-abort/test.ini b/tests/remap/mdi-remap-abort/test.ini
+new file mode 100644
+index 0000000..7a70763
+--- /dev/null
++++ b/tests/remap/mdi-remap-abort/test.ini
+@@ -0,0 +1,101 @@
++[EMC]
++VERSION = 1.1
++DEBUG = 0
++
++[DISPLAY]
++DISPLAY = ./test-ui.py
++
++[RS274NGC]
++PARAMETER_FILE = sim.var
++SUBROUTINE_PATH = .
++# NGC remap whose body waits on a digital input (M66 L3)
++REMAP = M400 modalgroup=10 ngc=m400
++# Python generator remap that keeps yielding INTERP_EXECUTE_FINISH
++REMAP = M401 modalgroup=10 python=m401
++
++[PYTHON]
++TOPLEVEL = toplevel.py
++PATH_PREPEND = .
++
++[EMCMOT]
++EMCMOT = motmod
++COMM_TIMEOUT = 4.0
++BASE_PERIOD = 0
++SERVO_PERIOD = 1000000
++
++[TASK]
++TASK = milltask
++CYCLE_TIME = 0.001
++
++[HAL]
++HALFILE = LIB:core_sim.hal
++
++[TRAJ]
++NO_FORCE_HOMING = 1
++AXES = 3
++COORDINATES = X Y Z
++LINEAR_UNITS = mm
++ANGULAR_UNITS = degree
++DEFAULT_LINEAR_VELOCITY = 4
++MAX_LINEAR_VELOCITY = 4
++
++[KINS]
++KINEMATICS =  trivkins
++JOINTS = 3
++
++[AXIS_X]
++MIN_LIMIT = -40.0
++MAX_LIMIT = 40.0
++MAX_VELOCITY = 4
++MAX_ACCELERATION = 1000.0
++
++[JOINT_0]
++TYPE =             LINEAR
++HOME =             0.000
++MAX_VELOCITY =     4
++MAX_ACCELERATION = 1000.0
++BACKLASH =         0.000
++INPUT_SCALE =      4000
++OUTPUT_SCALE =     1.000
++MIN_LIMIT =        -40.0
++MAX_LIMIT =        40.0
++FERROR =           0.050
++MIN_FERROR =       0.010
++
++[AXIS_Y]
++MIN_LIMIT = -40.0
++MAX_LIMIT = 40.0
++MAX_VELOCITY = 4
++MAX_ACCELERATION = 1000.0
++
++[JOINT_1]
++TYPE =             LINEAR
++HOME =             0.000
++MAX_VELOCITY =     4
++MAX_ACCELERATION = 1000.0
++BACKLASH =         0.000
++INPUT_SCALE =      4000
++OUTPUT_SCALE =     1.000
++MIN_LIMIT =        -40.0
++MAX_LIMIT =        40.0
++FERROR =           0.050
++MIN_FERROR =       0.010
++
++[AXIS_Z]
++MIN_LIMIT = -4.0
++MAX_LIMIT = 4.0
++MAX_VELOCITY = 4
++MAX_ACCELERATION = 1000.0
++
++[JOINT_2]
++TYPE =             LINEAR
++HOME =             0.0
++MAX_VELOCITY =     4
++MAX_ACCELERATION = 1000.0
++BACKLASH =         0.000
++INPUT_SCALE =      4000
++OUTPUT_SCALE =     1.000
++MIN_LIMIT =        -4.0
++MAX_LIMIT =        4.0
++FERROR =           0.050
++MIN_FERROR =       0.010
+diff --git a/tests/remap/mdi-remap-abort/test.sh b/tests/remap/mdi-remap-abort/test.sh
+new file mode 100755
+index 0000000..a16f6fa
+--- /dev/null
++++ b/tests/remap/mdi-remap-abort/test.sh
+@@ -0,0 +1,2 @@
++#!/bin/bash
++exec linuxcnc -r test.ini
+diff --git a/tests/remap/mdi-remap-abort/toplevel.py b/tests/remap/mdi-remap-abort/toplevel.py
+new file mode 100644
+index 0000000..0dc38fa
+--- /dev/null
++++ b/tests/remap/mdi-remap-abort/toplevel.py
+@@ -0,0 +1 @@
++import remap
