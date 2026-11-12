@@ -6,15 +6,16 @@
 
 #include <hal.h>
 #include <rtapi.h>
-#include <rtapi_mutex.h>
 
 #include "config.h"
+#include "hal/query.hpp"
 #include "scope/delta_count.hpp"
+#include "scope/sample_codec.hpp"
 #include "scope/shm_abi.h"
 
-// Scope source lookup and thread attachment use the same private HAL lists as
-// halcmd. This is the native-only implementation seam; no transport
-// abstraction layer crosses it.
+// Scope source lookup and thread attachment use LinuxCNC's public HAL query
+// API, as halscope does. This is the native-only implementation seam; no
+// transport abstraction layer crosses it.
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -22,32 +23,38 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
-#include <cmath>
 #include <csignal>
 #include <cstring>
-#include <limits>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <utility>
-
-#include "hal_priv.h"
 
 extern char** environ;
 
 namespace linuxcnc::server {
 namespace {
 
-class HalMutex final {
- public:
-  HalMutex() {
-    if (!hal_data)
-      throw ScopeControllerError("HAL is not initialized", -ENODEV);
-    rtapi_mutex_get(&hal_data->mutex);
-  }
-  ~HalMutex() { rtapi_mutex_give(&hal_data->mutex); }
-  HalMutex(const HalMutex&) = delete;
-  HalMutex& operator=(const HalMutex&) = delete;
-};
+constexpr const char* kSampleFunction = "scope.sample";
+
+[[noreturn]] void throw_hal_error(const char* operation, int code) {
+  // The query API reports -EFAULT only when HAL shared memory is not mapped.
+  if (code == -EFAULT)
+    throw ScopeControllerError("HAL is not initialized", -ENODEV);
+  throw ScopeControllerError(std::string(operation) + " failed", code);
+}
+
+int checked(int result, const char* operation) {
+  if (result < 0) throw_hal_error(operation, result);
+  return result;
+}
+
+// Runs `fn` while holding HAL's mutex, so all queries it makes observe one
+// consistent HAL state.
+template <typename Fn>
+void run_locked(Fn&& fn) {
+  checked(hal_query::with_lock(std::forward<Fn>(fn)), "HAL lock");
+}
 
 ScopeState scope_state(linuxcnc_scope_state_t state) {
   switch (state) {
@@ -82,75 +89,108 @@ bool starts_with(const char* value, std::string_view prefix) {
 }
 
 bool has_scope_controller_owner() {
-  if (!hal_data) return false;
-  HalMutex lock;
-  for (SHMFIELD(hal_comp_t) next = hal_data->comp_list_ptr; next;
-       next = SHMPTR(next)->next_ptr) {
-    auto* component = static_cast<hal_comp_t*>(SHMPTR(next));
-    if (!component) continue;
-    if (std::strcmp(component->name, "halscope") == 0) return true;
-    if (starts_with(component->name, "linuxcnc-grpc-scope") &&
-        process_is_live(component->pid))
-      return true;
-  }
-  return false;
+  // Like the previous implementation, the check needs this process to have
+  // HAL mapped already; before that there is nothing to inspect.
+  if (!hal_is_init()) return false;
+  bool found = false;
+  checked(hal_query::list_components([&](hal_query_t& query) {
+            if (!query.name) return 0;
+            if (std::strcmp(query.name, "halscope") == 0 ||
+                (starts_with(query.name, "linuxcnc-grpc-scope") &&
+                 process_is_live(query.comp.pid))) {
+              found = true;
+              return hal_query::kStop;
+            }
+            return 0;
+          }),
+          "hal_list_comp");
+  return found;
 }
 
-void* resolve_scope_source_unlocked(const ScopeSource& source,
-                                    hal_type_t* type) {
-  if (!type) return nullptr;
-  *type = HAL_TYPE_UNSPECIFIED;
-  if (source.name.empty()) return nullptr;
+struct ResolvedSource {
+  rtapi_intptr_t offset = 0;
+  hal_type_t type = HAL_TYPE_UNSPECIFIED;
+};
+
+// Resolves a channel source to the offset of its value in HAL shared memory,
+// the form scope_rt maps back with hal_reference_map(). A pin linked to a
+// signal resolves to the signal's value; an unlinked pin to its own value.
+// Returns nullopt when the item does not exist or has no value.
+std::optional<ResolvedSource> resolve_scope_source(const ScopeSource& source) {
+  if (source.name.empty() || source.name.size() > HAL_NAME_LEN)
+    return std::nullopt;
+  hal_query_t query{};
+  query.name = source.name.c_str();
+  int result = 0;
   switch (source.kind) {
-    case ScopeSourceKind::Param: {
-      auto* parameter = halpr_find_param_by_name(source.name.c_str());
-      if (!parameter) return nullptr;
-      *type = parameter->type;
-      return reinterpret_cast<void*>(SHMPTR(parameter->data_ptr));
-    }
-    case ScopeSourceKind::Pin: {
-      auto* pin = halpr_find_pin_by_name(source.name.c_str());
-      if (!pin) return nullptr;
-      *type = pin->type;
-      if (pin->signal) {
-        auto* signal = static_cast<hal_sig_t*>(SHMPTR(pin->signal));
-        return signal ? reinterpret_cast<void*>(SHMPTR(signal->data_ptr))
-                      : nullptr;
-      }
-      return &pin->dummysig;
-    }
-    case ScopeSourceKind::Signal: {
-      auto* signal = halpr_find_sig_by_name(source.name.c_str());
-      if (!signal) return nullptr;
-      *type = signal->type;
-      return reinterpret_cast<void*>(SHMPTR(signal->data_ptr));
-    }
+    case ScopeSourceKind::Param:
+      query.qtype = HAL_QTYPE_PARAM;
+      result = hal_getref_p(&query);
+      break;
+    case ScopeSourceKind::Pin:
+      query.qtype = HAL_QTYPE_PIN;
+      result = hal_getref_p(&query);
+      break;
+    case ScopeSourceKind::Signal:
+      result = hal_getref_s(&query);
+      break;
+    default:
+      return std::nullopt;
   }
-  return nullptr;
+  // -ENOENT: no such item; -EIO: the item has no data target.
+  if (result == -ENOENT || result == -EIO) return std::nullopt;
+  checked(result, source.kind == ScopeSourceKind::Signal ? "hal_getref_s"
+                                                         : "hal_getref_p");
+  const bool signal = source.kind == ScopeSourceKind::Signal;
+  const hal_refs_u ref = signal ? query.sig.ref : query.pp.ref;
+  ResolvedSource resolved;
+  resolved.type = signal ? query.sig.type : query.pp.type;
+  // HAL fills the reference through its hal_sint_t member.
+  resolved.offset = hal_reference_unmap(static_cast<const void*>(ref.s));
+  if (resolved.offset <= 0) return std::nullopt;
+  return resolved;
 }
 
-std::string find_scope_thread_unlocked() {
-  auto* scope_function = halpr_find_funct_by_name("scope.sample");
-  if (!scope_function) return {};
-  for (SHMFIELD(hal_thread_t) next = hal_data->thread_list_ptr; next;
-       next = SHMPTR(next)->next_ptr) {
-    auto* thread = static_cast<hal_thread_t*>(SHMPTR(next));
-    if (!thread) continue;
-    auto* root = &thread->funct_list;
-    for (auto* entry = list_next(root); entry != root;
-         entry = list_next(entry)) {
-      auto* function_entry = reinterpret_cast<hal_funct_entry_t*>(entry);
-      auto* function =
-          static_cast<hal_funct_t*>(SHMPTR(function_entry->funct_ptr));
-      if (function == scope_function) return thread->name;
-    }
-  }
-  return {};
+// Name of the thread that runs scope.sample cyclically, or empty.
+std::string find_scope_thread() {
+  std::string thread;
+  checked(hal_query::list_threads(
+              true,
+              [&](hal_query_t& query) {
+                if (query.qtype != HAL_QTYPE_THREAD_FUNCT ||
+                    query.thread.is_init || !query.thread.funct ||
+                    std::strcmp(query.thread.funct, kSampleFunction) != 0)
+                  return 0;
+                thread = query.name;
+                return hal_query::kStop;
+              }),
+          "hal_list_thread");
+  return thread;
+}
+
+// Period of the named thread in nanoseconds, or nullopt if it does not exist.
+std::optional<long> thread_period(const char* name) {
+  std::optional<long> period;
+  checked(hal_query::list_threads(false,
+                                  [&](hal_query_t& query) {
+                                    if (std::strcmp(query.name, name) != 0)
+                                      return 0;
+                                    period = query.thread.period;
+                                    return hal_query::kStop;
+                                  }),
+          "hal_list_thread");
+  return period;
 }
 
 bool scope_rt_loaded() {
-  HalMutex lock;
-  return halpr_find_funct_by_name("scope.sample") != nullptr;
+  bool found = false;
+  checked(hal_query::list_functions([&](hal_query_t& query) {
+            if (std::strcmp(query.name, kSampleFunction) != 0) return 0;
+            found = true;
+            return hal_query::kStop;
+          }),
+          "hal_list_funct");
+  return found;
 }
 
 int load_scope_rt(std::size_t requested_samples) {
@@ -174,75 +214,16 @@ int load_scope_rt(std::size_t requested_samples) {
   return scope_rt_loaded() ? 0 : -ENODEV;
 }
 
-int source_length(hal_type_t type) {
-  switch (type) {
-    case HAL_BIT:
-      return 1;
-    case HAL_FLOAT:
-      return sizeof(hal_float_t);
-    case HAL_S32:
-      return sizeof(hal_s32_t);
-    case HAL_U32:
-      return sizeof(hal_u32_t);
-    default:
-      return 0;
-  }
-}
-
-double sample_value(const linuxcnc_scope_data_t& value, hal_type_t type) {
-  switch (type) {
-    case HAL_BIT:
-      return value.d_u8 ? 1.0 : 0.0;
-    case HAL_FLOAT:
-      return value.d_real;
-    case HAL_S32:
-      return value.d_s32;
-    case HAL_U32:
-      return value.d_u32;
-    default:
-      return 0.0;
-  }
-}
-
 std::int64_t sample_period_ns_unlocked(
     const linuxcnc_scope_shm_control_t& control) {
-  if (!control.thread_name[0] || !hal_data) return 0;
-  HalMutex lock;
-  auto* thread = halpr_find_thread_by_name(control.thread_name);
-  if (!thread || control.mult <= 0) return 0;
-  return static_cast<std::int64_t>(thread->period) * control.mult;
-}
-
-void set_trigger_level(linuxcnc_scope_shm_control_t* control, hal_type_t type,
-                       double value) {
-  switch (type) {
-    case HAL_BIT:
-      control->trig_level.d_u8 = value != 0.0;
-      break;
-    case HAL_S32:
-      control->trig_level.d_s32 = static_cast<rtapi_s32>(value);
-      break;
-    case HAL_U32:
-      control->trig_level.d_u32 = static_cast<rtapi_u32>(value);
-      break;
-    default:
-      control->trig_level.d_real = value;
-      break;
-  }
-}
-
-void validate_trigger_level(hal_type_t type, double value) {
-  if (type == HAL_S32 &&
-      (!std::isfinite(value) ||
-       value < static_cast<double>(std::numeric_limits<rtapi_s32>::lowest()) ||
-       value > static_cast<double>(std::numeric_limits<rtapi_s32>::max()))) {
-    throw ScopeControllerError("S32 trigger level is out of range", -ERANGE);
-  }
-  if (type == HAL_U32 &&
-      (!std::isfinite(value) || value < 0.0 ||
-       value > static_cast<double>(std::numeric_limits<rtapi_u32>::max()))) {
-    throw ScopeControllerError("U32 trigger level is out of range", -ERANGE);
-  }
+  if (!control.thread_name[0] || !hal_is_init()) return 0;
+  // thread_name lives in shared memory; copy it with a bounded length.
+  const std::string name(
+      control.thread_name,
+      strnlen(control.thread_name, sizeof(control.thread_name)));
+  const auto period = thread_period(name.c_str());
+  if (!period || control.mult <= 0) return 0;
+  return static_cast<std::int64_t>(*period) * control.mult;
 }
 
 }  // namespace
@@ -445,7 +426,7 @@ ScopeCapture copy_capture_unlocked(const LinuxCncScopeControllerState& impl,
       int cell = start + sample * control.sample_len + packed_channel;
       cell %= control.buf_len;
       values[static_cast<std::size_t>(sample)] =
-          sample_value(impl.buffer[cell], control.data_type[channel]);
+          scope_codec::decode(impl.buffer[cell], control.data_type[channel]);
     }
     ++packed_channel;
   }
@@ -521,7 +502,7 @@ std::optional<ScopeCaptureDelta> copy_delta_unlocked(
       int cell = start + (first + sample) * sample_length + packed_channel;
       cell %= buffer_length;
       values[static_cast<std::size_t>(sample)] =
-          sample_value(impl.buffer[cell], control.data_type[channel]);
+          scope_codec::decode(impl.buffer[cell], control.data_type[channel]);
     }
     ++packed_channel;
   }
@@ -603,7 +584,7 @@ void teardown(LinuxCncScopeControllerState& impl) noexcept {
     if (impl.control->state != LINUXCNC_SCOPE_IDLE) {
       const std::string thread = impl.control->thread_name;
       if (!thread.empty())
-        hal_del_funct_from_thread("scope.sample", thread.c_str());
+        hal_del_funct_from_thread(kSampleFunction, thread.c_str());
       impl.control->curr = 0;
       impl.control->start = 0;
       impl.control->samples = 0;
@@ -651,47 +632,56 @@ LinuxCncScopeController::LinuxCncScopeController(
     throw ScopeControllerError("hal_init failed for scope controller",
                                impl_->component_id);
   }
-  if (const int loaded = load_scope_rt(requested_samples); loaded != 0) {
-    teardown(*impl_);
-    throw ScopeControllerError("unable to load LinuxCNC scope_rt", loaded);
-  }
-  impl_->shared_memory_id =
-      rtapi_shmem_new(LINUXCNC_SCOPE_SHM_KEY, impl_->component_id,
-                      sizeof(linuxcnc_scope_shm_control_t));
-  if (impl_->shared_memory_id < 0) {
-    const int error = impl_->shared_memory_id;
-    teardown(*impl_);
-    throw ScopeControllerError("scope_rt shared memory is unavailable", error);
-  }
-  void* base = nullptr;
-  const int result = rtapi_shmem_getptr(impl_->shared_memory_id, &base);
-  if (result < 0 || !base) {
-    teardown(*impl_);
-    throw ScopeControllerError("unable to map scope_rt shared memory", result);
-  }
-  impl_->control = static_cast<linuxcnc_scope_shm_control_t*>(base);
-  const auto header = (sizeof(linuxcnc_scope_shm_control_t) + 3UL) & ~3UL;
-  if (impl_->control->shm_size < header || impl_->control->buf_len <= 0 ||
-      impl_->control->shm_size <
-          header + static_cast<unsigned long>(impl_->control->buf_len) *
-                       sizeof(linuxcnc_scope_data_t)) {
-    teardown(*impl_);
-    throw ScopeControllerError(
-        "invalid or incompatible scope_rt shared-memory ABI", -EPROTO);
-  }
-  impl_->buffer = reinterpret_cast<linuxcnc_scope_data_t*>(
-      static_cast<char*>(base) + header);
-  if (!impl_->control->thread_name[0]) {
-    HalMutex lock;
-    const auto thread = find_scope_thread_unlocked();
-    if (!thread.empty()) {
-      std::strncpy(impl_->control->thread_name, thread.c_str(), HAL_NAME_LEN);
-      impl_->control->thread_name[HAL_NAME_LEN] = '\0';
+  // Every failure from here on must release the HAL component, the shared
+  // memory mapping and, if attached, scope.sample.
+  try {
+    if (const int loaded = load_scope_rt(requested_samples); loaded != 0) {
+      throw ScopeControllerError("unable to load LinuxCNC scope_rt", loaded);
     }
-  }
-  if (const int ready = hal_ready(impl_->component_id); ready != 0) {
+    impl_->shared_memory_id =
+        rtapi_shmem_new(LINUXCNC_SCOPE_SHM_KEY, impl_->component_id,
+                        sizeof(linuxcnc_scope_shm_control_t));
+    if (impl_->shared_memory_id < 0) {
+      const int error = impl_->shared_memory_id;
+      throw ScopeControllerError("scope_rt shared memory is unavailable",
+                                 error);
+    }
+    void* base = nullptr;
+    const int result = rtapi_shmem_getptr(impl_->shared_memory_id, &base);
+    if (result < 0 || !base) {
+      throw ScopeControllerError("unable to map scope_rt shared memory",
+                                 result);
+    }
+    impl_->control = static_cast<linuxcnc_scope_shm_control_t*>(base);
+    // scope_rt sets buf_len = (shm_size - header) / sizeof(sample), with the
+    // header rounded up to 8 bytes. A module built with another control-block
+    // layout yields a different buffer length for the same segment size.
+    constexpr auto header = LINUXCNC_SCOPE_BUFFER_OFFSET;
+    const auto shm_size = impl_->control->shm_size;
+    const auto buffer_length = impl_->control->buf_len;
+    if (shm_size < header || buffer_length <= 0 ||
+        (shm_size - header) / sizeof(linuxcnc_scope_data_t) !=
+            static_cast<unsigned long>(buffer_length)) {
+      // Keep teardown from writing control fields into a foreign layout.
+      impl_->control = nullptr;
+      throw ScopeControllerError(
+          "invalid or incompatible scope_rt shared-memory ABI", -EPROTO);
+    }
+    impl_->buffer = reinterpret_cast<linuxcnc_scope_data_t*>(
+        static_cast<char*>(base) + header);
+    if (!impl_->control->thread_name[0]) {
+      const auto thread = find_scope_thread();
+      if (!thread.empty()) {
+        std::strncpy(impl_->control->thread_name, thread.c_str(), HAL_NAME_LEN);
+        impl_->control->thread_name[HAL_NAME_LEN] = '\0';
+      }
+    }
+    if (const int ready = hal_ready(impl_->component_id); ready != 0) {
+      throw ScopeControllerError("unable to ready scope controller", ready);
+    }
+  } catch (...) {
     teardown(*impl_);
-    throw ScopeControllerError("unable to ready scope controller", ready);
+    throw;
   }
   start_polling();
 }
@@ -750,32 +740,30 @@ void LinuxCncScopeController::configure(const std::string& owner,
                                -EINVAL);
   }
 
-  std::array<int, kScopeChannelCount> offsets{};
+  std::array<rtapi_intptr_t, kScopeChannelCount> offsets{};
   std::array<hal_type_t, kScopeChannelCount> types{};
   std::array<char, kScopeChannelCount> lengths{};
   types.fill(HAL_TYPE_UNSPECIFIED);
   long period = 0;
   std::string attached_thread;
-  {
-    HalMutex hal_lock;
-    auto* thread = halpr_find_thread_by_name(config.thread_name.c_str());
-    if (thread) period = thread->period;
+  run_locked([&] {
+    period = thread_period(config.thread_name.c_str()).value_or(0);
     for (std::size_t index = 0; index < kScopeChannelCount; ++index) {
       const auto& channel = config.channels[index];
       if (!channel.enabled) continue;
-      hal_type_t type = HAL_TYPE_UNSPECIFIED;
-      void* data = resolve_scope_source_unlocked(channel.source, &type);
-      const int length = source_length(type);
-      if (!data || length == 0) {
+      const auto source = resolve_scope_source(channel.source);
+      if (!source || !scope_codec::sampleable(source->type)) {
         throw ScopeControllerError("invalid or unsupported scope source",
                                    -EINVAL);
       }
-      offsets[index] = hal_shmoff(data);
-      types[index] = type;
-      lengths[index] = static_cast<char>(length);
+      offsets[index] = source->offset;
+      types[index] = source->type;
+      // scope_rt samples every type into one full cell; any non-zero length
+      // enables the channel. halscope uses the same value.
+      lengths[index] = static_cast<char>(sizeof(linuxcnc_scope_data_t));
     }
-    attached_thread = find_scope_thread_unlocked();
-  }
+    attached_thread = find_scope_thread();
+  });
   if (period <= 0)
     throw ScopeControllerError("scope thread is unavailable", -ENOENT);
   const auto max_multiplier =
@@ -792,8 +780,8 @@ void LinuxCncScopeController::configure(const std::string& owner,
   const auto trigger_type =
       config.trigger_channel > 0
           ? types[static_cast<std::size_t>(config.trigger_channel - 1)]
-          : HAL_FLOAT;
-  validate_trigger_level(trigger_type, config.trigger_level);
+          : HAL_REAL;
+  scope_codec::validate_trigger_level(trigger_type, config.trigger_level);
 
   if (impl_->control->state != LINUXCNC_SCOPE_IDLE) {
     impl_->control->state = LINUXCNC_SCOPE_RESET;
@@ -803,7 +791,7 @@ void LinuxCncScopeController::configure(const std::string& owner,
     }
     if (impl_->control->state != LINUXCNC_SCOPE_IDLE) {
       if (!attached_thread.empty())
-        hal_del_funct_from_thread("scope.sample", attached_thread.c_str());
+        hal_del_funct_from_thread(kSampleFunction, attached_thread.c_str());
       impl_->control->curr = 0;
       impl_->control->start = 0;
       impl_->control->samples = 0;
@@ -814,7 +802,7 @@ void LinuxCncScopeController::configure(const std::string& owner,
   }
   if (attached_thread != config.thread_name) {
     if (!attached_thread.empty()) {
-      if (const int result = hal_del_funct_from_thread("scope.sample",
+      if (const int result = hal_del_funct_from_thread(kSampleFunction,
                                                        attached_thread.c_str());
           result != 0) {
         throw ScopeControllerError(
@@ -822,7 +810,7 @@ void LinuxCncScopeController::configure(const std::string& owner,
       }
     }
     if (const int result = hal_add_funct_to_thread(
-            "scope.sample", config.thread_name.c_str(), -1);
+            kSampleFunction, config.thread_name.c_str(), -1);
         result != 0) {
       throw ScopeControllerError("unable to link scope.sample to scope thread",
                                  result);
@@ -842,7 +830,8 @@ void LinuxCncScopeController::configure(const std::string& owner,
       config.pre_trigger, 0, std::max(0, impl_->control->rec_len - 1));
   impl_->control->mult = config.multiplier;
   impl_->control->trig_chan = config.trigger_channel;
-  set_trigger_level(impl_->control, trigger_type, config.trigger_level);
+  scope_codec::encode_trigger_level(&impl_->control->trig_level, trigger_type,
+                                    config.trigger_level);
   impl_->control->trig_edge = config.rising ? 1 : 0;
   impl_->control->auto_trig = config.automatic ? 1 : 0;
   for (std::size_t index = 0; index < kScopeChannelCount; ++index) {

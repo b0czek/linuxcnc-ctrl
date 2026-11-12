@@ -6,19 +6,19 @@ Subject: [PATCH] hal: support cross-compiling external components
 ---
  docs/src/man/man1/halcompile.1.adoc           |  34 ++++
  src/Makefile.modinc.in                        |  64 +++++--
- src/hal/utils/halcompile.g                    | 129 +++++++++++--
+ src/hal/utils/halcompile.g                    | 130 ++++++++++++--
  tests/halcompile/cross-tools/.gitignore       |   2 +
  tests/halcompile/cross-tools/checkresult      |   4 +
  tests/halcompile/cross-tools/cross_tools.comp |   6 +
  tests/halcompile/cross-tools/test.sh          | 170 ++++++++++++++++++
- 7 files changed, 382 insertions(+), 27 deletions(-)
+ 7 files changed, 383 insertions(+), 27 deletions(-)
  create mode 100644 tests/halcompile/cross-tools/.gitignore
  create mode 100755 tests/halcompile/cross-tools/checkresult
  create mode 100644 tests/halcompile/cross-tools/cross_tools.comp
  create mode 100755 tests/halcompile/cross-tools/test.sh
 
 diff --git a/docs/src/man/man1/halcompile.1.adoc b/docs/src/man/man1/halcompile.1.adoc
-index c06cd1b868..f5f5bc1116 100644
+index 593be84..e688a75 100644
 --- a/docs/src/man/man1/halcompile.1.adoc
 +++ b/docs/src/man/man1/halcompile.1.adoc
 @@ -74,6 +74,40 @@ Extra arguments passed to the C-compiler.
@@ -63,7 +63,7 @@ index c06cd1b868..f5f5bc1116 100644
  
  *halcompile* performs many different functions:
 diff --git a/src/Makefile.modinc.in b/src/Makefile.modinc.in
-index ed9d75d98c..89904320d4 100644
+index 85bc79d..fd55cf3 100644
 --- a/src/Makefile.modinc.in
 +++ b/src/Makefile.modinc.in
 @@ -65,46 +65,87 @@ BUILDSYS = @BUILD_SYS@
@@ -173,14 +173,14 @@ index ed9d75d98c..89904320d4 100644
 +	$(Q)$(OBJDUMP) -w -j .rtapi_export -t $*.tmp \
  	| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($$6,16))} END{print "local : * ; };"}' \
  	> $*.ver
- 	$(Q)$(CC) -shared -Bsymbolic $(LDFLAGS) -Wl,--version-script,$*.ver -o $@ $^ -lm $(EXTRA_LDFLAGS)
+ 	$(Q)$(CC) -shared -Wl,-Bsymbolic $(LDFLAGS) -Wl,--version-script,$*.ver -o $@ $^ -lm $(EXTRA_LDFLAGS)
 @@ -130,4 +171,3 @@ endif
  ifeq ($(BUILDSYS),normal)
  $(error Makefile.modinc is only suitable for 'kbuild' kernels and 'uspace' systems)
  endif
 -
 diff --git a/src/hal/utils/halcompile.g b/src/hal/utils/halcompile.g
-index fcce8c6329..e8db9fcd42 100644
+index 6bd2afa..2daaf56 100644
 --- a/src/hal/utils/halcompile.g
 +++ b/src/hal/utils/halcompile.g
 @@ -97,7 +97,7 @@ parser Hal:
@@ -192,7 +192,7 @@ index fcce8c6329..e8db9fcd42 100644
  import subprocess
  BASE = os.path.abspath(os.path.join(os.path.dirname(sys.argv[0]), ".."))
  BINDIR = os.getenv('USER_MODULE_DIR', None) or os.path.join(BASE, "bin")
-@@ -807,6 +807,9 @@ INSTALL, COMPILE, PREPROCESS, DOCUMENT, INSTALLDOC, VIEWDOC, MODINC = range(7)
+@@ -982,6 +982,9 @@ INSTALL, COMPILE, PREPROCESS, DOCUMENT, INSTALLDOC, VIEWDOC, MODINC = range(7)
  modename = ("install", "compile", "preprocess", "document", "installdoc", "viewdoc", "print-modinc")
  
  modinc = None
@@ -202,7 +202,7 @@ index fcce8c6329..e8db9fcd42 100644
  def find_modinc():
      global modinc
      if modinc: return modinc
-@@ -818,44 +821,89 @@ def find_modinc():
+@@ -993,44 +996,89 @@ def find_modinc():
              return e
      raise SystemExit("Unable to locate Makefile.modinc")
  
@@ -305,7 +305,7 @@ index fcce8c6329..e8db9fcd42 100644
      if mode == COMPILE:
          for extension in ".ko", ".so", ".o":
              kobjname = os.path.splitext(filename)[0] + extension
-@@ -1187,6 +1235,18 @@ Options to add compile and link flags (only for userspace, only for .c files)
+@@ -1362,6 +1410,18 @@ Options to add compile and link flags (only for userspace, only for .c files)
      --extra-compile-args="-I/usr/include/..."
      --extra-link-args="-l..."
  
@@ -324,7 +324,7 @@ index fcce8c6329..e8db9fcd42 100644
  Do not use [sudo] for RIP installation.
  
  """ % {'name': os.path.basename(sys.argv[0]),'dflt':MAX_PERSONALITIES})
-@@ -1205,14 +1265,24 @@ def main():
+@@ -1382,14 +1442,25 @@ def main():
      outfile = None
      userspace = False
      global options
@@ -339,18 +339,19 @@ index fcce8c6329..e8db9fcd42 100644
 +    objdump = None
 +    sysroot = None
      try:
-         opts, args = getopt.getopt(sys.argv[1:], "UluijJcpdak:o:h?P:",
+         opts, args = getopt.getopt(sys.argv[1:], "UluijJcpdak:o:h?P:w",
                             ['unix', 'install', 'compile', 'preprocess', 'outfile=',
                              'document', 'adoc', 'keep-adoc=', 'help', 'userspace', 'install-doc',
                              'view-doc', 'require-license', 'print-modinc',
                              'personalities=', "extra-compile-args=",
--                            'extra-link-args='])
-+                            'extra-link-args=', 'cross-prefix=', 'sysroot=',
-+                            'cc=', 'ld=', 'objdump=', 'make=', 'modinc='])
+-                            'extra-link-args=', 'werror'])
++                            'extra-link-args=', 'werror', 'cross-prefix=',
++                            'sysroot=', 'cc=', 'ld=', 'objdump=', 'make=',
++                            'modinc='])
      except getopt.GetoptError:
          usage(1)
      for k, v in opts:
-@@ -1257,9 +1327,38 @@ def main():
+@@ -1434,11 +1505,40 @@ def main():
              option("extra_compile_args", v)
          if k in ("--extra-link-args"):
              option("extra_link_args", v)
@@ -370,6 +371,8 @@ index fcce8c6329..e8db9fcd42 100644
 +            modinc = os.path.abspath(v)
          if k in ("-?", "-h", "--help"):
              usage(0)
+         if k in ("-w", "--werror"):
+             warn_is_error = True
  
 +    if modinc is not None and not os.path.isfile(modinc):
 +        raise SystemExit("Makefile.modinc does not exist: %s" % modinc)
@@ -391,7 +394,7 @@ index fcce8c6329..e8db9fcd42 100644
  
 diff --git a/tests/halcompile/cross-tools/.gitignore b/tests/halcompile/cross-tools/.gitignore
 new file mode 100644
-index 0000000000..b6e162464d
+index 0000000..b6e1624
 --- /dev/null
 +++ b/tests/halcompile/cross-tools/.gitignore
 @@ -0,0 +1,2 @@
@@ -399,7 +402,7 @@ index 0000000000..b6e162464d
 +with space.*/
 diff --git a/tests/halcompile/cross-tools/checkresult b/tests/halcompile/cross-tools/checkresult
 new file mode 100755
-index 0000000000..367210b0f7
+index 0000000..367210b
 --- /dev/null
 +++ b/tests/halcompile/cross-tools/checkresult
 @@ -0,0 +1,4 @@
@@ -409,19 +412,19 @@ index 0000000000..367210b0f7
 +test -f "$(dirname "$1")/cross_tools.so"
 diff --git a/tests/halcompile/cross-tools/cross_tools.comp b/tests/halcompile/cross-tools/cross_tools.comp
 new file mode 100644
-index 0000000000..1d48f620b8
+index 0000000..8265a4f
 --- /dev/null
 +++ b/tests/halcompile/cross-tools/cross_tools.comp
 @@ -0,0 +1,6 @@
 +component cross_tools;
-+pin out bit ready;
++pin out bool ready;
 +function _;
 +license "GPL";
 +;;
-+ready = 1;
++ready_set(1);
 diff --git a/tests/halcompile/cross-tools/test.sh b/tests/halcompile/cross-tools/test.sh
 new file mode 100755
-index 0000000000..13c1671450
+index 0000000..13c1671
 --- /dev/null
 +++ b/tests/halcompile/cross-tools/test.sh
 @@ -0,0 +1,170 @@

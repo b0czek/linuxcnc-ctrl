@@ -145,7 +145,7 @@ if(LINUXCNC_GRPC_ENABLE_NML AND
     endif()
 endif()
 
-if(LINUXCNC_GRPC_ENABLE_NML AND EXISTS "${LINUXCNC_ROOT}/src/hal/hal_priv.h")
+if(LINUXCNC_GRPC_ENABLE_NML AND EXISTS "${LINUXCNC_ROOT}/src/hal/hal.h")
     find_library(LINUXCNC_HAL_LIBRARY NAMES linuxcnchal PATHS "${LINUXCNC_ROOT}/lib" NO_DEFAULT_PATH)
     if(LINUXCNC_HAL_LIBRARY)
         target_sources(linuxcnc-grpc-domain PRIVATE

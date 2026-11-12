@@ -6,23 +6,72 @@ Subject: [PATCH] motion: arm Single Step during active execution
 Forward AUTO_STEP to motion while an AUTO program is already running. The default trajectory planner latches the active source block, or the active G76 safe-approach or infeed-thread-clearance unit, and finishes that unit at an exact boundary before pausing.
 
 Keep later prequeued motion from starting, restore temporary exact boundaries when Step is canceled by Resume or Stop, and report single_stepping while an in-flight step remains armed. Cover ordinary multi-move blocks and an active G76 thread with later passes queued.
+
+Ported onto v2.10.0-pre2. The two in-flight scenarios, already present
+in the earlier G76 Stop patch's test list, are added here with the
+feature and its program.
 ---
- src/emc/motion/command.c               | 17 +++---
- src/emc/motion/control.c               |  9 +--
- src/emc/task/emctaskmain.cc            | 48 ++++++++--------
- src/emc/tp/tp.c                        | 80 ++++++++++++++++++++------
- src/emc/tp/tp_types.h                  |  6 +-
- tests/resumable-stop/README            | 10 +++-
- tests/resumable-stop/checkresult       |  2 +-
- tests/resumable-stop/inflight-step.ngc |  7 +++
- 8 files changed, 125 insertions(+), 54 deletions(-)
+ src/emc/motion/command.c                   | 17 +++--
+ src/emc/motion/control.c                   |  9 ++-
+ src/emc/task/emctaskmain.cc                | 48 ++++++------
+ src/emc/tp/tp.c                            | 80 ++++++++++++++++----
+ src/emc/tp/tp_types.h                      |  6 +-
+ tests/resumable-stop/README                | 27 +++++++
+ tests/resumable-stop/after-tap-m5.ngc      |  2 +-
+ tests/resumable-stop/after-thread-m5.ngc   |  2 +-
+ tests/resumable-stop/after-thread-m9.ngc   |  2 +-
+ tests/resumable-stop/after-thread-s.ngc    |  2 +-
+ tests/resumable-stop/check-result.sh       | 15 ++++
+ tests/resumable-stop/checkresult           |  4 -
+ tests/resumable-stop/css.ngc               |  2 +-
+ tests/resumable-stop/g76-step/checkresult  |  2 +
+ tests/resumable-stop/g76-step/scenarios    |  6 ++
+ tests/resumable-stop/g76-step/test.sh      |  3 +
+ tests/resumable-stop/g76-stop/checkresult  |  2 +
+ tests/resumable-stop/g76-stop/scenarios    |  5 ++
+ tests/resumable-stop/g76-stop/test.sh      |  3 +
+ tests/resumable-stop/general/checkresult   |  2 +
+ tests/resumable-stop/general/scenarios     | 21 ++++++
+ tests/resumable-stop/general/test.sh       |  3 +
+ tests/resumable-stop/inflight-step.ngc     |  7 ++
+ tests/resumable-stop/multi-spindle.ngc     |  2 +-
+ tests/resumable-stop/orient.ngc            |  2 +-
+ tests/resumable-stop/rapid-then-feed.ngc   |  2 +-
+ tests/resumable-stop/run-scenarios.sh      | 61 +++++++++++++++
+ tests/resumable-stop/tap.ngc               |  6 +-
+ tests/resumable-stop/test-ui.py            | 80 ++++++++++++++++++++
+ tests/resumable-stop/test.ngc              |  2 +-
+ tests/resumable-stop/test.sh               | 87 ----------------------
+ tests/resumable-stop/thread-g95-thread.ngc |  2 +-
+ tests/resumable-stop/thread-then-steps.ngc |  4 +-
+ tests/resumable-stop/thread.ngc            |  6 +-
+ tests/resumable-stop/threading/checkresult |  2 +
+ tests/resumable-stop/threading/scenarios   |  9 +++
+ tests/resumable-stop/threading/test.sh     |  3 +
+ 37 files changed, 378 insertions(+), 160 deletions(-)
+ create mode 100755 tests/resumable-stop/check-result.sh
+ delete mode 100755 tests/resumable-stop/checkresult
+ create mode 100755 tests/resumable-stop/g76-step/checkresult
+ create mode 100644 tests/resumable-stop/g76-step/scenarios
+ create mode 100755 tests/resumable-stop/g76-step/test.sh
+ create mode 100755 tests/resumable-stop/g76-stop/checkresult
+ create mode 100644 tests/resumable-stop/g76-stop/scenarios
+ create mode 100755 tests/resumable-stop/g76-stop/test.sh
+ create mode 100755 tests/resumable-stop/general/checkresult
+ create mode 100644 tests/resumable-stop/general/scenarios
+ create mode 100755 tests/resumable-stop/general/test.sh
  create mode 100644 tests/resumable-stop/inflight-step.ngc
+ create mode 100755 tests/resumable-stop/run-scenarios.sh
+ delete mode 100755 tests/resumable-stop/test.sh
+ create mode 100755 tests/resumable-stop/threading/checkresult
+ create mode 100644 tests/resumable-stop/threading/scenarios
+ create mode 100755 tests/resumable-stop/threading/test.sh
 
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index b6ad9c1504..c166af652b 100644
+index a8e8ae3..ead94cb 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
-@@ -1269,26 +1269,29 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1381,26 +1381,29 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    break;
  
  	case EMCMOT_STEP:
@@ -60,10 +109,10 @@ index b6ad9c1504..c166af652b 100644
  	    break;
  
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index 160c2dcd2c..040e534653 100644
+index e347bf1..75a9f1c 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
-@@ -2225,14 +2225,15 @@ static void update_status(void)
+@@ -2319,14 +2319,15 @@ static void update_status(void)
  
      if (emcmotStatus->stepping) {
          TP_STRUCT *tp = &emcmotInternal->coord_tp;
@@ -84,10 +133,10 @@ index 160c2dcd2c..040e534653 100644
              emcmotStatus->stepping = 0;
              emcmotStatus->paused = 1;
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index beb6d565d6..e01ef50ce8 100644
+index e0156ee..a16de26 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -462,6 +462,7 @@ static int programStartLine = 0;	// which line to run program from
+@@ -504,6 +504,7 @@ static int programStartLine = 0;	// which line to run program from
  int stepping = 0;
  int steppingWait = 0;
  static int steppedLine = 0;
@@ -95,7 +144,7 @@ index beb6d565d6..e01ef50ce8 100644
  /*
   * Pass groups delimit commands that are still owned by task. Motion that was
   * already queued before resumable Stop is stepped by TP to its marked G76
-@@ -477,6 +478,7 @@ void emcTaskResetSteppingState()
+@@ -519,6 +520,7 @@ void emcTaskResetSteppingState()
      steppedLine = 0;
      currentPassGroup = 0;
      steppedPassGroup = 0;
@@ -103,7 +152,7 @@ index beb6d565d6..e01ef50ce8 100644
  }
  
  // Variables to handle MDI call interrupts
-@@ -818,6 +820,22 @@ static void emcTaskStepInterpreter()
+@@ -904,6 +906,22 @@ static void emcTaskStepInterpreter()
      emcStatus->task.task_paused = 1;
  }
  
@@ -126,7 +175,7 @@ index beb6d565d6..e01ef50ce8 100644
  static void emcTaskStopClear()
  {
      bool was_active = emcStatus &&
-@@ -1432,13 +1450,7 @@ static int emcTaskPlan(void)
+@@ -1547,13 +1565,7 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -141,7 +190,7 @@ index beb6d565d6..e01ef50ce8 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1512,17 +1524,9 @@ static int emcTaskPlan(void)
+@@ -1627,17 +1639,9 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -160,7 +209,7 @@ index beb6d565d6..e01ef50ce8 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1588,13 +1592,7 @@ static int emcTaskPlan(void)
+@@ -1703,13 +1707,7 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -175,7 +224,7 @@ index beb6d565d6..e01ef50ce8 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -3676,6 +3674,10 @@ int main(int argc, char *argv[])
+@@ -4084,6 +4082,10 @@ int main(int argc, char *argv[])
  	// update subordinate status
  
  	emcMotionUpdate(&emcStatus->motion);
@@ -187,22 +236,22 @@ index beb6d565d6..e01ef50ce8 100644
  	// following error, etc.) unhome joints marked VOLATILE_HOME. The estop
  	// and machine-off paths already do their own unhome; this catches the
 diff --git a/src/emc/tp/tp.c b/src/emc/tp/tp.c
-index 00a06f1a75..81d50e10d3 100644
+index c690207..dac694f 100644
 --- a/src/emc/tp/tp.c
 +++ b/src/emc/tp/tp.c
-@@ -342,9 +342,9 @@ STATIC inline double tpGetRealFinalVel(TP_STRUCT const * const tp,
+@@ -357,9 +357,9 @@ STATIC inline double tpGetRealFinalVel(TP_STRUCT const * const tp,
       * If the term_cond gets changed out from under us, detect this and force final velocity to zero
       */
  
 -    if ((emcmotStatus->stepping && !tp->stepping_to_pass_clearance) ||
 +    if ((emcmotStatus->stepping && !tp->stepping_to_motion_target) ||
-             (tp->stopping && tc == tp->stop_tc) ||
+             (tp->stop_pass_id && tc == tp->stop_tc) ||
 -            (tp->stepping_to_pass_clearance && tc == tp->step_tc) ||
 +            (tp->stepping_to_motion_target && tc == tp->step_tc) ||
              tc->term_cond != TC_TERM_COND_TANGENT || tp->reverse_run) {
          return 0.0;
      }
-@@ -504,7 +504,11 @@ int tpClear(TP_STRUCT * const tp)
+@@ -497,7 +497,11 @@ int tpClear(TP_STRUCT * const tp)
      tp->step_tc = 0;
      tp->step_target_pending = 0;
      tp->step_pass_id = 0;
@@ -215,7 +264,7 @@ index 00a06f1a75..81d50e10d3 100644
      tp->reverse_run = 0;
      tp->synchronized = 0;
      tp->uu_per_rev = 0.0;
-@@ -1598,7 +1602,7 @@ STATIC inline int tpAddSegmentToQueue(TP_STRUCT * const tp, TC_STRUCT * const tc
+@@ -1595,7 +1599,7 @@ STATIC inline int tpAddSegmentToQueue(TP_STRUCT * const tp, TC_STRUCT * const tc
                  tp->stop_pass_id);
          return TP_ERR_FAIL;
      }
@@ -224,7 +273,7 @@ index 00a06f1a75..81d50e10d3 100644
              tp->step_target_pending && tp->step_pass_id && !tp->step_tc &&
              tc->g76_pass_id != tp->step_pass_id) {
          rtapi_print_msg(RTAPI_MSG_ERR,
-@@ -1624,12 +1628,11 @@ STATIC inline int tpAddSegmentToQueue(TP_STRUCT * const tp, TC_STRUCT * const tc
+@@ -1621,12 +1625,11 @@ STATIC inline int tpAddSegmentToQueue(TP_STRUCT * const tp, TC_STRUCT * const tc
          }
      }
      if (queued_tc && queued_tc->g76_pass_clearance &&
@@ -238,7 +287,7 @@ index 00a06f1a75..81d50e10d3 100644
      // Store end of current move as new final goal of TP
      // KLUDGE: endpoint is garbage for rigid tap since it's supposed to retract past the start point.
      if (tc->motion_type != TC_RIGIDTAP) {
-@@ -3442,10 +3445,11 @@ STATIC int tpCompleteSegment(TP_STRUCT * const tp,
+@@ -3496,10 +3499,11 @@ STATIC int tpCompleteSegment(TP_STRUCT * const tp,
          tp->stop_tc = 0;
          tp->stop_pass_id = 0;
      }
@@ -251,7 +300,7 @@ index 00a06f1a75..81d50e10d3 100644
      }
  
      //TODO make progress to match target?
-@@ -4220,7 +4224,7 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
+@@ -4384,7 +4388,7 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
              }
              return TP_ERR_WAITING;
          }
@@ -260,7 +309,7 @@ index 00a06f1a75..81d50e10d3 100644
                  tp->step_pass_id && !tp->step_tc) {
              tpHandleEmptyQueue(tp);
              return TP_ERR_WAITING;
-@@ -4375,6 +4379,30 @@ STATIC int tpGetQueuedG76PassId(TP_STRUCT * const tp)
+@@ -4573,6 +4577,30 @@ STATIC int tpGetQueuedG76PassId(TP_STRUCT * const tp)
      return tc ? tc->g76_pass_id : 0;
  }
  
@@ -291,7 +340,7 @@ index 00a06f1a75..81d50e10d3 100644
  int tpPause(TP_STRUCT * const tp)
  {
      if (0 == tp) {
-@@ -4382,10 +4410,12 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4580,10 +4608,12 @@ int tpPause(TP_STRUCT * const tp)
      }
  
      if (tp->stopping) {
@@ -303,9 +352,9 @@ index 00a06f1a75..81d50e10d3 100644
 +        tp->step_motion_id = 0;
 +        tp->stepping_to_motion_target = 0;
          TC_STRUCT *tc = tcqItem(&tp->queue, 0);
-         bool in_g76_cut_or_clearance = tc && tc->g76_pass_id &&
-             ((tc->active && tc->synchronized == TC_SYNC_POSITION &&
-@@ -4418,7 +4448,7 @@ int tpPause(TP_STRUCT * const tp)
+         /*
+          * A G76 cut that has passed spindle index, or its explicitly marked
+@@ -4630,7 +4660,7 @@ int tpPause(TP_STRUCT * const tp)
              tp->pausing = 1;
          }
      } else if (emcmotStatus->stepping &&
@@ -314,7 +363,7 @@ index 00a06f1a75..81d50e10d3 100644
          /*
           * EMCMOT_STEP requests default-TP pass targeting through the existing
           * tpPause ABI. Alternate planners leave step_target_pending clear and
-@@ -4427,15 +4457,25 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4639,15 +4669,25 @@ int tpPause(TP_STRUCT * const tp)
          int pass_id = tpGetQueuedG76PassId(tp);
          if (pass_id) {
              tp->step_pass_id = pass_id;
@@ -344,15 +393,15 @@ index 00a06f1a75..81d50e10d3 100644
          }
      } else {
          tp->pausing = 1;
-@@ -4448,6 +4488,7 @@ int tpResume(TP_STRUCT * const tp)
+@@ -4660,6 +4700,7 @@ int tpResume(TP_STRUCT * const tp)
      if (0 == tp) {
          return TP_ERR_FAIL;
      }
 +    tpRestoreStepTarget(tp);
      tp->pausing = 0;
      tp->stopping = 0;
-     tp->stop_tc = 0;
-@@ -4456,7 +4497,10 @@ int tpResume(TP_STRUCT * const tp)
+     tp->stop_sync_run = 0;
+@@ -4669,7 +4710,10 @@ int tpResume(TP_STRUCT * const tp)
      tp->step_tc = 0;
      tp->step_target_pending = 0;
      tp->step_pass_id = 0;
@@ -364,7 +413,7 @@ index 00a06f1a75..81d50e10d3 100644
      if (MOTION_ID_VALID(tp->spindle.waiting_for_index)) {
          emcmotStatus->spindle_status[
              tp->spindle.spindle_num].spindle_index_enable = 1;
-@@ -4476,7 +4520,11 @@ int tpAbort(TP_STRUCT * const tp)
+@@ -4689,7 +4733,11 @@ int tpAbort(TP_STRUCT * const tp)
          tp->step_tc = 0;
          tp->step_target_pending = 0;
          tp->step_pass_id = 0;
@@ -378,10 +427,10 @@ index 00a06f1a75..81d50e10d3 100644
          tp->aborting = 1;
      }
 diff --git a/src/emc/tp/tp_types.h b/src/emc/tp/tp_types.h
-index 15be0f3127..893a9df4c2 100644
+index 2963bcc..819f508 100644
 --- a/src/emc/tp/tp_types.h
 +++ b/src/emc/tp/tp_types.h
-@@ -147,7 +147,11 @@ typedef struct {
+@@ -171,7 +171,11 @@ typedef struct {
      TC_STRUCT *step_tc;
      int step_target_pending;
      int step_pass_id;
@@ -395,20 +444,41 @@ index 15be0f3127..893a9df4c2 100644
  } TP_STRUCT;
  
 diff --git a/tests/resumable-stop/README b/tests/resumable-stop/README
-index e845030ffb..72607e0da2 100644
+index 8750b87..84de887 100644
 --- a/tests/resumable-stop/README
 +++ b/tests/resumable-stop/README
-@@ -13,11 +13,17 @@ requests across the cut/retract handoff, and a negative G33 test proving that
- an unrelated following rapid is not executed. Single Step coverage enters the
- first G76 pass directly and verifies every cylindrical and tapered safe
- approach step followed by its combined infeed, synchronized-cut, and clearance
--step. It also starts G76 in normal AUTO_RUN, stops after the first pass with later passes
--already queued, and verifies that each
-+step. It also starts G76 in normal AUTO_RUN, stops after the first pass with
-+later passes already queued, and verifies that each
- following AUTO_STEP reaches exactly one cylindrical or tapered safe approach
- endpoint, and the next AUTO_STEP completes that pass's infeed, thread, and
- clearance.
+@@ -1,6 +1,27 @@
+ Verify resumable Stop preserves an active AUTO program and resumes or
+ single-steps it.
+ 
++This directory holds the shared configuration (test.ini, core_sim.hal,
++tool.tbl), the G-code programs and test-ui.py, which runs one scenario per
++LinuxCNC session (selected by RESUMABLE_STOP_SCENARIO). The runtests tests
++are its subdirectories, which run in parallel under ci/test-sharded.sh:
++
++  g76-stop   G76 Stop and clearance, the G76 cut/retract handoff stress test,
++             fperrev
++  g76-step   G76 Single Step (fresh, after Stop, in flight), exit tapers, and
++             the trapezoidal re-run of fperrev
++  threading  G33, G33.1 and G95 Stop cases, commands queued behind them, and
++             the trapezoidal re-run of g33-chain
++  general    everything else, including the at-speed, dwell, orientation and
++             homing scenarios and the trapezoidal re-runs of ordinary and
++             single-step
++
++Each group lists its scenarios in its "scenarios" file. Its test.sh runs them
++through run-scenarios.sh, which starts each from a fresh LinuxCNC session in a
++private copy of the configuration, so groups never share files LinuxCNC
++writes. Its checkresult (check-result.sh) fails unless every listed scenario
++reported success and the count matches the number given in checkresult.
++
+ This regression test exercises the task-level Stop operation directly through
+ the Python command API. It checks that an active feed move stops without
+ aborting queued AUTO state, that spindle and coolant outputs are disabled
+@@ -61,6 +82,12 @@ step. It also starts G76 in normal AUTO_RUN, stops after the first pass with
+ later passes already queued, and verifies that each following AUTO_STEP
+ reaches exactly one cylindrical or tapered safe approach endpoint, and the
+ next AUTO_STEP completes that pass's infeed, thread, and clearance.
 +In-flight Single Step coverage arms during an ordinary source block with three
 +later motion blocks already queued and during an active G76 cut with later
 +passes queued. It verifies that the active block or thread-plus-clearance unit
@@ -418,19 +488,197 @@ index e845030ffb..72607e0da2 100644
  Arc blending is enabled for all scenarios, so the exact-clearance assertions
  also prove that a marked G76 retract endpoint is not trimmed by a following
  rapid. The handoff stress case uses a slow synchronized feed and issues Stop at
+diff --git a/tests/resumable-stop/after-tap-m5.ngc b/tests/resumable-stop/after-tap-m5.ngc
+index f8fa1b5..c6a6868 100644
+--- a/tests/resumable-stop/after-tap-m5.ngc
++++ b/tests/resumable-stop/after-tap-m5.ngc
+@@ -3,5 +3,5 @@ G0 X0 Z0
+ S300 M3
+ G33.1 Z-5 K1
+ M5
+-G1 X5 F60
++G1 X5 F300
+ M2
+diff --git a/tests/resumable-stop/after-thread-m5.ngc b/tests/resumable-stop/after-thread-m5.ngc
+index db6cb3d..e96d6e6 100644
+--- a/tests/resumable-stop/after-thread-m5.ngc
++++ b/tests/resumable-stop/after-thread-m5.ngc
+@@ -3,5 +3,5 @@ G0 X0 Z0
+ S300 M3
+ G33 Z-10 K1
+ M5
+-G1 X5 F60
++G1 X5 F300
+ M2
+diff --git a/tests/resumable-stop/after-thread-m9.ngc b/tests/resumable-stop/after-thread-m9.ngc
+index 30b558d..cfbf687 100644
+--- a/tests/resumable-stop/after-thread-m9.ngc
++++ b/tests/resumable-stop/after-thread-m9.ngc
+@@ -4,5 +4,5 @@ M8
+ S300 M3
+ G33 Z-10 K1
+ M9
+-G1 X5 F60
++G1 X5 F300
+ M2
+diff --git a/tests/resumable-stop/after-thread-s.ngc b/tests/resumable-stop/after-thread-s.ngc
+index 336d6be..6e468d1 100644
+--- a/tests/resumable-stop/after-thread-s.ngc
++++ b/tests/resumable-stop/after-thread-s.ngc
+@@ -3,5 +3,5 @@ G0 X0 Z0
+ S300 M3
+ G33 Z-10 K1
+ S500
+-G1 X5 F60
++G1 X5 F300
+ M2
+diff --git a/tests/resumable-stop/check-result.sh b/tests/resumable-stop/check-result.sh
+new file mode 100755
+index 0000000..7e07466
+--- /dev/null
++++ b/tests/resumable-stop/check-result.sh
+@@ -0,0 +1,15 @@
++#!/bin/sh
++# Shared checkresult for the tests/resumable-stop/<group> tests.
++# Usage: check-result.sh RESULT SCENARIO-FILE COUNT
++# Passes only if the group ran exactly COUNT scenarios, COUNT is the number
++# of entries in SCENARIO-FILE, and every entry reported success.
++set -e
++result=$1 list=$2 count=$3
++entries=$(grep -cv '^[[:space:]]*\(#\|$\)' "$list")
++test "$entries" -eq "$count"
++test "$(grep -c '^resumable stop scenario ok:' "$result")" -eq "$count"
++test "$(grep -c '^resumable stop scenario passed:' "$result")" -eq "$count"
++grep -v '^[[:space:]]*\(#\|$\)' "$list" | while read -r item; do
++    grep -qxF "resumable stop scenario passed: $item" "$result"
++done
++grep -q '^resumable stop scenarios complete$' "$result"
 diff --git a/tests/resumable-stop/checkresult b/tests/resumable-stop/checkresult
-index 4792b570e1..dcdfb2d76f 100755
+deleted file mode 100755
+index 631b3a4..0000000
 --- a/tests/resumable-stop/checkresult
-+++ b/tests/resumable-stop/checkresult
-@@ -1,4 +1,4 @@
- #!/bin/sh
- set -e
--test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 24
-+test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 26
- grep -q '^resumable stop scenarios complete$' "$1"
++++ /dev/null
+@@ -1,4 +0,0 @@
+-#!/bin/sh
+-set -e
+-test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 39
+-grep -q '^resumable stop scenarios complete$' "$1"
+diff --git a/tests/resumable-stop/css.ngc b/tests/resumable-stop/css.ngc
+index 382aaff..8a70da2 100644
+--- a/tests/resumable-stop/css.ngc
++++ b/tests/resumable-stop/css.ngc
+@@ -1,6 +1,6 @@
+ G21 G18 G90
+ G0 X20 Z0
+ G96 D1000 S60 M3
+-G1 X10 F60
++G1 X10 F150
+ M5
+ M2
+diff --git a/tests/resumable-stop/g76-step/checkresult b/tests/resumable-stop/g76-step/checkresult
+new file mode 100755
+index 0000000..0562404
+--- /dev/null
++++ b/tests/resumable-stop/g76-step/checkresult
+@@ -0,0 +1,2 @@
++#!/bin/sh
++exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 6
+diff --git a/tests/resumable-stop/g76-step/scenarios b/tests/resumable-stop/g76-step/scenarios
+new file mode 100644
+index 0000000..df2a2ab
+--- /dev/null
++++ b/tests/resumable-stop/g76-step/scenarios
+@@ -0,0 +1,6 @@
++g76-single-step
++g76-tapered-single-step
++g76-inflight-single-step
++g76-exit-taper
++g76-tapered-exit-taper
++trapezoidal:fperrev
+diff --git a/tests/resumable-stop/g76-step/test.sh b/tests/resumable-stop/g76-step/test.sh
+new file mode 100755
+index 0000000..713f576
+--- /dev/null
++++ b/tests/resumable-stop/g76-step/test.sh
+@@ -0,0 +1,3 @@
++#!/bin/bash
++# Runs the resumable-stop scenarios listed in ./scenarios (see ../README).
++exec bash ../run-scenarios.sh scenarios
+diff --git a/tests/resumable-stop/g76-stop/checkresult b/tests/resumable-stop/g76-stop/checkresult
+new file mode 100755
+index 0000000..92d147c
+--- /dev/null
++++ b/tests/resumable-stop/g76-stop/checkresult
+@@ -0,0 +1,2 @@
++#!/bin/sh
++exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 5
+diff --git a/tests/resumable-stop/g76-stop/scenarios b/tests/resumable-stop/g76-stop/scenarios
+new file mode 100644
+index 0000000..e39cc37
+--- /dev/null
++++ b/tests/resumable-stop/g76-stop/scenarios
+@@ -0,0 +1,5 @@
++g76-handoff-stress
++g76
++g76-tapered
++g76-waiting-index
++fperrev
+diff --git a/tests/resumable-stop/g76-stop/test.sh b/tests/resumable-stop/g76-stop/test.sh
+new file mode 100755
+index 0000000..713f576
+--- /dev/null
++++ b/tests/resumable-stop/g76-stop/test.sh
+@@ -0,0 +1,3 @@
++#!/bin/bash
++# Runs the resumable-stop scenarios listed in ./scenarios (see ../README).
++exec bash ../run-scenarios.sh scenarios
+diff --git a/tests/resumable-stop/general/checkresult b/tests/resumable-stop/general/checkresult
+new file mode 100755
+index 0000000..55e9bbe
+--- /dev/null
++++ b/tests/resumable-stop/general/checkresult
+@@ -0,0 +1,2 @@
++#!/bin/sh
++exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 21
+diff --git a/tests/resumable-stop/general/scenarios b/tests/resumable-stop/general/scenarios
+new file mode 100644
+index 0000000..620d7df
+--- /dev/null
++++ b/tests/resumable-stop/general/scenarios
+@@ -0,0 +1,21 @@
++idle-rejected
++ordinary
++trapezoidal:ordinary
++single-step
++trapezoidal:single-step
++inflight-single-step
++rapid-no-atspeed
++paused-resume
++paused-run
++abort-empty
++orientation
++dwell
++dwell-atspeed
++multi-spindle
++css
++homing
++homing-interrupted
++speed-change-atspeed
++queued-feed-atspeed
++spindle-state
++resume-atspeed
+diff --git a/tests/resumable-stop/general/test.sh b/tests/resumable-stop/general/test.sh
+new file mode 100755
+index 0000000..713f576
+--- /dev/null
++++ b/tests/resumable-stop/general/test.sh
+@@ -0,0 +1,3 @@
++#!/bin/bash
++# Runs the resumable-stop scenarios listed in ./scenarios (see ../README).
++exec bash ../run-scenarios.sh scenarios
 diff --git a/tests/resumable-stop/inflight-step.ngc b/tests/resumable-stop/inflight-step.ngc
 new file mode 100644
-index 0000000000..1f72544983
+index 0000000..1f72544
 --- /dev/null
 +++ b/tests/resumable-stop/inflight-step.ngc
 @@ -0,0 +1,7 @@
@@ -441,3 +689,408 @@ index 0000000000..1f72544983
 +G1 X30
 +G1 X40
 +M2
+diff --git a/tests/resumable-stop/multi-spindle.ngc b/tests/resumable-stop/multi-spindle.ngc
+index ba2e66f..3811387 100644
+--- a/tests/resumable-stop/multi-spindle.ngc
++++ b/tests/resumable-stop/multi-spindle.ngc
+@@ -1,4 +1,4 @@
+ G21 G90
+ G0 X0
+-G1 X10 F60
++G1 X10 F150
+ M2
+diff --git a/tests/resumable-stop/orient.ngc b/tests/resumable-stop/orient.ngc
+index bb08db3..6927a71 100644
+--- a/tests/resumable-stop/orient.ngc
++++ b/tests/resumable-stop/orient.ngc
+@@ -2,5 +2,5 @@ G21 G90
+ G0 X0
+ M19 R90 P1 Q30
+ M19 R180 P0 Q1
+-G1 X20 F60
++G1 X20 F600
+ M2
+diff --git a/tests/resumable-stop/rapid-then-feed.ngc b/tests/resumable-stop/rapid-then-feed.ngc
+index c562a57..531480c 100644
+--- a/tests/resumable-stop/rapid-then-feed.ngc
++++ b/tests/resumable-stop/rapid-then-feed.ngc
+@@ -2,6 +2,6 @@ G21 G90
+ F60
+ S300 M3
+ G0 X80
+-G1 X90
++G1 X90 F300
+ M5
+ M2
+diff --git a/tests/resumable-stop/run-scenarios.sh b/tests/resumable-stop/run-scenarios.sh
+new file mode 100755
+index 0000000..f572282
+--- /dev/null
++++ b/tests/resumable-stop/run-scenarios.sh
+@@ -0,0 +1,61 @@
++#!/bin/bash -e
++# Shared driver for the tests/resumable-stop/<group> runtests tests.
++#
++# Usage, from a group's test.sh:  exec ../run-scenarios.sh scenarios
++# where the file "scenarios" lists one scenario of test-ui.py per line. An
++# entry trapezoidal:NAME runs NAME with PLANNER_TYPE = 0 instead of the
++# jerk-limited planner test.ini selects. The group's checkresult
++# (check-result.sh) requires every entry to report success.
++#
++# Every scenario runs in a fresh LinuxCNC session started from a private copy
++# of the shared configuration, so groups can run in parallel (also in one
++# directory tree) without sharing sim.var or other files LinuxCNC writes next
++# to its INI file.
++
++set -o pipefail
++
++shared=$(cd "$(dirname "$0")" && pwd)
++
++if nm -D -u "$EMC2_HOME/rtlib/motmod.so" | grep -q '[[:space:]]tpStop$'; then
++    echo "motmod unexpectedly requires the nonstandard tpStop symbol" >&2
++    exit 1
++fi
++
++if nm -D -u "$EMC2_HOME/rtlib/motmod.so" | grep -q '[[:space:]]tpStep$'; then
++    echo "motmod unexpectedly requires the nonstandard tpStep symbol" >&2
++    exit 1
++fi
++
++[ $# -eq 1 ] && [ -f "$1" ] || { echo "usage: run-scenarios.sh SCENARIO-FILE" >&2; exit 1; }
++mapfile -t items < <(grep -v '^[[:space:]]*\(#\|$\)' "$1")
++[ ${#items[@]} -gt 0 ] || { echo "run-scenarios.sh: no scenarios in $1" >&2; exit 1; }
++
++config=$(mktemp -d)
++scenario_log=$(mktemp)
++trap 'rm -rf "$config" "$scenario_log"' EXIT
++cp "$shared"/test-ui.py "$shared"/test.ini "$shared"/core_sim.hal \
++    "$shared"/tool.tbl "$shared"/*.ngc "$config"/
++sed 's/^PLANNER_TYPE = 1$/PLANNER_TYPE = 0/' "$config/test.ini" \
++    > "$config/test-trapezoidal.ini"
++grep -q '^PLANNER_TYPE = 0$' "$config/test-trapezoidal.ini"
++
++for item in "${items[@]}"; do
++    case "$item" in
++        trapezoidal:*) ini=test-trapezoidal.ini; scenario=${item#trapezoidal:} ;;
++        *) ini=test.ini; scenario=$item ;;
++    esac
++    echo "Running resumable-stop scenario: $scenario ($ini)"
++    : > "$scenario_log"
++    (cd "$config" && RESUMABLE_STOP_SCENARIO="$scenario" linuxcnc -r "$ini") 2>&1 |
++        tee "$scenario_log"
++    if grep -Eq 'ruckig_plan_(position|velocity): invalid limits|Ruckig (velocity control )?planning failed' "$scenario_log"; then
++        echo "$scenario emitted a Ruckig invalid-limit or planning failure" >&2
++        exit 1
++    fi
++    if ! grep -qxF "resumable stop scenario ok: $scenario" "$scenario_log"; then
++        echo "$item did not report success" >&2
++        exit 1
++    fi
++    echo "resumable stop scenario passed: $item"
++done
++echo "resumable stop scenarios complete"
+diff --git a/tests/resumable-stop/tap.ngc b/tests/resumable-stop/tap.ngc
+index 3060ac4..2182f18 100644
+--- a/tests/resumable-stop/tap.ngc
++++ b/tests/resumable-stop/tap.ngc
+@@ -1,7 +1,7 @@
+ G21 G90
+ G0 X0 Z0
+-S6 M3
+-G33.1 Z-5 K10
+-G1 X10 F60
++S60 M3
++G33.1 Z-5 K1
++G1 X10 F600
+ M5
+ M2
+diff --git a/tests/resumable-stop/test-ui.py b/tests/resumable-stop/test-ui.py
+index d29f03f..27f097d 100755
+--- a/tests/resumable-stop/test-ui.py
++++ b/tests/resumable-stop/test-ui.py
+@@ -261,6 +261,42 @@ def run_stop_single_step_test():
+     wait_for_program_complete(20.0)
+     assert_outputs_stopped_after_program()
+ 
++def run_inflight_single_step_test():
++    open_auto_program("inflight-step.ngc")
++    c.auto(linuxcnc.AUTO_RUN, 0)
++
++    wait_for(
++        lambda: s.queue >= 3
++        and s.position[0] > 1.0
++        and s.position[0] < 9.0,
++        "program did not prequeue later blocks during its first move",
++    )
++
++    c.auto(linuxcnc.AUTO_STEP)
++    wait_for(
++        lambda: s.single_stepping and not s.task_paused and not s.paused,
++        "in-flight Single Step did not remain unpaused while armed",
++    )
++    wait_for(
++        lambda: s.task_paused
++        and s.paused
++        and math.isclose(s.position[0], 10.0, abs_tol=0.01)
++        and abs(s.current_vel) < 0.001,
++        "in-flight Single Step did not finish the active source block",
++        timeout=15.0,
++    )
++
++    if s.queue < 3:
++        fail("in-flight Single Step did not preserve prequeued later blocks")
++
++    time.sleep(0.25)
++    s.poll()
++    if not math.isclose(s.position[0], 10.0, abs_tol=0.001):
++        fail("in-flight Single Step advanced into the next source block")
++
++    c.auto(linuxcnc.AUTO_RESUME)
++    wait_for_program_complete(40.0, timeout=10.0)
++
+ 
+ def run_rapid_resume_without_at_speed_test():
+     hal.set_p("spindle.0.at-speed", "false")
+@@ -790,6 +826,48 @@ def run_tapered_g76_single_step_test():
+         "tapered-drive G76",
+     )
+ 
++def run_inflight_g76_single_step_test():
++    open_auto_program("g76.ngc")
++    c.auto(linuxcnc.AUTO_RUN, 0)
++
++    wait_for(
++        lambda: s.queue > 3
++        and s.position[0] < 9.5
++        and s.position[2] < -0.5
++        and s.position[2] > -4.5,
++        "G76 did not prequeue later passes during its first cut",
++        timeout=15.0,
++    )
++
++    c.auto(linuxcnc.AUTO_STEP)
++    wait_for(
++        lambda: s.single_stepping and not s.task_paused and not s.paused,
++        "in-flight G76 Single Step did not remain unpaused while armed",
++    )
++    wait_for(
++        lambda: s.task_paused
++        and s.paused
++        and abs(s.current_vel) < 0.001
++        and s.position[2] <= -4.90
++        and math.isclose(s.position[0], 10.4, abs_tol=0.01),
++        "in-flight G76 Single Step did not finish the active thread and clearance",
++        timeout=20.0,
++    )
++
++    stepped_x = s.position[0]
++    stepped_z = s.position[2]
++    time.sleep(0.25)
++    s.poll()
++    if (
++        not math.isclose(s.position[0], stepped_x, abs_tol=0.001)
++        or not math.isclose(s.position[2], stepped_z, abs_tol=0.001)
++    ):
++        fail("in-flight G76 Single Step advanced into the next approach")
++
++    c.auto(linuxcnc.AUTO_RESUME)
++    wait_for_program_complete(20.0, expected_z=-5.0, timeout=20.0)
++    assert_outputs_stopped_after_program()
++
+ 
+ def run_g76_exit_taper_stop_test(program, expected_clear_x, label):
+     open_auto_program(program)
+@@ -1769,6 +1847,7 @@ SCENARIOS = {
+     "idle-rejected": run_idle_program_stop_rejected_test,
+     "ordinary": run_ordinary_stop_resume_test,
+     "single-step": run_stop_single_step_test,
++    "inflight-single-step": run_inflight_single_step_test,
+     "rapid-no-atspeed": run_rapid_resume_without_at_speed_test,
+     "paused-resume": lambda: run_stop_while_program_paused_test(False),
+     "paused-run": lambda: run_stop_while_program_paused_test(True),
+@@ -1782,6 +1861,7 @@ SCENARIOS = {
+     "g76-tapered": run_tapered_g76_stop_resume_test,
+     "g76-single-step": run_g76_single_step_test,
+     "g76-tapered-single-step": run_tapered_g76_single_step_test,
++    "g76-inflight-single-step": run_inflight_g76_single_step_test,
+     "g76-exit-taper": run_cylindrical_g76_exit_taper_stop_test,
+     "g76-tapered-exit-taper": run_tapered_g76_exit_taper_stop_test,
+     "g76-handoff-stress": run_g76_cut_retract_handoff_stress_test,
+diff --git a/tests/resumable-stop/test.ngc b/tests/resumable-stop/test.ngc
+index 416044b..c44a2cd 100644
+--- a/tests/resumable-stop/test.ngc
++++ b/tests/resumable-stop/test.ngc
+@@ -1,6 +1,6 @@
+ G21 G90
+ G0 X0
+-F60
++F150
+ S300 M3
+ M8
+ G1 X10
+diff --git a/tests/resumable-stop/test.sh b/tests/resumable-stop/test.sh
+deleted file mode 100755
+index 4b7d7c2..0000000
+--- a/tests/resumable-stop/test.sh
++++ /dev/null
+@@ -1,87 +0,0 @@
+-#!/bin/bash -e
+-
+-set -o pipefail
+-
+-if nm -D -u "$EMC2_HOME/rtlib/motmod.so" | grep -q '[[:space:]]tpStop$'; then
+-    echo "motmod unexpectedly requires the nonstandard tpStop symbol" >&2
+-    exit 1
+-fi
+-
+-if nm -D -u "$EMC2_HOME/rtlib/motmod.so" | grep -q '[[:space:]]tpStep$'; then
+-    echo "motmod unexpectedly requires the nonstandard tpStep symbol" >&2
+-    exit 1
+-fi
+-
+-scenarios=(
+-    idle-rejected
+-    ordinary
+-    single-step
+-    rapid-no-atspeed
+-    paused-resume
+-    paused-run
+-    abort-empty
+-    queued-g33
+-    g33
+-    g33-no-following-rapid
+-    fperrev
+-    g76
+-    g76-waiting-index
+-    g76-tapered
+-    rigid-tap
+-    orientation
+-    dwell
+-    dwell-atspeed
+-    command-after-sync
+-    resume-atspeed
+-    multi-spindle
+-    css
+-    homing
+-    homing-interrupted
+-    speed-change-atspeed
+-    queued-feed-atspeed
+-    g33-chain
+-    step-resume-stopping
+-    g95-between-g33
+-    spindle-state
+-    g76-single-step
+-    g76-tapered-single-step
+-    g76-exit-taper
+-    g76-tapered-exit-taper
+-    g76-handoff-stress
+-)
+-
+-# test.ini selects the jerk-limited planner. Repeat the scenarios whose
+-# unsynchronized motion is most planner dependent, and g33-chain (which ends
+-# in a blend arc only with this planner), with the default trapezoidal planner.
+-trapezoidal_scenarios=(
+-    ordinary
+-    single-step
+-    fperrev
+-    g33-chain
+-)
+-
+-scenario_log=$(mktemp)
+-trapezoidal_ini=test-trapezoidal.ini
+-trap 'rm -f "$scenario_log" "$trapezoidal_ini"' EXIT
+-sed 's/^PLANNER_TYPE = 1$/PLANNER_TYPE = 0/' test.ini > "$trapezoidal_ini"
+-grep -q '^PLANNER_TYPE = 0$' "$trapezoidal_ini"
+-
+-run_scenario() {
+-    local ini=$1 scenario=$2
+-    echo "Running resumable-stop scenario: $scenario ($ini)"
+-    : > "$scenario_log"
+-    RESUMABLE_STOP_SCENARIO="$scenario" linuxcnc -r "$ini" 2>&1 |
+-        tee "$scenario_log"
+-    if grep -Eq 'ruckig_plan_(position|velocity): invalid limits|Ruckig (velocity control )?planning failed' "$scenario_log"; then
+-        echo "$scenario emitted a Ruckig invalid-limit or planning failure" >&2
+-        exit 1
+-    fi
+-}
+-
+-for scenario in "${scenarios[@]}"; do
+-    run_scenario test.ini "$scenario"
+-done
+-for scenario in "${trapezoidal_scenarios[@]}"; do
+-    run_scenario "$trapezoidal_ini" "$scenario"
+-done
+-echo "resumable stop scenarios complete"
+diff --git a/tests/resumable-stop/thread-g95-thread.ngc b/tests/resumable-stop/thread-g95-thread.ngc
+index d6630aa..2bc7489 100644
+--- a/tests/resumable-stop/thread-g95-thread.ngc
++++ b/tests/resumable-stop/thread-g95-thread.ngc
+@@ -4,6 +4,6 @@ S60 M3
+ G33 Z-2 K1
+ G95 G1 X1 F0.5
+ G33 Z-4 K1
+-G94 G1 X10 F60
++G94 G1 X10 F600
+ M5
+ M2
+diff --git a/tests/resumable-stop/thread-then-steps.ngc b/tests/resumable-stop/thread-then-steps.ngc
+index e744543..44aa11e 100644
+--- a/tests/resumable-stop/thread-then-steps.ngc
++++ b/tests/resumable-stop/thread-then-steps.ngc
+@@ -1,7 +1,7 @@
+ G21 G90
+ G0 X0 Z0
+-S6 M3
+-G33 Z-5 K10
++S60 M3
++G33 Z-5 K1
+ G1 X5 F600
+ M8
+ G1 X10
+diff --git a/tests/resumable-stop/thread.ngc b/tests/resumable-stop/thread.ngc
+index 5976979..c3ec6d0 100644
+--- a/tests/resumable-stop/thread.ngc
++++ b/tests/resumable-stop/thread.ngc
+@@ -1,7 +1,7 @@
+ G21 G90
+ G0 X0 Z0
+-S6 M3
+-G33 Z-5 K10
+-G1 X10 F60
++S60 M3
++G33 Z-5 K1
++G1 X10 F600
+ M5
+ M2
+diff --git a/tests/resumable-stop/threading/checkresult b/tests/resumable-stop/threading/checkresult
+new file mode 100755
+index 0000000..0201d4f
+--- /dev/null
++++ b/tests/resumable-stop/threading/checkresult
+@@ -0,0 +1,2 @@
++#!/bin/sh
++exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 9
+diff --git a/tests/resumable-stop/threading/scenarios b/tests/resumable-stop/threading/scenarios
+new file mode 100644
+index 0000000..0f41046
+--- /dev/null
++++ b/tests/resumable-stop/threading/scenarios
+@@ -0,0 +1,9 @@
++rigid-tap
++g33
++queued-g33
++g33-chain
++trapezoidal:g33-chain
++step-resume-stopping
++g95-between-g33
++g33-no-following-rapid
++command-after-sync
+diff --git a/tests/resumable-stop/threading/test.sh b/tests/resumable-stop/threading/test.sh
+new file mode 100755
+index 0000000..713f576
+--- /dev/null
++++ b/tests/resumable-stop/threading/test.sh
+@@ -0,0 +1,3 @@
++#!/bin/bash
++# Runs the resumable-stop scenarios listed in ./scenarios (see ../README).
++exec bash ../run-scenarios.sh scenarios

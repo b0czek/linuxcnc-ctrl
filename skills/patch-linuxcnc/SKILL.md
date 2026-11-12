@@ -90,7 +90,7 @@ edits alone do not complete a patch fix:
    ./linuxcnc-patches/refresh.sh linuxcnc
    ```
 
-   `refresh.sh` preserves established filenames by ordinal, creates names for
+   `refresh.sh` preserves established filenames by position, creates names for
    appended commits, uses normalized `git format-patch` output, replays the
    complete generated series before replacing files, compares the replayed
    tree, and normalizes the managed branch to deterministic replayed commit
@@ -158,6 +158,13 @@ Common interpreter parameter blocks are:
   nine systems. Offsets use `base+0` through `base+8`; rotation is `base+9`.
 - G28 home: `#5161–#5169`.
 - G30 home: `#5181–#5189`.
+
+## Patch numbering
+
+Patch numbers are permanent. Never renumber the series. When a patch is
+removed, delete its file, leave the gap, and keep its inventory entry in
+`linuxcnc-patches/README.md` with the heading struck through and a note saying
+when and why it was removed. Never reuse a removed patch's number.
 
 ## Baseline changes
 
