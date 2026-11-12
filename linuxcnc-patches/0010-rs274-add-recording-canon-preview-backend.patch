@@ -3,11 +3,21 @@ From: Dariusz Majnert <dariusz.majnert@gmail.com>
 Date: Sun, 23 Aug 2026 22:34:37 +0200
 Subject: [PATCH] rs274: add recording canon preview backend
 
+Ported to v2.10.0-pre2. The recording canon implements the canon
+interface as it is here: SET_MOTION_CONTROL_MODE takes upstream's planner
+arguments and STOP_SPINDLE_TURNING its wait argument, and HOME_CYCLE,
+HOME_CYCLE_JOINT, LOCK_SPEED_OVERRIDE, SELECT_KINS_TYPE,
+GET_EXTERNAL_AXIS_MAX_VELOCITY, GET_EXTERNAL_SPINDLE_MAX_VELOCITY,
+GET_EXTERNAL_KINS_TYPE and GET_EXTERNAL_KINS_TYPE_FLAGS are added with
+the same preview behaviour as the Axis module.
+tool_mmap_user() keeps upstream's record of the mapping descriptor
+(8c8e048) instead of closing it; the mutex and the early return for an
+existing mapping remain.
 ---
  src/emc/rs274ngc/interp_convert.cc           |   6 +
- src/emc/rs274ngc/recordingcanon.cc           | 626 +++++++++++++++++++
+ src/emc/rs274ngc/recordingcanon.cc           | 636 +++++++++++++++++++
  src/emc/rs274ngc/recordingcanon.hh           | 147 +++++
- src/emc/tooldata/tooldata_mmap.cc            |   5 +
+ src/emc/tooldata/tooldata_mmap.cc            |   4 +
  tests/ccomp/lathe-comp/expected              |   4 +
  tests/ccomp/mill-g90g91g92/expected          |   2 +
  tests/ccomp/mill-line-arc-entry/expected     |   2 +
@@ -17,15 +27,15 @@ Subject: [PATCH] rs274: add recording canon preview backend
  tests/interp/g71-endless-loop_2/expected     |   2 +
  tests/interp/inside-corners/expected         |  12 +
  tests/interp/inverse-time-with-comp/expected |   6 +
- 13 files changed, 934 insertions(+)
+ 13 files changed, 943 insertions(+)
  create mode 100644 src/emc/rs274ngc/recordingcanon.cc
  create mode 100644 src/emc/rs274ngc/recordingcanon.hh
 
 diff --git a/src/emc/rs274ngc/interp_convert.cc b/src/emc/rs274ngc/interp_convert.cc
-index 33a35bda2e..e0c95f83cb 100644
+index e894e64..462eb90 100644
 --- a/src/emc/rs274ngc/interp_convert.cc
 +++ b/src/emc/rs274ngc/interp_convert.cc
-@@ -2495,6 +2495,7 @@ Called by: convert_cutter_compensation
+@@ -2528,6 +2528,7 @@ Called by: convert_cutter_compensation
  
  int Interp::convert_cutter_compensation_off(setup_pointer settings)      //!< pointer to machine settings
  {
@@ -33,7 +43,7 @@ index 33a35bda2e..e0c95f83cb 100644
  #ifdef DEBUG_EMC
    enqueue_COMMENT("interpreter: cutter radius compensation off");
  #endif
-@@ -2511,6 +2512,9 @@ int Interp::convert_cutter_compensation_off(setup_pointer settings)      //!< po
+@@ -2544,6 +2545,9 @@ int Interp::convert_cutter_compensation_off(setup_pointer settings)      //!< po
    }
    settings->cutter_comp_side = CUTTER_COMP::OFF;
    settings->cutter_comp_firstmove = true;
@@ -43,7 +53,7 @@ index 33a35bda2e..e0c95f83cb 100644
    return INTERP_OK;
  }
  
-@@ -2619,6 +2623,8 @@ int Interp::convert_cutter_compensation_on(CUTTER_COMP side,     //!< side of pa
+@@ -2652,6 +2656,8 @@ int Interp::convert_cutter_compensation_on(CUTTER_COMP side,     //!< side of pa
    settings->cutter_comp_radius = radius;
    settings->cutter_comp_orientation = orientation;
    settings->cutter_comp_side = side;
@@ -54,10 +64,10 @@ index 33a35bda2e..e0c95f83cb 100644
  
 diff --git a/src/emc/rs274ngc/recordingcanon.cc b/src/emc/rs274ngc/recordingcanon.cc
 new file mode 100644
-index 0000000000..235da9b7ea
+index 0000000..f64dbd7
 --- /dev/null
 +++ b/src/emc/rs274ngc/recordingcanon.cc
-@@ -0,0 +1,626 @@
+@@ -0,0 +1,636 @@
 +#include "recordingcanon.hh"
 +
 +#include <algorithm>
@@ -407,6 +417,9 @@ index 0000000000..235da9b7ea
 +    recording::record(recording::XyRotation{degrees});
 +}
 +
++void HOME_CYCLE() {}
++void HOME_CYCLE_JOINT(int) {}
++
 +void CANON_UPDATE_END_POINT(double x, double y, double z,
 +                            double a, double b, double c,
 +                            double u, double v, double w)
@@ -425,7 +438,8 @@ index 0000000000..235da9b7ea
 +void SET_FEED_REFERENCE(CANON_FEED_REFERENCE) {}
 +void SET_FEED_MODE(int, int) {}
 +
-+void SET_MOTION_CONTROL_MODE(CANON_MOTION_MODE mode, double tolerance)
++void SET_MOTION_CONTROL_MODE(CANON_MOTION_MODE mode, double tolerance,
++                             int, double)
 +{
 +    auto &state = recording::active();
 +    state.motion_mode = mode;
@@ -479,7 +493,7 @@ index 0000000000..235da9b7ea
 +        recording::active().spindle_speed[spindle] = speed;
 +}
 +
-+void STOP_SPINDLE_TURNING(int spindle)
++void STOP_SPINDLE_TURNING(int spindle, int)
 +{
 +    if (recording::valid_spindle(spindle))
 +        recording::active().spindle_direction[spindle] = CANON_STOPPED;
@@ -525,6 +539,7 @@ index 0000000000..235da9b7ea
 +void ENABLE_FEED_OVERRIDE() {}
 +void DISABLE_SPEED_OVERRIDE(int) {}
 +void ENABLE_SPEED_OVERRIDE(int) {}
++void LOCK_SPEED_OVERRIDE(int) {}
 +void DISABLE_FEED_HOLD() {}
 +void ENABLE_FEED_HOLD() {}
 +void FLOOD_OFF() { recording::active().flood = false; }
@@ -563,11 +578,15 @@ index 0000000000..235da9b7ea
 +}
 +double GET_EXTERNAL_ANGLE_UNITS() { return 1.0; }
 +CANON_UNITS GET_EXTERNAL_LENGTH_UNIT_TYPE() { return recording::active().units; }
++double GET_EXTERNAL_AXIS_MAX_VELOCITY(int) { return 0.0; }
++double GET_EXTERNAL_SPINDLE_MAX_VELOCITY(int) { return 0.0; }
 +double GET_EXTERNAL_FEED_RATE() { return recording::active().feed_rate; }
 +double GET_EXTERNAL_TRAVERSE_RATE() { return recording::active().traverse_rate; }
 +int GET_EXTERNAL_FLOOD() { return recording::active().flood; }
 +int GET_EXTERNAL_MIST() { return recording::active().mist; }
 +CANON_MOTION_MODE GET_EXTERNAL_MOTION_CONTROL_MODE() { return recording::active().motion_mode; }
++int GET_EXTERNAL_KINS_TYPE() { return 0; }
++int GET_EXTERNAL_KINS_TYPE_FLAGS(int) { return -1; }
 +double GET_EXTERNAL_MOTION_CONTROL_TOLERANCE() { return recording::active().motion_tolerance; }
 +double GET_EXTERNAL_MOTION_CONTROL_NAIVECAM_TOLERANCE() { return recording::active().naivecam_tolerance; }
 +double GET_EXTERNAL_ORIGIN_X() { return 0.0; }
@@ -683,10 +702,11 @@ index 0000000000..235da9b7ea
 +int GET_EXTERNAL_OFFSET_APPLIED() { return 0; }
 +EmcPose GET_EXTERNAL_OFFSETS() { return {}; }
 +void UPDATE_TAG(const StateTag &) {}
++void SELECT_KINS_TYPE(int) {}
 +void INTERP_ABORT(int, const char *) {}
 diff --git a/src/emc/rs274ngc/recordingcanon.hh b/src/emc/rs274ngc/recordingcanon.hh
 new file mode 100644
-index 0000000000..dca1242649
+index 0000000..dca1242
 --- /dev/null
 +++ b/src/emc/rs274ngc/recordingcanon.hh
 @@ -0,0 +1,147 @@
@@ -838,7 +858,7 @@ index 0000000000..dca1242649
 +
 +#endif
 diff --git a/src/emc/tooldata/tooldata_mmap.cc b/src/emc/tooldata/tooldata_mmap.cc
-index f9ad3cb7da..45d0c2e7c2 100644
+index 7ba07b4..d13d877 100644
 --- a/src/emc/tooldata/tooldata_mmap.cc
 +++ b/src/emc/tooldata/tooldata_mmap.cc
 @@ -23,6 +23,7 @@
@@ -849,7 +869,7 @@ index f9ad3cb7da..45d0c2e7c2 100644
  #include "config.h"
  #include <rtapi_mutex.h>
  #include "tooldata.hh"
-@@ -167,6 +168,9 @@ int tool_mmap_creator(EMC_TOOL_STAT const * ptr,int random_toolchanger)
+@@ -185,6 +186,9 @@ int tool_mmap_creator(EMC_TOOL_STAT const * ptr,int random_toolchanger)
  //typ: milltask, guis (emcmodule,emcsh,...), halui
  int tool_mmap_user()
  {
@@ -859,16 +879,8 @@ index f9ad3cb7da..45d0c2e7c2 100644
      int fd = open(tool_mmap_fname(),
                    TOOL_MMAP_USER_OPEN_FLAGS, TOOL_MMAP_MODE);
  
-@@ -191,6 +195,7 @@ int tool_mmap_user()
-         perror("tool_mmap_user(): mmap fail");
-         exit(EXIT_FAILURE);
-     }
-+    close(fd);
-     return 0;
- } //tool_mmap_user()
- 
 diff --git a/tests/ccomp/lathe-comp/expected b/tests/ccomp/lathe-comp/expected
-index bba4efd501..5b35a2dc62 100644
+index bba4efd..5b35a2d 100644
 --- a/tests/ccomp/lathe-comp/expected
 +++ b/tests/ccomp/lathe-comp/expected
 @@ -30,6 +30,7 @@
@@ -904,7 +916,7 @@ index bba4efd501..5b35a2dc62 100644
   N..... USE_TOOL_LENGTH_OFFSET(0.0000 0.0000 0.0000, 0.0000 0.0000 0.0000, 0.0000 0.0000 0.0000)
   N..... SELECT_TOOL(0)
 diff --git a/tests/ccomp/mill-g90g91g92/expected b/tests/ccomp/mill-g90g91g92/expected
-index 7327c18c64..e6d7cf04c0 100644
+index 7327c18..e6d7cf0 100644
 --- a/tests/ccomp/mill-g90g91g92/expected
 +++ b/tests/ccomp/mill-g90g91g92/expected
 @@ -24,6 +24,7 @@
@@ -924,7 +936,7 @@ index 7327c18c64..e6d7cf04c0 100644
   N..... SET_G5X_OFFSET(1, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
   N..... SET_XY_ROTATION(0.0000)
 diff --git a/tests/ccomp/mill-line-arc-entry/expected b/tests/ccomp/mill-line-arc-entry/expected
-index ea4339f8cb..40dc7a995b 100644
+index ea4339f..40dc7a9 100644
 --- a/tests/ccomp/mill-line-arc-entry/expected
 +++ b/tests/ccomp/mill-line-arc-entry/expected
 @@ -27,6 +27,7 @@
@@ -944,7 +956,7 @@ index ea4339f8cb..40dc7a995b 100644
   N..... SET_XY_ROTATION(0.0000)
   N..... SET_FEED_MODE(0, 0)
 diff --git a/tests/ccomp/mill-zchanges/expected b/tests/ccomp/mill-zchanges/expected
-index 3cfeabcc65..58f0c3c7f2 100644
+index 3cfeabc..58f0c3c 100644
 --- a/tests/ccomp/mill-zchanges/expected
 +++ b/tests/ccomp/mill-zchanges/expected
 @@ -11,42 +11,52 @@
@@ -1058,7 +1070,7 @@ index 3cfeabcc65..58f0c3c7f2 100644
   N..... STRAIGHT_FEED(1.2500, -0.2500, 0.2500, 0.0000, 0.0000, 0.0000)
   N..... SET_G5X_OFFSET(1, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 diff --git a/tests/interp/cam-nisley/expected b/tests/interp/cam-nisley/expected
-index 6f3aab576f..4a85d26ac5 100644
+index 6f3aab5..4a85d26 100644
 --- a/tests/interp/cam-nisley/expected
 +++ b/tests/interp/cam-nisley/expected
 @@ -69,6 +69,7 @@
@@ -1078,7 +1090,7 @@ index 6f3aab576f..4a85d26ac5 100644
   N..... STRAIGHT_TRAVERSE(75.0000, 0.0000, 75.0000, 0.0000, 0.0000, 0.0000)
   N..... MESSAGE("Done!")
 diff --git a/tests/interp/crazy-paths/expected b/tests/interp/crazy-paths/expected
-index c3b6e9a2dc..575ea1a49e 100644
+index c3b6e9a..575ea1a 100644
 --- a/tests/interp/crazy-paths/expected
 +++ b/tests/interp/crazy-paths/expected
 @@ -18,6 +18,7 @@
@@ -1802,7 +1814,7 @@ index c3b6e9a2dc..575ea1a49e 100644
   N..... SET_G5X_OFFSET(1, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
   N..... SET_XY_ROTATION(0.0000)
 diff --git a/tests/interp/g71-endless-loop_2/expected b/tests/interp/g71-endless-loop_2/expected
-index 6c42f3a6b1..a53d19afa2 100644
+index 6c42f3a..a53d19a 100644
 --- a/tests/interp/g71-endless-loop_2/expected
 +++ b/tests/interp/g71-endless-loop_2/expected
 @@ -28,6 +28,7 @@
@@ -1822,7 +1834,7 @@ index 6c42f3a6b1..a53d19afa2 100644
   N..... FLOOD_OFF()
   N..... STRAIGHT_TRAVERSE(12.5000, 0.0000, -25.0000, 0.0000, 0.0000, 0.0000)
 diff --git a/tests/interp/inside-corners/expected b/tests/interp/inside-corners/expected
-index 0312994b1c..c37a26d5a2 100644
+index 0312994..c37a26d 100644
 --- a/tests/interp/inside-corners/expected
 +++ b/tests/interp/inside-corners/expected
 @@ -26,6 +26,7 @@
@@ -1917,7 +1929,7 @@ index 0312994b1c..c37a26d5a2 100644
   N..... STRAIGHT_FEED(0.0000, 0.0000, 1.0000, 0.0000, 0.0000, 0.0000)
   N..... SET_G5X_OFFSET(1, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
 diff --git a/tests/interp/inverse-time-with-comp/expected b/tests/interp/inverse-time-with-comp/expected
-index e2193e7ee5..74ffad1c79 100644
+index e2193e7..74ffad1 100644
 --- a/tests/interp/inverse-time-with-comp/expected
 +++ b/tests/interp/inverse-time-with-comp/expected
 @@ -7,6 +7,7 @@

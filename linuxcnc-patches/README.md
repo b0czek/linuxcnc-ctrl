@@ -354,6 +354,12 @@ arc-blend clearance endpoints, an unmarked post-G33 rapid, and repeated Stops
 with deterministic cut-side timing near the cut/retract handoff. The internal
 NML and motion fields add no public status or transport field.
 
+On v2.10.0-pre2 the spindle-override lock that upstream issues before the first
+G76 pass belongs to that pass's approach unit, so the first Single Step does
+not stop after the lock alone. A Stop during plain `G33` threading still
+finishes the synchronized run as patch 0004 describes; only G76 passes use the
+marked clearance target.
+
 ### 0010 — Recording canon backend for native G-code preview
 
 Adds `recordingcanon.cc` and `recordingcanon.hh`, a separate link-selected
@@ -375,7 +381,8 @@ The temporary exact boundary is restored if Step is canceled by Resume or Stop.
 Existing paused source-line stepping and two-stage G76 stepping remain intact.
 Two additional runtime scenarios arm Step during an ordinary block with three
 later blocks queued and during an active G76 cut with later passes queued,
-bringing the resumable-stop suite to twenty-seven scenarios. During an
+bringing the resumable-stop suite to 35 scenarios plus four trapezoidal re-runs
+on v2.10.0-pre2. During an
 in-flight step, `single_stepping` reports the armed/active state while task and
 motion remain unpaused; both paused flags become true only after motion reaches
 the boundary.
@@ -393,7 +400,10 @@ Remote CRUD supports LinuxCNC's native random and nonrandom table models for
 file-backed configurations. Random support covers ATC-addressable pockets and
 the spindle; it does not model off-machine tool inventory. This patched build
 rejects `[EMCIO]DB_PROGRAM` during IO initialization and requires file-backed
-`[EMCIO]TOOL_TABLE` configuration for managed tool data.
+`[EMCIO]TOOL_TABLE` configuration for managed tool data. The LinuxCNC tests
+that need a database program (`tests/tooldb/*`, added upstream after the old
+base) are therefore skipped. Saving keeps patch 0007's 510-character line limit
+and its refusal to overwrite a table loaded with refused lines.
 
 Tool-table reload now preserves the live table when opening, parsing, or
 validation fails. Read-only mmap clients detect inode replacement after a

@@ -25,10 +25,10 @@ Subject: [PATCH] fix(spindle): publish modal CSS maximum in status
  create mode 100644 tests/css-status/tool.tbl
 
 diff --git a/src/emc/task/emccanon.cc b/src/emc/task/emccanon.cc
-index ad1352a7d4..9f36a8de8e 100644
+index 513c932..d6e8437 100644
 --- a/src/emc/task/emccanon.cc
 +++ b/src/emc/task/emccanon.cc
-@@ -3027,7 +3027,9 @@ void SPINDLE_RETRACT_TRAVERSE()
+@@ -2868,7 +2868,9 @@ void SPINDLE_RETRACT_TRAVERSE()
  }
  
  void SET_SPINDLE_MODE(int spindle, double css_max) {
@@ -40,10 +40,10 @@ index ad1352a7d4..9f36a8de8e 100644
  
  template <class MSG=EMC_SPINDLE_ON>
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 0be1c528c2..59021c7dcb 100644
+index dc34e1a..ba88a24 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -918,7 +918,7 @@ static void emcTaskStopProgress()
+@@ -970,7 +970,7 @@ static void emcTaskStopProgress()
          bool spindle_output_active = false;
          for (int s = 0; s < emcStatus->motion.traj.spindles; ++s) {
              const auto &status = emcStatus->motion.spindle[s];
@@ -53,10 +53,10 @@ index 0be1c528c2..59021c7dcb 100644
                  stop_spindles[s].running = spindle_running;
                  stop_spindles[s].speed = status.speed;
 diff --git a/src/emc/task/taskintf.cc b/src/emc/task/taskintf.cc
-index 4796832331..d88c727d52 100644
+index 533265a..4ea2592 100644
 --- a/src/emc/task/taskintf.cc
 +++ b/src/emc/task/taskintf.cc
-@@ -2046,7 +2046,7 @@ int emcSpindleUpdate(EMC_SPINDLE_STAT stat[], int num_spindles){
+@@ -2157,7 +2157,7 @@ int emcSpindleUpdate(EMC_SPINDLE_STAT stat[], int num_spindles){
  
      for (s = 0; s < num_spindles; s++){
  		stat[s].spindle_override_enabled = enables & SS_ENABLED;
@@ -66,10 +66,10 @@ index 4796832331..d88c727d52 100644
  		stat[s].feedback = emcmotStatus.spindle_status[s].spindleSpeedIn * 60.0;
  		stat[s].brake = emcmotStatus.spindle_status[s].brake;
 diff --git a/src/emc/usr_intf/axis/extensions/emcmodule.cc b/src/emc/usr_intf/axis/extensions/emcmodule.cc
-index bd747787e4..03437fbce2 100644
+index 8e91c88..f5cc454 100644
 --- a/src/emc/usr_intf/axis/extensions/emcmodule.cc
 +++ b/src/emc/usr_intf/axis/extensions/emcmodule.cc
-@@ -1458,6 +1458,7 @@ static PyObject *Stat_spindle_one(pyStatChannel *s, int spindleno) {
+@@ -1462,6 +1462,7 @@ static PyObject *Stat_spindle_one(pyStatChannel *s, int spindleno) {
      F2("override_enabled", spindle_override_enabled);
      F(speed);
      F(feedback);
@@ -79,7 +79,7 @@ index bd747787e4..03437fbce2 100644
      F(orient_state);
 diff --git a/tests/css-status/README b/tests/css-status/README
 new file mode 100644
-index 0000000000..66ad330dd7
+index 0000000..66ad330
 --- /dev/null
 +++ b/tests/css-status/README
 @@ -0,0 +1,6 @@
@@ -91,7 +91,7 @@ index 0000000000..66ad330dd7
 +`enabled` follows the explicit on/off state rather than a nonzero CSS limit.
 diff --git a/tests/css-status/checkresult b/tests/css-status/checkresult
 new file mode 100755
-index 0000000000..56f319c1fe
+index 0000000..56f319c
 --- /dev/null
 +++ b/tests/css-status/checkresult
 @@ -0,0 +1,4 @@
@@ -101,7 +101,7 @@ index 0000000000..56f319c1fe
 +grep -q '^CSS status scenario ok$' "$1"
 diff --git a/tests/css-status/core_sim.hal b/tests/css-status/core_sim.hal
 new file mode 100644
-index 0000000000..e244f001df
+index 0000000..e244f00
 --- /dev/null
 +++ b/tests/css-status/core_sim.hal
 @@ -0,0 +1,10 @@
@@ -117,7 +117,7 @@ index 0000000000..e244f001df
 +setp spindle.0.at-speed true
 diff --git a/tests/css-status/test-ui.py b/tests/css-status/test-ui.py
 new file mode 100755
-index 0000000000..2372f6c89e
+index 0000000..2372f6c
 --- /dev/null
 +++ b/tests/css-status/test-ui.py
 @@ -0,0 +1,61 @@
@@ -184,7 +184,7 @@ index 0000000000..2372f6c89e
 +print("CSS status scenario ok")
 diff --git a/tests/css-status/test.ini b/tests/css-status/test.ini
 new file mode 100644
-index 0000000000..61ccf6bc64
+index 0000000..61ccf6b
 --- /dev/null
 +++ b/tests/css-status/test.ini
 @@ -0,0 +1,55 @@
@@ -245,7 +245,7 @@ index 0000000000..61ccf6bc64
 +MIN_FERROR = 0.25
 diff --git a/tests/css-status/test.sh b/tests/css-status/test.sh
 new file mode 100755
-index 0000000000..13436c16b1
+index 0000000..13436c1
 --- /dev/null
 +++ b/tests/css-status/test.sh
 @@ -0,0 +1,4 @@
@@ -255,4 +255,4 @@ index 0000000000..13436c16b1
 +linuxcnc -r test.ini
 diff --git a/tests/css-status/tool.tbl b/tests/css-status/tool.tbl
 new file mode 100644
-index 0000000000..e69de29bb2
+index 0000000..e69de29

@@ -3,21 +3,35 @@ From: Dariusz Majnert <dariusz.majnert@gmail.com>
 Date: Wed, 2 Sep 2026 11:36:57 +0200
 Subject: [PATCH] rs274ngc: add composable executor stdglue
 
+Ported to v2.10.0-pre2. HalExecutor uses the Python hal module's
+hal.Type and hal.Dir names (the HAL_BIT/HAL_S32/HAL_U32 spellings now
+only exist as deprecated aliases). Its pins are bool, sint and uint,
+which are 64 bits wide, so the opcode range is the 64-bit signed range
+and request IDs wrap within 64 bits, still skipping zero. The
+install-headless Makefile hunk is dropped: that target no longer exists
+and a --disable-gui install already includes stdglue.py.
+
+Generators are also closed when Interp::init() discards an active call
+stack (EMC_TASK_PLAN_INIT), which does not go through unwind_call().
+When the unwind starts inside the generator itself, for example M2 or a
+failing call run through self.execute(), the generator cannot be closed
+while it runs; the close is deferred until it yields or returns, and
+pycall() then returns the unwind status (INTERP_EXIT or an error)
+instead of continuing the unwound call.
 ---
- docs/src/remap/remap.adoc                    | 127 ++++++++++
- nc_files/remap_lib/python-stdglue/stdglue.py | 253 ++++++++++++++++++-
- src/Makefile                                 |   3 +
- src/emc/rs274ngc/interp_internal.hh          |   1 +
- src/emc/rs274ngc/interp_python.cc            |  24 ++
- src/emc/rs274ngc/interp_python.hh            |   3 +
- src/emc/rs274ngc/rs274ngc_pre.cc             |   1 +
+ docs/src/remap/remap.adoc                    | 129 +++++++++
+ nc_files/remap_lib/python-stdglue/stdglue.py | 260 ++++++++++++++++++-
+ src/emc/rs274ngc/interp_internal.hh          |   3 +
+ src/emc/rs274ngc/interp_python.cc            |  60 ++++-
+ src/emc/rs274ngc/interp_python.hh            |   7 +
+ src/emc/rs274ngc/rs274ngc_pre.cc             |   5 +
  tests/remap/executor/checkresult             |   5 +
  tests/remap/executor/remap.py                |  52 ++++
  tests/remap/executor/test-ui.py              | 177 +++++++++++++
  tests/remap/executor/test.ini                |  95 +++++++
  tests/remap/executor/test.sh                 |   8 +
  tests/remap/executor/toplevel.py             |  18 ++
- 13 files changed, 765 insertions(+), 2 deletions(-)
+ 12 files changed, 816 insertions(+), 3 deletions(-)
  create mode 100755 tests/remap/executor/checkresult
  create mode 100644 tests/remap/executor/remap.py
  create mode 100755 tests/remap/executor/test-ui.py
@@ -26,10 +40,10 @@ Subject: [PATCH] rs274ngc: add composable executor stdglue
  create mode 100644 tests/remap/executor/toplevel.py
 
 diff --git a/docs/src/remap/remap.adoc b/docs/src/remap/remap.adoc
-index 218062048c..b263f1e959 100644
+index 75e2a09..410381a 100644
 --- a/docs/src/remap/remap.adoc
 +++ b/docs/src/remap/remap.adoc
-@@ -1576,6 +1576,133 @@ For a slightly more advanced example, see `tests/remap/predefined-named-params`.
+@@ -1576,6 +1576,135 @@ For a slightly more advanced example, see `tests/remap/predefined-named-params`.
  Since many remapping tasks are very similar, I've started collecting working prolog and epilog routines in a single Python module.
  These can currently be found in 'ncfiles/remap_lib/python-stdglue/stdglue.py' and provide the following routines:
  
@@ -120,7 +134,7 @@ index 218062048c..b263f1e959 100644
 +    self.tailstock = remap.HalExecutor(self, "tailstock", component)
 +
 +    if component is not None:
-+        component.newpin("machine-specific", hal.HAL_BIT, hal.HAL_OUT)
++        component.newpin("machine-specific", hal.Type.BOOL, hal.Dir.OUT)
 +        component.ready()
 +    self.remap_hal = component
 +----
@@ -132,39 +146,41 @@ index 218062048c..b263f1e959 100644
 +|Pin |Type |Direction |Meaning
 +
 +|`remap.executor.chuck.request-id`
-+|u32 |out |Nonzero identifier of the current request
++|uint |out |Nonzero identifier of the current request
 +
 +|`remap.executor.chuck.opcode`
-+|s32 |out |Integer request passed to `begin`
++|sint |out |Integer request passed to `begin`
 +
 +|`remap.executor.chuck.request`
-+|bit |out |The request is active
++|bool |out |The request is active
 +
 +|`remap.executor.chuck.cancel`
-+|bit |out |The request was abandoned and must be cancelled
++|bool |out |The request was abandoned and must be cancelled
 +
 +|`remap.executor.chuck.response-id`
-+|u32 |in |Identifier of the terminal response
++|uint |in |Identifier of the terminal response
 +
 +|`remap.executor.chuck.state`
-+|s32 |in |Responder state
++|sint |in |Responder state
 +
 +|`remap.executor.chuck.result`
-+|s32 |in |Machine-defined terminal result or diagnostic code
++|sint |in |Machine-defined terminal result or diagnostic code
 +|===
 +
 +HAL states are `0` unavailable, `1` idle, `2` accepted, `3` running, `4`
 +succeeded, `5` failed, and `6` cancelled. To complete a request, the responder
 +first writes the terminal state and result, then copies `request-id` to
 +`response-id` as the commit marker. Matching IDs prevent stale responses from
-+completing a later request. `cancel` remains asserted until the next request
-+so realtime logic cannot miss a short userspace pulse.
++completing a later request. Request IDs increase by one for each request and
++wrap within the 64-bit `uint` range, skipping zero. `cancel` remains
++asserted until the next request so realtime logic cannot miss a short
++userspace pulse.
 +
  === T: +prepare_prolog+ and +prepare_epilog+
  
  These wrap a NGC procedure for T__x__ Tool Prepare.
 diff --git a/nc_files/remap_lib/python-stdglue/stdglue.py b/nc_files/remap_lib/python-stdglue/stdglue.py
-index a3b93019af..4b49e0beeb 100644
+index 8457e40..f7d7d47 100644
 --- a/nc_files/remap_lib/python-stdglue/stdglue.py
 +++ b/nc_files/remap_lib/python-stdglue/stdglue.py
 @@ -16,6 +16,9 @@
@@ -177,7 +193,7 @@ index a3b93019af..4b49e0beeb 100644
  import emccanon
  from interpreter import *
  from emccanon import MESSAGE
-@@ -40,6 +43,254 @@ def build_hal(self):
+@@ -40,6 +43,261 @@ def build_hal(self):
      except Exception as e:
          print(e)
  
@@ -196,6 +212,9 @@ index a3b93019af..4b49e0beeb 100644
 +EXECUTOR_STATE_CANCELLED = 6
 +
 +_EXECUTOR_DEFAULT_TIMEOUT = 10.0
++_HAL_SINT_MIN = -(1 << 63)
++_HAL_SINT_MAX = (1 << 63) - 1
++_HAL_UINT_MAX = (1 << 64) - 1
 +_EXECUTOR_POLL_INTERVAL = 0.01
 +
 +
@@ -333,13 +352,15 @@ index a3b93019af..4b49e0beeb 100644
 +
 +        import hal
 +
-+        component.newpin(self._prefix + "request-id", hal.HAL_U32, hal.HAL_OUT)
-+        component.newpin(self._prefix + "opcode", hal.HAL_S32, hal.HAL_OUT)
-+        component.newpin(self._prefix + "request", hal.HAL_BIT, hal.HAL_OUT)
-+        component.newpin(self._prefix + "cancel", hal.HAL_BIT, hal.HAL_OUT)
-+        component.newpin(self._prefix + "response-id", hal.HAL_U32, hal.HAL_IN)
-+        component.newpin(self._prefix + "state", hal.HAL_S32, hal.HAL_IN)
-+        component.newpin(self._prefix + "result", hal.HAL_S32, hal.HAL_IN)
++        out = hal.Dir.OUT
++        pin_in = hal.Dir.IN
++        component.newpin(self._prefix + "request-id", hal.Type.UINT, out)
++        component.newpin(self._prefix + "opcode", hal.Type.SINT, out)
++        component.newpin(self._prefix + "request", hal.Type.BOOL, out)
++        component.newpin(self._prefix + "cancel", hal.Type.BOOL, out)
++        component.newpin(self._prefix + "response-id", hal.Type.UINT, pin_in)
++        component.newpin(self._prefix + "state", hal.Type.SINT, pin_in)
++        component.newpin(self._prefix + "result", hal.Type.SINT, pin_in)
 +
 +        component[self._prefix + "request-id"] = 0
 +        component[self._prefix + "opcode"] = 0
@@ -356,11 +377,13 @@ index a3b93019af..4b49e0beeb 100644
 +            opcode = int(request)
 +        except (TypeError, ValueError):
 +            raise ValueError("HAL executor request must be an integer opcode")
-+        if opcode < -2147483648 or opcode > 2147483647:
-+            raise ValueError("HAL executor opcode is outside the s32 range")
++        if opcode < _HAL_SINT_MIN or opcode > _HAL_SINT_MAX:
++            raise ValueError("HAL executor opcode is outside the sint range")
 +
++        # Request IDs increase by one per request and wrap within the 64-bit
++        # unsigned pin, skipping zero, which means no request.
 +        request_id = self._next_request_id
-+        self._next_request_id = (request_id + 1) & 0xFFFFFFFF
++        self._next_request_id = (request_id + 1) & _HAL_UINT_MAX
 +        if self._next_request_id == 0:
 +            self._next_request_id = 1
 +
@@ -432,59 +455,72 @@ index a3b93019af..4b49e0beeb 100644
  # REMAP=S   prolog=setspeed_prolog  ngc=setspeed epilog=setspeed_epilog
  # exposed parameter: #<speed>
  
-@@ -655,5 +906,3 @@ def tool_probe_m6(self, **words):
+@@ -655,5 +913,3 @@ def tool_probe_m6(self, **words):
          self.set_errormsg("tool_probe_m6 remap error." )
          yield INTERP_ERROR
  
 -
 -
-diff --git a/src/Makefile b/src/Makefile
-index 35c77b38ac..fa06ec5664 100644
---- a/src/Makefile
-+++ b/src/Makefile
-@@ -711,6 +711,7 @@ install-headless-dirs:
- 		$(DESTDIR)$(bindir) $(DESTDIR)$(libdir) $(DESTDIR)/$(libdir)/linuxcnc \
- 		$(DESTDIR)$(includedir)/linuxcnc $(DESTDIR)$(tcldir) \
- 		$(DESTDIR)$(tcldir)/msgs $(DESTDIR)$(datadir)/linuxcnc/hallib \
-+		$(DESTDIR)$(ncfilesdir)/remap_lib/python-stdglue \
- 		$(DESTDIR)$(mandir)/man1 $(DESTDIR)$(mandir)/man3 $(DESTDIR)$(mandir)/man9
- 
- install-headless: install-headless-dirs
-@@ -735,6 +736,8 @@ install-headless: install-headless-dirs
- 		../lib/python/hal.py ../lib/python/linuxcnc_util.py ../lib/python/nf.py \
- 		../lib/python/pyhal.py ../lib/python/raster.py ../lib/python/tooldb.py $(DESTDIR)$(SITEPY)
- 	$(FILE) ../lib/python/rs274/*.py $(DESTDIR)$(SITEPY)/rs274
-+	$(FILE) ../nc_files/remap_lib/python-stdglue/stdglue.py \
-+		$(DESTDIR)$(ncfilesdir)/remap_lib/python-stdglue
- ifneq ($(BUILD_MANPAGES),no)
- 	$(FILE) ../docs/man/man1/*.1 $(DESTDIR)$(mandir)/man1
- 	$(FILE) $(wildcard ../docs/man/man3/*.3) $(DESTDIR)$(mandir)/man3
 diff --git a/src/emc/rs274ngc/interp_internal.hh b/src/emc/rs274ngc/interp_internal.hh
-index fed82a67d8..e7e3497d34 100644
+index 6f90dbe..ff5f379 100644
 --- a/src/emc/rs274ngc/interp_internal.hh
 +++ b/src/emc/rs274ngc/interp_internal.hh
-@@ -594,6 +594,7 @@ struct pycontext {
+@@ -618,6 +618,9 @@ struct pycontext {
      pycontext(const struct pycontext &);
      pycontext &operator=(const struct pycontext &);
      ~pycontext();
-+    void close_generator();
++    // Close a Python remap generator whose call frame is being unwound.
++    // unwind_status is the status that caused the unwind.
++    void close_generator(int unwind_status);
      pycontext_impl *impl;
  };
  
 diff --git a/src/emc/rs274ngc/interp_python.cc b/src/emc/rs274ngc/interp_python.cc
-index f8217637fc..6d304503b8 100644
+index e3f8b60..34f6fbc 100644
 --- a/src/emc/rs274ngc/interp_python.cc
 +++ b/src/emc/rs274ngc/interp_python.cc
-@@ -151,6 +151,8 @@ int Interp::pycall(setup_pointer /*settings*/,
- 		    frame->pystuff.impl->py_return_type = RET_STOPITERATION;
+@@ -99,6 +99,19 @@ bool Interp::is_pycallable(setup_pointer /*settings*/,
+     return python_plugin->is_callable(module,funcname);
+ }
+ 
++// The call stack was unwound while this frame's generator was running. Close
++// it now that it has yielded or finished, and return the status of the
++// unwind so that the caller does not continue the unwound call.
++static int finish_unwound_generator(context_pointer frame)
++{
++    int unwind_status = frame->pystuff.impl->close_status;
++
++    frame->pystuff.close_generator(unwind_status);
++    if (unwind_status == INTERP_EXIT)
++        return INTERP_EXIT;
++    return unwind_status > INTERP_MIN_ERROR ? unwind_status : INTERP_ERROR;
++}
++
+ // all parameters to/results from Python calls go through the callframe, which looks a bit awkward
+ // the reason is not to expose boost.python through the interpreter public interface
+ int Interp::pycall(setup_pointer /*settings*/,
+@@ -151,13 +164,19 @@ int Interp::pycall(setup_pointer /*settings*/,
  		    bp::handle_exception();
  		    PyErr_Clear();
+ 		    logPy("pycall: call generator - StopIteration exception");
++		    if (frame->pystuff.impl->close_pending)
++			return finish_unwound_generator(frame);
 +		    frame->pystuff.impl->generator_next = bp::object();
 +		    frame->pystuff.impl->generator = bp::object();
- 		    logPy("pycall: call generator - StopIteration exception");
  		    return INTERP_OK;
  		} else  {
-@@ -194,6 +196,7 @@ int Interp::pycall(setup_pointer /*settings*/,
+ 		    msg = handle_pyerror();
+ 		    bp::handle_exception();
+ 		    PyErr_Clear();
+ 		    logPy("pycall: call generator - exception: %s",msg.c_str());
+-		    
++		    if (frame->pystuff.impl->close_pending)
++			(void) finish_unwound_generator(frame);
++
+ 		    ERS("exception during generator call: %s", msg.c_str());
+ 		}
+ 	    } else 
+@@ -193,6 +212,7 @@ int Interp::pycall(setup_pointer /*settings*/,
  
  		    // a generator was returned. This must have been the first time call to a handler
  		    // which contains a yield. Extract next() method.
@@ -492,15 +528,38 @@ index f8217637fc..6d304503b8 100644
  		    frame->pystuff.impl->generator_next = bp::getattr(retval, "__next__");
  		    // and  call it for the first time.
  		    // Expect execution up to first 'yield INTERP_EXECUTE_FINISH'.
-@@ -299,3 +302,24 @@ pycontext &pycontext::operator=(const pycontext &other) {
+@@ -264,6 +284,11 @@ int Interp::pycall(setup_pointer /*settings*/,
+ 	bp::handle_exception();
+ 	PyErr_Clear();
+     }
++    if (frame->pystuff.impl->close_pending) {
++	int unwind_status = finish_unwound_generator(frame);
++	if (!py_exception)
++	    return unwind_status;
++    }
+     if (py_exception) {
+ 	ERM("pycall: %s.%s:\n%s", module ? module:"", funcname, msg.c_str());
+ 	status = INTERP_ERROR;
+@@ -298,3 +323,36 @@ pycontext &pycontext::operator=(const pycontext &other) {
      impl = new pycontext_impl(*other.impl);
      return *this;
  }
 +
-+void pycontext::close_generator()
++void pycontext::close_generator(int unwind_status)
 +{
 +    if (!impl->generator.ptr() || impl->generator.ptr() == Py_None)
 +        return;
++
++    // An unwind started from inside the generator itself (a nested
++    // self.execute() that fails or reaches M2/M30) cannot close it while it
++    // runs, and must not drop the references the running call relies on.
++    bp::object running = PyGen_Check(impl->generator.ptr())
++        ? bp::object(impl->generator.attr("gi_running")) : bp::object(false);
++    if (PyObject_IsTrue(running.ptr()) == 1) {
++        impl->close_pending = true;
++        impl->close_status = unwind_status;
++        return;
++    }
 +
 +    try {
 +        impl->generator.attr("close")();
@@ -516,36 +575,52 @@ index f8217637fc..6d304503b8 100644
 +
 +    impl->generator_next = bp::object();
 +    impl->generator = bp::object();
++    impl->close_pending = false;
 +}
 diff --git a/src/emc/rs274ngc/interp_python.hh b/src/emc/rs274ngc/interp_python.hh
-index 3fcf26ba20..66155d9945 100644
+index 3fcf26b..baedeab 100644
 --- a/src/emc/rs274ngc/interp_python.hh
 +++ b/src/emc/rs274ngc/interp_python.hh
-@@ -10,6 +10,9 @@ struct pycontext_impl {
+@@ -10,6 +10,13 @@ struct pycontext_impl {
      int py_return_type;   // type of Python return value - enum retopts 
      double py_returned_double;
      int py_returned_int;
 +    // Keep the generator itself so abort can close it and run Python finally
 +    // blocks before the remap context is discarded.
 +    boost::python::object generator;
++    // The call stack was unwound while the generator was running, so it
++    // could not be closed then. pycall() closes it once control returns.
++    bool close_pending = false;
++    int close_status = 0;
      // generator object next method as returned if Python function contained a yield statement
      boost::python::object generator_next; 
  };
 diff --git a/src/emc/rs274ngc/rs274ngc_pre.cc b/src/emc/rs274ngc/rs274ngc_pre.cc
-index a4ef597412..55b048cad7 100644
+index 2ea3ba1..dea5749 100644
 --- a/src/emc/rs274ngc/rs274ngc_pre.cc
 +++ b/src/emc/rs274ngc/rs274ngc_pre.cc
-@@ -1688,6 +1688,7 @@ int Interp::unwind_call(int status, const char *file, int line, const char *func
+@@ -1246,6 +1246,10 @@ int Interp::init()
+ //_setup.feed_hold set in Interp::synch
+ 
+   // initialization stuff for subroutines and control structures
++  // A re-init can drop an active call stack without unwind_call(); still
++  // close any Python remap generators so their finally blocks run.
++  for (; _setup.call_level > 0; _setup.call_level--)
++      _setup.sub_context[_setup.call_level].pystuff.close_generator(INTERP_OK);
+   _setup.call_level = 0;
+   _setup.call_stack_id = 0;
+   _setup.defining_sub = 0;
+@@ -1760,6 +1764,7 @@ int Interp::unwind_call(int status, const char *file, int line, const char *func
      for(; _setup.call_level > 0; _setup.call_level--) {
  	int i;
  	context * sub = _setup.sub_context + _setup.call_level - 1;
-+	_setup.sub_context[_setup.call_level].pystuff.close_generator();
++	_setup.sub_context[_setup.call_level].pystuff.close_generator(status);
  	free_named_parameters(&_setup.sub_context[_setup.call_level]);
  	if(sub->subName) {
  	    logDebug("unwind_call leaving sub '%s'", sub->subName);
 diff --git a/tests/remap/executor/checkresult b/tests/remap/executor/checkresult
 new file mode 100755
-index 0000000000..7fda8799ba
+index 0000000..7fda879
 --- /dev/null
 +++ b/tests/remap/executor/checkresult
 @@ -0,0 +1,5 @@
@@ -556,7 +631,7 @@ index 0000000000..7fda8799ba
 +grep -q '^executor remap scenarios complete$' "$1"
 diff --git a/tests/remap/executor/remap.py b/tests/remap/executor/remap.py
 new file mode 100644
-index 0000000000..0198feb3fc
+index 0000000..0198feb
 --- /dev/null
 +++ b/tests/remap/executor/remap.py
 @@ -0,0 +1,52 @@
@@ -614,7 +689,7 @@ index 0000000000..0198feb3fc
 +        self.cancelled = True
 diff --git a/tests/remap/executor/test-ui.py b/tests/remap/executor/test-ui.py
 new file mode 100755
-index 0000000000..fb9b77b2dc
+index 0000000..fb9b77b
 --- /dev/null
 +++ b/tests/remap/executor/test-ui.py
 @@ -0,0 +1,177 @@
@@ -797,7 +872,7 @@ index 0000000000..fb9b77b2dc
 +sys.exit(0)
 diff --git a/tests/remap/executor/test.ini b/tests/remap/executor/test.ini
 new file mode 100644
-index 0000000000..c3ee45b9ca
+index 0000000..c3ee45b
 --- /dev/null
 +++ b/tests/remap/executor/test.ini
 @@ -0,0 +1,95 @@
@@ -898,7 +973,7 @@ index 0000000000..c3ee45b9ca
 +MIN_FERROR = 0.01
 diff --git a/tests/remap/executor/test.sh b/tests/remap/executor/test.sh
 new file mode 100755
-index 0000000000..4d496c4c58
+index 0000000..4d496c4
 --- /dev/null
 +++ b/tests/remap/executor/test.sh
 @@ -0,0 +1,8 @@
@@ -912,7 +987,7 @@ index 0000000000..4d496c4c58
 +echo "executor remap scenarios complete"
 diff --git a/tests/remap/executor/toplevel.py b/tests/remap/executor/toplevel.py
 new file mode 100644
-index 0000000000..1b41cf6b50
+index 0000000..4be91ba
 --- /dev/null
 +++ b/tests/remap/executor/toplevel.py
 @@ -0,0 +1,18 @@
@@ -928,9 +1003,9 @@ index 0000000000..1b41cf6b50
 +    self.memory_executor = remap.MemoryExecutor()
 +
 +    if component is not None:
-+        component.newpin("owner-marker", hal.HAL_BIT, hal.HAL_OUT)
-+        component.newpin("raw-result", hal.HAL_S32, hal.HAL_OUT)
-+        component.newpin("transport-result", hal.HAL_S32, hal.HAL_OUT)
++        component.newpin("owner-marker", hal.Type.BOOL, hal.Dir.OUT)
++        component.newpin("raw-result", hal.Type.SINT, hal.Dir.OUT)
++        component.newpin("transport-result", hal.Type.SINT, hal.Dir.OUT)
 +        component["owner-marker"] = True
 +        component.ready()
 +    self.executor_component = component

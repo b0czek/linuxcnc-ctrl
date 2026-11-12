@@ -27,7 +27,7 @@ Subject: [PATCH] rs274ngc: pass spindle selectors to remaps
  create mode 100644 tests/remap/dollar-argspec/toplevel.py
 
 diff --git a/docs/src/remap/remap.adoc b/docs/src/remap/remap.adoc
-index b263f1e959..5bb208e611 100644
+index 410381a..6027d2b 100644
 --- a/docs/src/remap/remap.adoc
 +++ b/docs/src/remap/remap.adoc
 @@ -324,7 +324,7 @@ there is the somewhat easier way of <<remap:python-o-word-procs,calling Python f
@@ -59,10 +59,10 @@ index b263f1e959..5bb208e611 100644
  `>`::
    The `>` (greater-than) character specifies that the current feed must be greater than zero,
 diff --git a/src/emc/rs274ngc/interp_remap.cc b/src/emc/rs274ngc/interp_remap.cc
-index c33df5a316..b13bdc0a5e 100644
+index 286ee98..cf192c1 100644
 --- a/src/emc/rs274ngc/interp_remap.cc
 +++ b/src/emc/rs274ngc/interp_remap.cc
-@@ -206,6 +206,7 @@ int Interp::convert_remapped_code(block_pointer /*block*/,
+@@ -204,6 +204,7 @@ int Interp::convert_remapped_code(block_pointer /*block*/,
  // 4. handle '>' as to require a positive feed.
  // 5. handle '^' as to require a positive speed.
  // 6. handle 'N' as to add the line number.
@@ -70,7 +70,7 @@ index c33df5a316..b13bdc0a5e 100644
  //
  // return INTERP_ERROR and propagate appropriate message if any errors so far
  // else return INTERP_OK
-@@ -332,6 +333,10 @@ int Interp::add_parameters(setup_pointer settings,
+@@ -330,6 +331,10 @@ int Interp::add_parameters(setup_pointer settings,
  	case 'x' : PARAM('x',"x",block->x_flag,block->x_number); break;
  	case 'y' : PARAM('y',"y",block->y_flag,block->y_number); break;
  	case 'z' : PARAM('z',"z",block->z_flag,block->z_number); break;
@@ -81,7 +81,7 @@ index c33df5a316..b13bdc0a5e 100644
  	case '-' : break; // ignore - backwards compatibility
  	default: ;
  	}
-@@ -367,10 +372,12 @@ int Interp::add_parameters(setup_pointer settings,
+@@ -365,10 +370,12 @@ int Interp::add_parameters(setup_pointer settings,
      }
  
      // ^...require positive speed
@@ -97,7 +97,7 @@ index c33df5a316..b13bdc0a5e 100644
          }
          else {
              tail += "S>0,";
-@@ -461,7 +468,7 @@ int Interp::parse_remap(const char *inistring, int lineno)
+@@ -459,7 +466,7 @@ int Interp::parse_remap(const char *inistring, int lineno)
  	}
  	if (!strncasecmp(kw,"argspec",kwlen)) {
  	    size_t pos = strspn (arg,
@@ -108,14 +108,14 @@ index c33df5a316..b13bdc0a5e 100644
  		      arg[pos],lineno,inistring);
 diff --git a/tests/remap/dollar-argspec/README b/tests/remap/dollar-argspec/README
 new file mode 100644
-index 0000000000..3758b4fb8d
+index 0000000..3758b4f
 --- /dev/null
 +++ b/tests/remap/dollar-argspec/README
 @@ -0,0 +1 @@
 +Exercise passing the optional $ spindle selector to Python and NGC remaps.
 diff --git a/tests/remap/dollar-argspec/expected b/tests/remap/dollar-argspec/expected
 new file mode 100644
-index 0000000000..518d1fe2f7
+index 0000000..518d1fe
 --- /dev/null
 +++ b/tests/remap/dollar-argspec/expected
 @@ -0,0 +1,29 @@
@@ -150,7 +150,7 @@ index 0000000000..518d1fe2f7
 + N..... ON_RESET()
 diff --git a/tests/remap/dollar-argspec/m501.ngc b/tests/remap/dollar-argspec/m501.ngc
 new file mode 100644
-index 0000000000..e5495df885
+index 0000000..e5495df
 --- /dev/null
 +++ b/tests/remap/dollar-argspec/m501.ngc
 @@ -0,0 +1,9 @@
@@ -165,7 +165,7 @@ index 0000000000..e5495df885
 +%
 diff --git a/tests/remap/dollar-argspec/m502.ngc b/tests/remap/dollar-argspec/m502.ngc
 new file mode 100644
-index 0000000000..600c9a95f4
+index 0000000..600c9a9
 --- /dev/null
 +++ b/tests/remap/dollar-argspec/m502.ngc
 @@ -0,0 +1,5 @@
@@ -176,7 +176,7 @@ index 0000000000..600c9a95f4
 +%
 diff --git a/tests/remap/dollar-argspec/remap.py b/tests/remap/dollar-argspec/remap.py
 new file mode 100644
-index 0000000000..95f0e7b8e9
+index 0000000..95f0e7b
 --- /dev/null
 +++ b/tests/remap/dollar-argspec/remap.py
 @@ -0,0 +1,10 @@
@@ -192,7 +192,7 @@ index 0000000000..95f0e7b8e9
 +    print("M503 Python spindle={} speed={}".format(spindle, int(words["s"])))
 diff --git a/tests/remap/dollar-argspec/test.ini b/tests/remap/dollar-argspec/test.ini
 new file mode 100644
-index 0000000000..36abfcbc62
+index 0000000..36abfcb
 --- /dev/null
 +++ b/tests/remap/dollar-argspec/test.ini
 @@ -0,0 +1,18 @@
@@ -216,7 +216,7 @@ index 0000000000..36abfcbc62
 +TOPLEVEL=toplevel.py
 diff --git a/tests/remap/dollar-argspec/test.ngc b/tests/remap/dollar-argspec/test.ngc
 new file mode 100644
-index 0000000000..b47556494a
+index 0000000..b475564
 --- /dev/null
 +++ b/tests/remap/dollar-argspec/test.ngc
 @@ -0,0 +1,11 @@
@@ -233,7 +233,7 @@ index 0000000000..b47556494a
 +M2
 diff --git a/tests/remap/dollar-argspec/test.sh b/tests/remap/dollar-argspec/test.sh
 new file mode 100755
-index 0000000000..7a389520fa
+index 0000000..7a38952
 --- /dev/null
 +++ b/tests/remap/dollar-argspec/test.sh
 @@ -0,0 +1,3 @@
@@ -242,7 +242,7 @@ index 0000000000..7a389520fa
 +exit "${PIPESTATUS[0]}"
 diff --git a/tests/remap/dollar-argspec/toplevel.py b/tests/remap/dollar-argspec/toplevel.py
 new file mode 100644
-index 0000000000..0dc38fa2a6
+index 0000000..0dc38fa
 --- /dev/null
 +++ b/tests/remap/dollar-argspec/toplevel.py
 @@ -0,0 +1 @@

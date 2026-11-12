@@ -6,23 +6,29 @@ Subject: [PATCH] motion: arm Single Step during active execution
 Forward AUTO_STEP to motion while an AUTO program is already running. The default trajectory planner latches the active source block, or the active G76 safe-approach or infeed-thread-clearance unit, and finishes that unit at an exact boundary before pausing.
 
 Keep later prequeued motion from starting, restore temporary exact boundaries when Step is canceled by Resume or Stop, and report single_stepping while an in-flight step remains armed. Cover ordinary multi-move blocks and an active G76 thread with later passes queued.
+
+Ported onto v2.10.0-pre2. The two in-flight scenarios, already present
+in the earlier G76 Stop patch's test list, are added here with the
+feature and its program.
 ---
  src/emc/motion/command.c               | 17 +++---
  src/emc/motion/control.c               |  9 +--
  src/emc/task/emctaskmain.cc            | 48 ++++++++--------
  src/emc/tp/tp.c                        | 80 ++++++++++++++++++++------
  src/emc/tp/tp_types.h                  |  6 +-
- tests/resumable-stop/README            | 10 +++-
+ tests/resumable-stop/README            |  6 ++
  tests/resumable-stop/checkresult       |  2 +-
  tests/resumable-stop/inflight-step.ngc |  7 +++
- 8 files changed, 125 insertions(+), 54 deletions(-)
+ tests/resumable-stop/test-ui.py        | 80 ++++++++++++++++++++++++++
+ tests/resumable-stop/test.sh           |  2 +
+ 10 files changed, 205 insertions(+), 52 deletions(-)
  create mode 100644 tests/resumable-stop/inflight-step.ngc
 
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index b6ad9c1504..c166af652b 100644
+index dfceb2a..8dc79dd 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
-@@ -1269,26 +1269,29 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1381,26 +1381,29 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    break;
  
  	case EMCMOT_STEP:
@@ -60,10 +66,10 @@ index b6ad9c1504..c166af652b 100644
  	    break;
  
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index 160c2dcd2c..040e534653 100644
+index 499824d..aafe3a5 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
-@@ -2225,14 +2225,15 @@ static void update_status(void)
+@@ -2311,14 +2311,15 @@ static void update_status(void)
  
      if (emcmotStatus->stepping) {
          TP_STRUCT *tp = &emcmotInternal->coord_tp;
@@ -84,10 +90,10 @@ index 160c2dcd2c..040e534653 100644
              emcmotStatus->stepping = 0;
              emcmotStatus->paused = 1;
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index beb6d565d6..e01ef50ce8 100644
+index fe2a371..0b20d68 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -462,6 +462,7 @@ static int programStartLine = 0;	// which line to run program from
+@@ -501,6 +501,7 @@ static int programStartLine = 0;	// which line to run program from
  int stepping = 0;
  int steppingWait = 0;
  static int steppedLine = 0;
@@ -95,7 +101,7 @@ index beb6d565d6..e01ef50ce8 100644
  /*
   * Pass groups delimit commands that are still owned by task. Motion that was
   * already queued before resumable Stop is stepped by TP to its marked G76
-@@ -477,6 +478,7 @@ void emcTaskResetSteppingState()
+@@ -516,6 +517,7 @@ void emcTaskResetSteppingState()
      steppedLine = 0;
      currentPassGroup = 0;
      steppedPassGroup = 0;
@@ -103,7 +109,7 @@ index beb6d565d6..e01ef50ce8 100644
  }
  
  // Variables to handle MDI call interrupts
-@@ -818,6 +820,22 @@ static void emcTaskStepInterpreter()
+@@ -861,6 +863,22 @@ static void emcTaskStepInterpreter()
      emcStatus->task.task_paused = 1;
  }
  
@@ -126,7 +132,7 @@ index beb6d565d6..e01ef50ce8 100644
  static void emcTaskStopClear()
  {
      bool was_active = emcStatus &&
-@@ -1432,13 +1450,7 @@ static int emcTaskPlan(void)
+@@ -1485,13 +1503,7 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -141,7 +147,7 @@ index beb6d565d6..e01ef50ce8 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1512,17 +1524,9 @@ static int emcTaskPlan(void)
+@@ -1565,17 +1577,9 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -160,7 +166,7 @@ index beb6d565d6..e01ef50ce8 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1588,13 +1592,7 @@ static int emcTaskPlan(void)
+@@ -1641,13 +1645,7 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -175,7 +181,7 @@ index beb6d565d6..e01ef50ce8 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -3676,6 +3674,10 @@ int main(int argc, char *argv[])
+@@ -4022,6 +4020,10 @@ int main(int argc, char *argv[])
  	// update subordinate status
  
  	emcMotionUpdate(&emcStatus->motion);
@@ -187,22 +193,22 @@ index beb6d565d6..e01ef50ce8 100644
  	// following error, etc.) unhome joints marked VOLATILE_HOME. The estop
  	// and machine-off paths already do their own unhome; this catches the
 diff --git a/src/emc/tp/tp.c b/src/emc/tp/tp.c
-index 00a06f1a75..81d50e10d3 100644
+index c690207..dac694f 100644
 --- a/src/emc/tp/tp.c
 +++ b/src/emc/tp/tp.c
-@@ -342,9 +342,9 @@ STATIC inline double tpGetRealFinalVel(TP_STRUCT const * const tp,
+@@ -357,9 +357,9 @@ STATIC inline double tpGetRealFinalVel(TP_STRUCT const * const tp,
       * If the term_cond gets changed out from under us, detect this and force final velocity to zero
       */
  
 -    if ((emcmotStatus->stepping && !tp->stepping_to_pass_clearance) ||
 +    if ((emcmotStatus->stepping && !tp->stepping_to_motion_target) ||
-             (tp->stopping && tc == tp->stop_tc) ||
+             (tp->stop_pass_id && tc == tp->stop_tc) ||
 -            (tp->stepping_to_pass_clearance && tc == tp->step_tc) ||
 +            (tp->stepping_to_motion_target && tc == tp->step_tc) ||
              tc->term_cond != TC_TERM_COND_TANGENT || tp->reverse_run) {
          return 0.0;
      }
-@@ -504,7 +504,11 @@ int tpClear(TP_STRUCT * const tp)
+@@ -497,7 +497,11 @@ int tpClear(TP_STRUCT * const tp)
      tp->step_tc = 0;
      tp->step_target_pending = 0;
      tp->step_pass_id = 0;
@@ -215,7 +221,7 @@ index 00a06f1a75..81d50e10d3 100644
      tp->reverse_run = 0;
      tp->synchronized = 0;
      tp->uu_per_rev = 0.0;
-@@ -1598,7 +1602,7 @@ STATIC inline int tpAddSegmentToQueue(TP_STRUCT * const tp, TC_STRUCT * const tc
+@@ -1595,7 +1599,7 @@ STATIC inline int tpAddSegmentToQueue(TP_STRUCT * const tp, TC_STRUCT * const tc
                  tp->stop_pass_id);
          return TP_ERR_FAIL;
      }
@@ -224,7 +230,7 @@ index 00a06f1a75..81d50e10d3 100644
              tp->step_target_pending && tp->step_pass_id && !tp->step_tc &&
              tc->g76_pass_id != tp->step_pass_id) {
          rtapi_print_msg(RTAPI_MSG_ERR,
-@@ -1624,12 +1628,11 @@ STATIC inline int tpAddSegmentToQueue(TP_STRUCT * const tp, TC_STRUCT * const tc
+@@ -1621,12 +1625,11 @@ STATIC inline int tpAddSegmentToQueue(TP_STRUCT * const tp, TC_STRUCT * const tc
          }
      }
      if (queued_tc && queued_tc->g76_pass_clearance &&
@@ -238,7 +244,7 @@ index 00a06f1a75..81d50e10d3 100644
      // Store end of current move as new final goal of TP
      // KLUDGE: endpoint is garbage for rigid tap since it's supposed to retract past the start point.
      if (tc->motion_type != TC_RIGIDTAP) {
-@@ -3442,10 +3445,11 @@ STATIC int tpCompleteSegment(TP_STRUCT * const tp,
+@@ -3496,10 +3499,11 @@ STATIC int tpCompleteSegment(TP_STRUCT * const tp,
          tp->stop_tc = 0;
          tp->stop_pass_id = 0;
      }
@@ -251,7 +257,7 @@ index 00a06f1a75..81d50e10d3 100644
      }
  
      //TODO make progress to match target?
-@@ -4220,7 +4224,7 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
+@@ -4384,7 +4388,7 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
              }
              return TP_ERR_WAITING;
          }
@@ -260,7 +266,7 @@ index 00a06f1a75..81d50e10d3 100644
                  tp->step_pass_id && !tp->step_tc) {
              tpHandleEmptyQueue(tp);
              return TP_ERR_WAITING;
-@@ -4375,6 +4379,30 @@ STATIC int tpGetQueuedG76PassId(TP_STRUCT * const tp)
+@@ -4573,6 +4577,30 @@ STATIC int tpGetQueuedG76PassId(TP_STRUCT * const tp)
      return tc ? tc->g76_pass_id : 0;
  }
  
@@ -291,7 +297,7 @@ index 00a06f1a75..81d50e10d3 100644
  int tpPause(TP_STRUCT * const tp)
  {
      if (0 == tp) {
-@@ -4382,10 +4410,12 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4580,10 +4608,12 @@ int tpPause(TP_STRUCT * const tp)
      }
  
      if (tp->stopping) {
@@ -303,9 +309,9 @@ index 00a06f1a75..81d50e10d3 100644
 +        tp->step_motion_id = 0;
 +        tp->stepping_to_motion_target = 0;
          TC_STRUCT *tc = tcqItem(&tp->queue, 0);
-         bool in_g76_cut_or_clearance = tc && tc->g76_pass_id &&
-             ((tc->active && tc->synchronized == TC_SYNC_POSITION &&
-@@ -4418,7 +4448,7 @@ int tpPause(TP_STRUCT * const tp)
+         /*
+          * A G76 cut that has passed spindle index, or its explicitly marked
+@@ -4630,7 +4660,7 @@ int tpPause(TP_STRUCT * const tp)
              tp->pausing = 1;
          }
      } else if (emcmotStatus->stepping &&
@@ -314,7 +320,7 @@ index 00a06f1a75..81d50e10d3 100644
          /*
           * EMCMOT_STEP requests default-TP pass targeting through the existing
           * tpPause ABI. Alternate planners leave step_target_pending clear and
-@@ -4427,15 +4457,25 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4639,15 +4669,25 @@ int tpPause(TP_STRUCT * const tp)
          int pass_id = tpGetQueuedG76PassId(tp);
          if (pass_id) {
              tp->step_pass_id = pass_id;
@@ -344,15 +350,15 @@ index 00a06f1a75..81d50e10d3 100644
          }
      } else {
          tp->pausing = 1;
-@@ -4448,6 +4488,7 @@ int tpResume(TP_STRUCT * const tp)
+@@ -4660,6 +4700,7 @@ int tpResume(TP_STRUCT * const tp)
      if (0 == tp) {
          return TP_ERR_FAIL;
      }
 +    tpRestoreStepTarget(tp);
      tp->pausing = 0;
      tp->stopping = 0;
-     tp->stop_tc = 0;
-@@ -4456,7 +4497,10 @@ int tpResume(TP_STRUCT * const tp)
+     tp->stop_sync_run = 0;
+@@ -4669,7 +4710,10 @@ int tpResume(TP_STRUCT * const tp)
      tp->step_tc = 0;
      tp->step_target_pending = 0;
      tp->step_pass_id = 0;
@@ -364,7 +370,7 @@ index 00a06f1a75..81d50e10d3 100644
      if (MOTION_ID_VALID(tp->spindle.waiting_for_index)) {
          emcmotStatus->spindle_status[
              tp->spindle.spindle_num].spindle_index_enable = 1;
-@@ -4476,7 +4520,11 @@ int tpAbort(TP_STRUCT * const tp)
+@@ -4689,7 +4733,11 @@ int tpAbort(TP_STRUCT * const tp)
          tp->step_tc = 0;
          tp->step_target_pending = 0;
          tp->step_pass_id = 0;
@@ -378,10 +384,10 @@ index 00a06f1a75..81d50e10d3 100644
          tp->aborting = 1;
      }
 diff --git a/src/emc/tp/tp_types.h b/src/emc/tp/tp_types.h
-index 15be0f3127..893a9df4c2 100644
+index 2963bcc..819f508 100644
 --- a/src/emc/tp/tp_types.h
 +++ b/src/emc/tp/tp_types.h
-@@ -147,7 +147,11 @@ typedef struct {
+@@ -171,7 +171,11 @@ typedef struct {
      TC_STRUCT *step_tc;
      int step_target_pending;
      int step_pass_id;
@@ -395,20 +401,13 @@ index 15be0f3127..893a9df4c2 100644
  } TP_STRUCT;
  
 diff --git a/tests/resumable-stop/README b/tests/resumable-stop/README
-index e845030ffb..72607e0da2 100644
+index 3a037f8..17c6a5b 100644
 --- a/tests/resumable-stop/README
 +++ b/tests/resumable-stop/README
-@@ -13,11 +13,17 @@ requests across the cut/retract handoff, and a negative G33 test proving that
- an unrelated following rapid is not executed. Single Step coverage enters the
- first G76 pass directly and verifies every cylindrical and tapered safe
- approach step followed by its combined infeed, synchronized-cut, and clearance
--step. It also starts G76 in normal AUTO_RUN, stops after the first pass with later passes
--already queued, and verifies that each
-+step. It also starts G76 in normal AUTO_RUN, stops after the first pass with
-+later passes already queued, and verifies that each
- following AUTO_STEP reaches exactly one cylindrical or tapered safe approach
- endpoint, and the next AUTO_STEP completes that pass's infeed, thread, and
- clearance.
+@@ -47,6 +47,12 @@ step. It also starts G76 in normal AUTO_RUN, stops after the first pass with
+ later passes already queued, and verifies that each following AUTO_STEP
+ reaches exactly one cylindrical or tapered safe approach endpoint, and the
+ next AUTO_STEP completes that pass's infeed, thread, and clearance.
 +In-flight Single Step coverage arms during an ordinary source block with three
 +later motion blocks already queued and during an active G76 cut with later
 +passes queued. It verifies that the active block or thread-plus-clearance unit
@@ -419,18 +418,18 @@ index e845030ffb..72607e0da2 100644
  also prove that a marked G76 retract endpoint is not trimmed by a following
  rapid. The handoff stress case uses a slow synchronized feed and issues Stop at
 diff --git a/tests/resumable-stop/checkresult b/tests/resumable-stop/checkresult
-index 4792b570e1..dcdfb2d76f 100755
+index efeaf20..631b3a4 100755
 --- a/tests/resumable-stop/checkresult
 +++ b/tests/resumable-stop/checkresult
 @@ -1,4 +1,4 @@
  #!/bin/sh
  set -e
--test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 24
-+test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 26
+-test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 37
++test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 39
  grep -q '^resumable stop scenarios complete$' "$1"
 diff --git a/tests/resumable-stop/inflight-step.ngc b/tests/resumable-stop/inflight-step.ngc
 new file mode 100644
-index 0000000000..1f72544983
+index 0000000..1f72544
 --- /dev/null
 +++ b/tests/resumable-stop/inflight-step.ngc
 @@ -0,0 +1,7 @@
@@ -441,3 +440,135 @@ index 0000000000..1f72544983
 +G1 X30
 +G1 X40
 +M2
+diff --git a/tests/resumable-stop/test-ui.py b/tests/resumable-stop/test-ui.py
+index a4fb758..a8aa2ef 100755
+--- a/tests/resumable-stop/test-ui.py
++++ b/tests/resumable-stop/test-ui.py
+@@ -245,6 +245,42 @@ def run_stop_single_step_test():
+     wait_for_program_complete(20.0)
+     assert_outputs_stopped_after_program()
+ 
++def run_inflight_single_step_test():
++    open_auto_program("inflight-step.ngc")
++    c.auto(linuxcnc.AUTO_RUN, 0)
++
++    wait_for(
++        lambda: s.queue >= 3
++        and s.position[0] > 1.0
++        and s.position[0] < 9.0,
++        "program did not prequeue later blocks during its first move",
++    )
++
++    c.auto(linuxcnc.AUTO_STEP)
++    wait_for(
++        lambda: s.single_stepping and not s.task_paused and not s.paused,
++        "in-flight Single Step did not remain unpaused while armed",
++    )
++    wait_for(
++        lambda: s.task_paused
++        and s.paused
++        and math.isclose(s.position[0], 10.0, abs_tol=0.01)
++        and abs(s.current_vel) < 0.001,
++        "in-flight Single Step did not finish the active source block",
++        timeout=15.0,
++    )
++
++    if s.queue < 3:
++        fail("in-flight Single Step did not preserve prequeued later blocks")
++
++    time.sleep(0.25)
++    s.poll()
++    if not math.isclose(s.position[0], 10.0, abs_tol=0.001):
++        fail("in-flight Single Step advanced into the next source block")
++
++    c.auto(linuxcnc.AUTO_RESUME)
++    wait_for_program_complete(40.0, timeout=10.0)
++
+ 
+ def run_rapid_resume_without_at_speed_test():
+     hal.set_p("spindle.0.at-speed", "false")
+@@ -759,6 +795,48 @@ def run_tapered_g76_single_step_test():
+         "tapered-drive G76",
+     )
+ 
++def run_inflight_g76_single_step_test():
++    open_auto_program("g76.ngc")
++    c.auto(linuxcnc.AUTO_RUN, 0)
++
++    wait_for(
++        lambda: s.queue > 3
++        and s.position[0] < 9.5
++        and s.position[2] < -0.5
++        and s.position[2] > -4.5,
++        "G76 did not prequeue later passes during its first cut",
++        timeout=15.0,
++    )
++
++    c.auto(linuxcnc.AUTO_STEP)
++    wait_for(
++        lambda: s.single_stepping and not s.task_paused and not s.paused,
++        "in-flight G76 Single Step did not remain unpaused while armed",
++    )
++    wait_for(
++        lambda: s.task_paused
++        and s.paused
++        and abs(s.current_vel) < 0.001
++        and s.position[2] <= -4.90
++        and math.isclose(s.position[0], 10.4, abs_tol=0.01),
++        "in-flight G76 Single Step did not finish the active thread and clearance",
++        timeout=20.0,
++    )
++
++    stepped_x = s.position[0]
++    stepped_z = s.position[2]
++    time.sleep(0.25)
++    s.poll()
++    if (
++        not math.isclose(s.position[0], stepped_x, abs_tol=0.001)
++        or not math.isclose(s.position[2], stepped_z, abs_tol=0.001)
++    ):
++        fail("in-flight G76 Single Step advanced into the next approach")
++
++    c.auto(linuxcnc.AUTO_RESUME)
++    wait_for_program_complete(20.0, expected_z=-5.0, timeout=20.0)
++    assert_outputs_stopped_after_program()
++
+ 
+ def run_g76_exit_taper_stop_test(program, expected_clear_x, label):
+     open_auto_program(program)
+@@ -1538,6 +1616,7 @@ SCENARIOS = {
+     "idle-rejected": run_idle_program_stop_rejected_test,
+     "ordinary": run_ordinary_stop_resume_test,
+     "single-step": run_stop_single_step_test,
++    "inflight-single-step": run_inflight_single_step_test,
+     "rapid-no-atspeed": run_rapid_resume_without_at_speed_test,
+     "paused-resume": lambda: run_stop_while_program_paused_test(False),
+     "paused-run": lambda: run_stop_while_program_paused_test(True),
+@@ -1551,6 +1630,7 @@ SCENARIOS = {
+     "g76-tapered": run_tapered_g76_stop_resume_test,
+     "g76-single-step": run_g76_single_step_test,
+     "g76-tapered-single-step": run_tapered_g76_single_step_test,
++    "g76-inflight-single-step": run_inflight_g76_single_step_test,
+     "g76-exit-taper": run_cylindrical_g76_exit_taper_stop_test,
+     "g76-tapered-exit-taper": run_tapered_g76_exit_taper_stop_test,
+     "g76-handoff-stress": run_g76_cut_retract_handoff_stress_test,
+diff --git a/tests/resumable-stop/test.sh b/tests/resumable-stop/test.sh
+index d7b218d..832cb0f 100755
+--- a/tests/resumable-stop/test.sh
++++ b/tests/resumable-stop/test.sh
+@@ -16,6 +16,7 @@ scenarios=(
+     idle-rejected
+     ordinary
+     single-step
++    inflight-single-step
+     rapid-no-atspeed
+     paused-resume
+     paused-run
+@@ -43,6 +44,7 @@ scenarios=(
+     spindle-state
+     g76-single-step
+     g76-tapered-single-step
++    g76-inflight-single-step
+     g76-exit-taper
+     g76-tapered-exit-taper
+     g76-handoff-stress
