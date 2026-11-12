@@ -214,12 +214,19 @@ wait. A next-feed at-speed wait that was pending before Stop still holds after
 Resume, and a later `S` word change still arms one. Resume or Run during a Stop
 leaves single-step mode entered by an earlier Step.
 
-The `tests/resumable-stop` LinuxCNC regression runs 23 scenarios with the
-jerk-limited planner and repeats three of them with the trapezoidal planner.
+`STOPPED` also clears the planner's record of the current spindle
+synchronization, so a `G33` that follows velocity-synchronized motion waits
+for a fresh index after Resume instead of catching up the revolutions turned
+during the Stop. Stop's spindle-off and spindle-on leave the at-speed and
+spindle-state bookkeeping of later spindle commands untouched.
+
+The `tests/resumable-stop` LinuxCNC regression runs 25 scenarios with the
+jerk-limited planner and repeats four of them with the trapezoidal planner.
 They cover Stop/Resume and Stop/Single-Step preserving the queued program,
 spindle and coolant handling, the at-speed cases above, `G33` threading
-including a chain of `G33` moves, `G33.1` rigid tapping, Stop during and after
-an interrupted `G28.2`, and that `STOPPED` is never reported while moving.
+including a chain of `G33` moves and `G33`/`G95`/`G33`, `G33.1` rigid tapping,
+Stop during and after an interrupted `G28.2`, and that `STOPPED` is never
+reported while moving.
 
 ### 0005 — Headless backend-only builds on top of `--disable-gui`
 
@@ -272,9 +279,25 @@ and M61 activate the resulting combined offset automatically; G49 still
 cancels compensation and same-block explicit G-codes take precedence.
 
 Stored wear is available in interpreter parameters `#5430–#5438`, Python tool
-status, and the interpreter Python tool object. The tool database protocol is
-v2.2 and the tool-entry line limit is 512 bytes. The protobuf contract exposes
-`ToolEntry.wearOffset`, including status deltas and partial `setTool` updates.
+status, and the interpreter Python tool object. On v2.10.0-pre2,
+`#5401–#5409` hold the loaded tool's stored geometry and `#5081–#5089` the
+applied offset (geometry plus wear), following upstream's split of those
+parameters. The protobuf contract exposes `ToolEntry.wearOffset`, including
+status deltas and partial `setTool` updates.
+
+The automatic offset takes effect together with the tool: it travels with the
+`EMC_TOOL_LOAD` or `EMC_TOOL_SET_NUMBER` message and task applies it when the
+change completes, so an abort or E-stop during a change never leaves one
+tool's offset applied with another tool loaded. M61 is refused under cutter
+radius compensation, as M6 is.
+
+The tool database protocol is v2.2. A tool-table line holds at most 510
+characters before its newline. Loading, database replies, formatting, saving
+and database notification refuse a longer line with an error instead of
+cutting it; a table loaded with a refused line is not saved over until it is
+reloaded without it, and an edit whose save or notification fails is rolled
+back in memory. The G-code preview applies the same geometry-plus-wear offset
+as the machine.
 
 ### 0008 — Tapered G76 drive lines and alternating infeed
 
@@ -296,6 +319,12 @@ direction (the default) and `D1` to alternate roughing passes across the final
 thread line; full-depth and spring passes remain centered, and `Q0` keeps every
 pass on the centered line. Both cylindrical and tapered alternating paths are
 covered. No NML or public transport changes are required.
+
+On v2.10.0-pre2 a tapered cycle passes upstream's synchronized-feed check:
+every synchronized move of every pass (drive line, the feed in and angled move
+of an entry taper, the angled move of an exit taper) is checked at its own lead
+against the axis velocity limits, and in G96 at its own smallest radius.
+Upstream's spindle-override hold covers all passes.
 
 ### 0009 — Safe G76 Stop clearance and two-stage Single Step
 
