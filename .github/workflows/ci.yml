@@ -151,8 +151,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential ccache cmake libarchive-dev libboost-dev \
             libboost-python-dev libedit2 libfmt9 libgrpc++-dev libgrpc-dev \
-            libmodbus5 libprotobuf-dev libtirpc3t64 libudev1 libusb-1.0-0 \
-            procps protobuf-compiler protobuf-compiler-grpc psmisc python3-dev
+            libmodbus5 libprotobuf-dev libssl-dev libtirpc3t64 libudev1 \
+            libusb-1.0-0 procps protobuf-compiler protobuf-compiler-grpc psmisc \
+            python3-cryptography python3-dev
       - name: Restore LinuxCNC build
         uses: actions/cache/restore@v4
         with:
@@ -178,6 +179,8 @@ jobs:
             -DLINUXCNC_ROOT="${LINUXCNC_DIR}" \
             -DLINUXCNC_GRPC_BUILD_WIRE=ON \
             -DLINUXCNC_GRPC_BUILD_TESTS=ON \
+            -DLINUXCNC_GRPC_BUILD_LISTENER_TESTS=ON \
+            -DLINUXCNC_BUILD_TRANSPORT=ON \
             -DLINUXCNC_GRPC_ENABLE_NML=ON \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_BUILD_TYPE=Debug
@@ -221,7 +224,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential clang-tidy-21 clang-tools-21 cmake \
             libarchive-dev libboost-dev libgrpc++-dev libgrpc-dev \
-            libprotobuf-dev protobuf-compiler protobuf-compiler-grpc python3-dev
+            libprotobuf-dev libssl-dev protobuf-compiler protobuf-compiler-grpc \
+            python3-dev
       - name: Restore LinuxCNC build
         uses: actions/cache/restore@v4
         with:
@@ -236,6 +240,8 @@ jobs:
             -DLINUXCNC_ROOT="${LINUXCNC_DIR}" \
             -DLINUXCNC_GRPC_BUILD_WIRE=ON \
             -DLINUXCNC_GRPC_BUILD_TESTS=ON \
+            -DLINUXCNC_GRPC_BUILD_LISTENER_TESTS=ON \
+            -DLINUXCNC_BUILD_TRANSPORT=ON \
             -DLINUXCNC_GRPC_ENABLE_NML=ON \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_BUILD_TYPE=Debug

@@ -8,6 +8,7 @@ include(CTest)
 option(LINUXCNC_GRPC_BUILD_TESTS "Build transport-neutral native server tests" ${BUILD_TESTING})
 option(LINUXCNC_GRPC_ENABLE_EXTERNAL_DEPS "Discover optional LinuxCNC, protobuf, and gRPC dependencies" ON)
 option(LINUXCNC_GRPC_BUILD_WIRE "Generate and build linuxcnc.v1 protobuf/gRPC C++ sources" ON)
+option(LINUXCNC_GRPC_BUILD_LISTENER_TESTS "Build real TLS and WebSocket listener tests without LinuxCNC" OFF)
 option(LINUXCNC_GRPC_ENABLE_NML "Build the LinuxCNC NML adapter when a checkout is available" ON)
 
 find_package(Threads REQUIRED)
@@ -29,6 +30,7 @@ set(LINUXCNC_GRPC_DOMAIN_SOURCES
     src/program/workspace_archive.cc
     src/scope/telemetry.cc
     src/linuxcnc/command_validation.cc
+    src/linuxcnc/machine_health.cc
     src/linuxcnc/nml_adapter.cc
 )
 
@@ -181,13 +183,19 @@ endif()
 
 # Generated files live only in the build tree and are never hand-edited or
 # checked in. Pass LINUXCNC_GRPC_BUILD_WIRE=OFF for a domain-only build.
-if(LINUXCNC_GRPC_BUILD_WIRE)
-    add_executable(linuxcnc-grpc-server src/daemon/main.cc)
-    target_compile_features(linuxcnc-grpc-server PRIVATE cxx_std_20)
-    target_link_libraries(linuxcnc-grpc-server PRIVATE
-        linuxcnc-grpc-domain Threads::Threads)
-    target_compile_options(linuxcnc-grpc-server PRIVATE
-        -Wall -Wextra -Wpedantic)
+if(LINUXCNC_GRPC_BUILD_WIRE OR LINUXCNC_GRPC_BUILD_LISTENER_TESTS)
+    if(NOT TARGET linuxcnc::transport-grpc)
+        find_package(linuxcnc-transport CONFIG QUIET)
+    endif()
+    if(NOT TARGET linuxcnc::transport-grpc)
+        # A function scopes fallback options without changing parent/root settings.
+        function(linuxcnc_add_transport)
+            set(LINUXCNC_TRANSPORT_BUILD_TESTS OFF)
+            set(LINUXCNC_TRANSPORT_BUILD_GRPC ON)
+            add_subdirectory(../transport "${CMAKE_CURRENT_BINARY_DIR}/transport")
+        endfunction()
+        linuxcnc_add_transport()
+    endif()
     find_package(Boost REQUIRED)
     find_package(Protobuf REQUIRED)
     find_package(gRPC REQUIRED)
@@ -273,6 +281,50 @@ if(LINUXCNC_GRPC_BUILD_WIRE)
         src/hal/grpc/mapping.cc)
     target_link_libraries(linuxcnc-grpc-wire PUBLIC
         linuxcnc-grpc-domain linuxcnc-grpc-proto)
+    add_library(linuxcnc-grpc-listeners STATIC
+        src/listener_credentials.cc src/telemetry_websocket_server.cc
+        src/telemetry_session.cc src/grpc/server/local_health.cc)
+    target_compile_features(linuxcnc-grpc-listeners PUBLIC cxx_std_20)
+    target_compile_definitions(linuxcnc-grpc-listeners PRIVATE BOOST_ERROR_CODE_HEADER_ONLY=1)
+    target_include_directories(linuxcnc-grpc-listeners PRIVATE
+        ${Boost_INCLUDE_DIRS} "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(linuxcnc-grpc-listeners PUBLIC
+        linuxcnc-grpc-wire linuxcnc::transport-grpc)
+    target_compile_options(linuxcnc-grpc-listeners PRIVATE -Wall -Wextra -Wpedantic)
+    if(LINUXCNC_GRPC_BUILD_LISTENER_TESTS)
+        add_executable(linuxcnc-local-health-tests tests/local_health_tests.cc
+            src/grpc/server/runtime.cc)
+        target_include_directories(linuxcnc-local-health-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(linuxcnc-local-health-tests PRIVATE linuxcnc-grpc-listeners)
+        target_compile_options(linuxcnc-local-health-tests PRIVATE -Wall -Wextra -Wpedantic)
+        add_test(NAME linuxcnc-local-health-boundaries COMMAND linuxcnc-local-health-tests)
+        set_tests_properties(linuxcnc-local-health-boundaries PROPERTIES TIMEOUT 30)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_executable(linuxcnc-listener-test-server tests/listener_test_server.cc)
+        target_link_libraries(linuxcnc-listener-test-server PRIVATE linuxcnc-grpc-listeners)
+        target_compile_options(linuxcnc-listener-test-server PRIVATE -Wall -Wextra -Wpedantic)
+        if(TARGET linuxcnc::external-key)
+            set(LINUXCNC_LISTENER_TEST_PROVIDER linuxcnc::external-key)
+        else()
+            set(LINUXCNC_LISTENER_TEST_PROVIDER linuxcnc-external-key)
+        endif()
+        add_test(NAME linuxcnc-listener-boundaries
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/listener_boundaries.py
+                --server $<TARGET_FILE:linuxcnc-listener-test-server>
+                --provider $<TARGET_FILE:${LINUXCNC_LISTENER_TEST_PROVIDER}>
+                --grpc-version ${gRPC_VERSION}
+                --runner ${CMAKE_CROSSCOMPILING_EMULATOR})
+        set_tests_properties(linuxcnc-listener-boundaries PROPERTIES TIMEOUT 90)
+    endif()
+endif()
+
+if(LINUXCNC_GRPC_BUILD_WIRE)
+    add_executable(linuxcnc-grpc-server src/daemon/main.cc)
+    target_compile_features(linuxcnc-grpc-server PRIVATE cxx_std_20)
+    target_link_libraries(linuxcnc-grpc-server PRIVATE
+        linuxcnc-grpc-domain Threads::Threads)
+    target_compile_options(linuxcnc-grpc-server PRIVATE
+        -Wall -Wextra -Wpedantic)
     set(LINUXCNC_GRPC_SERVER_SOURCES
         src/grpc/server/main.cc
         src/grpc/server/runtime.cc
@@ -285,13 +337,15 @@ if(LINUXCNC_GRPC_BUILD_WIRE)
         src/hal/grpc/service_hal.cc
         src/scope/grpc/service_controller.cc)
     target_sources(linuxcnc-grpc-server PRIVATE ${LINUXCNC_GRPC_SERVER_SOURCES})
-    target_sources(linuxcnc-grpc-server PRIVATE src/telemetry_websocket_server.cc)
     target_compile_definitions(linuxcnc-grpc-server PRIVATE LINUXCNC_GRPC_BUILD_WIRE=1)
     target_compile_definitions(linuxcnc-grpc-server PRIVATE BOOST_ERROR_CODE_HEADER_ONLY=1)
     target_include_directories(linuxcnc-grpc-server PRIVATE ${Boost_INCLUDE_DIRS})
     target_include_directories(linuxcnc-grpc-server PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    target_link_libraries(linuxcnc-grpc-server PRIVATE linuxcnc-grpc-wire)
+    target_link_libraries(linuxcnc-grpc-server PRIVATE linuxcnc-grpc-listeners)
+    if(TARGET gRPC::grpc++_reflection)
+        target_compile_definitions(linuxcnc-grpc-server PRIVATE LINUXCNC_GRPC_HAS_REFLECTION=1)
+    endif()
     add_executable(linuxcnc-grpc-health-check src/health_check_main.cc)
     target_compile_features(linuxcnc-grpc-health-check PRIVATE cxx_std_20)
     target_link_libraries(linuxcnc-grpc-health-check PRIVATE linuxcnc-grpc-proto)
@@ -312,7 +366,8 @@ if(LINUXCNC_GRPC_BUILD_WIRE)
             COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_grpc_live_integration.sh"
                     "$<TARGET_FILE:linuxcnc-grpc-server>"
                     "$<TARGET_FILE:linuxcnc-grpc-live-integration>"
-                    "${LINUXCNC_ROOT}")
+                    "${LINUXCNC_ROOT}"
+                    "$<TARGET_FILE:linuxcnc-grpc-health-check>")
         set_tests_properties(linuxcnc-grpc-live-integration PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 120)

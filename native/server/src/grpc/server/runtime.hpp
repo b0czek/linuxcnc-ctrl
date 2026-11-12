@@ -3,6 +3,7 @@
 #include <atomic>
 #include <csignal>
 #include <memory>
+#include <string>
 #include <thread>
 
 namespace grpc {
@@ -12,6 +13,7 @@ class Server;
 namespace linuxcnc::server {
 
 class AdmissionCounter;
+class MachineHealthCache;
 class BoundedExecutor;
 class PositionTelemetry;
 class HalValueTelemetry;
@@ -20,6 +22,7 @@ class TelemetryWebSocketServer;
 namespace detail {
 
 class ManagedGrpcService;
+class LocalHealthServer;
 
 // Owns the server-side shutdown edge. The signal thread and the main thread
 // each participate in the normal one-shot lifecycle; an atomic gate ensures
@@ -48,6 +51,13 @@ class ServerRuntime {
   ServerRuntime(const ServerRuntime&) = delete;
   ServerRuntime& operator=(const ServerRuntime&) = delete;
 
+  // Call on the owner thread after public startup, before the control thread.
+  // Empty endpoints disable local health. The cache supplies machine state
+  // for GET /health; null reports the machine as unavailable.
+  void start_local_health(
+      const std::string& endpoint,
+      std::shared_ptr<const MachineHealthCache> machine = nullptr);
+
   // Starts the dedicated signal waiter. The caller must block the same
   // signal set in the thread that calls this method before starting it.
   void start_control_thread(const sigset_t& shutdown_signals);
@@ -75,6 +85,7 @@ class ServerRuntime {
   void join_control_thread() noexcept;
 
   std::unique_ptr<::grpc::Server> server_;
+  std::unique_ptr<LocalHealthServer> local_health_;
   std::unique_ptr<ManagedGrpcService> machine_;
   std::unique_ptr<ManagedGrpcService> ini_;
   std::unique_ptr<ManagedGrpcService> program_;

@@ -9,6 +9,7 @@
 #include "linuxcnc_grpc/callback_runtime.hpp"
 #include "linuxcnc_grpc/command_coordinator.hpp"
 #include "linuxcnc_grpc/daemon/config.hpp"
+#include "linuxcnc_grpc/linuxcnc/machine_health.hpp"
 #include "linuxcnc_grpc/linuxcnc/nml_adapter.hpp"
 #include "linuxcnc_grpc/position/history.hpp"
 #include "linuxcnc_grpc/program/workspace.hpp"
@@ -215,6 +216,8 @@ void command_coordinator_test() {
 
 void daemon_config_test() {
   DaemonConfig config;
+  assert(!validate_config(config));
+  config.allow_plaintext = true;
   char program[] = "linuxcnc-grpc-server";
   char period[] = "--status-period-ms=25";
   char quota[] = "--workspace-quota=64";
@@ -235,6 +238,10 @@ void daemon_config_test() {
   assert(config.max_workspace_entries == 32);
   assert(config.max_upload_metadata_bytes == 4096);
   assert(config.upload_timeout == std::chrono::seconds(45));
+  char local_health[] = "--health-endpoint=unix:/tmp/linuxcnc-health.sock";
+  char* local_health_arguments[] = {program, local_health};
+  assert(parse_config(2, local_health_arguments, &config, nullptr, &error));
+  assert(config.health_endpoint == "unix:/tmp/linuxcnc-health.sock");
   char telemetry[] = "--telemetry-endpoint=127.0.0.1:51000";
   char* telemetry_arguments[] = {program, telemetry};
   assert(parse_config(2, telemetry_arguments, &config, nullptr, &error));
@@ -291,17 +298,26 @@ void daemon_config_test() {
   {
     std::ofstream certificate(base / "server.crt");
     std::ofstream private_key(base / "server.key");
+    std::ofstream client_roots(base / "client-roots.crt");
     certificate << "certificate";
     private_key << "private key";
+    client_roots << "client roots";
     config.endpoint = "0.0.0.0:50051";
     config.allow_plaintext_non_loopback = false;
     config.tls = true;
     config.tls_certificate = base / "server.crt";
     config.tls_private_key = base / "server.key";
+    // Network listeners must not accept unauthenticated TLS clients by default.
+    assert(!validate_config(config, &error));
+    config.allow_anonymous = true;
+    assert(validate_config(config, &error));
+    config.allow_anonymous = false;
+    // Client roots without --mtls would never be requested.
+    config.tls_client_ca = base / "client-roots.crt";
+    assert(!validate_config(config, &error));
+    config.mtls = true;
     assert(validate_config(config, &error));
     config.telemetry_endpoint = "0.0.0.0:50052";
-    assert(!validate_config(config, &error));
-    config.allow_plaintext_non_loopback = true;
     assert(validate_config(config, &error));
   }
   const auto workspace_root = config.workspace_root;
@@ -372,8 +388,39 @@ void workspace_test() {
   fs::remove_all(base, error);
 }
 
+void machine_health_test() {
+  MachineHealthCache cache;
+  const auto start = MachineHealthCache::Clock::now();
+  expect(!cache.read(start).available);
+  expect(format_health_json(true, cache.read(start)) ==
+         R"({"version":1,"serving":true,"machine":{"available":false}})");
+
+  NmlStatusSnapshot snapshot;
+  snapshot.task_state = 3;
+  snapshot.interp_state = 2;
+  snapshot.motion_stat.traj.in_position = false;
+  snapshot.ini_filename = std::string("a\"b\\c\n\x01");
+  cache.observe(snapshot, start);
+  const auto health = cache.read(start + std::chrono::milliseconds(42));
+  expect(health.available && health.age.count() == 42);
+  expect(format_health_json(false, health) ==
+         R"({"version":1,"serving":false,"machine":{"available":true,)"
+         R"("age_ms":42,"task_state":3,"interp_state":2,"in_position":false,)"
+         R"("ini":"a\"b\\c\u000a\u0001"}})");
+
+  cache.mark_unavailable();
+  expect(!cache.read(start).available);
+
+  MachineHealthCache bounded(std::chrono::milliseconds(100));
+  bounded.observe(snapshot, start);
+  expect(bounded.read(start + std::chrono::milliseconds(100)).available);
+  const auto stale = bounded.read(start + std::chrono::milliseconds(101));
+  expect(!stale.available && stale.ini_filename.empty());
+}
+
 int main() {
   callback_runtime_test();
+  machine_health_test();
   cleanup_reserve_saturation_test();
   command_coordinator_test();
   daemon_config_test();

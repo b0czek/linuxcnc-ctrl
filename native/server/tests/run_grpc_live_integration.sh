@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: $0 SERVER LIVE_INTEGRATION LINUXCNC_ROOT" >&2
+if [[ $# -lt 3 || $# -gt 4 ]]; then
+  echo "usage: $0 SERVER LIVE_INTEGRATION LINUXCNC_ROOT [HEALTH_CHECK]" >&2
   exit 2
 fi
 
 server="$1"
 integration="$2"
 linuxcnc_root="$3"
+health_check="${4:-}"
 fixture_dir="$(cd "$(dirname "$0")/fixtures" && pwd)"
 root="$(mktemp -d "${TMPDIR:-/tmp}/linuxcnc-grpc-live.XXXXXX")"
 grpc_port=$((55000 + ($$ % 1000)))
@@ -106,8 +107,8 @@ if [[ ! -x "$linuxcnc_root/scripts/rip-environment" ]]; then
   exit 77
 fi
 
-mkdir -p "$root/active" "$root/workspaces"
-chmod 700 "$root/workspaces"
+mkdir -p "$root/active" "$root/workspaces" "$root/health"
+chmod 700 "$root/workspaces" "$root/health"
 cp "$fixture_dir/sim_mm.var" "$root/sim_mm.var"
 cp "$fixture_dir/sim_mm.tbl" "$root/sim_mm.tbl"
 cp "$linuxcnc_root/configs/common/linuxcnc.nml" "$root/live.nml"
@@ -146,8 +147,10 @@ hal_is_ready() {
 start_server() {
   local log_file="$1"
   "$server" \
+    --allow-plaintext \
     "--endpoint=127.0.0.1:${grpc_port}" \
     "--telemetry-endpoint=127.0.0.1:${telemetry_port}" \
+    "--health-endpoint=unix:$root/health/health.sock" \
     "--ini=$root/live.ini" \
     "--nml=$root/live.nml" \
     "--workspace-root=$root/workspaces" \
@@ -218,6 +221,78 @@ if ! timeout 60s "$integration" "127.0.0.1:${grpc_port}" \
     --batch-size=8; then
   cat "$root/linuxcnc.log" "$root/server.log" >&2
   exit 1
+fi
+
+# The local health endpoint reports the running simulator's task state from
+# the status poller's cache. Pausing milltask must make it unavailable within
+# the stale limit, and resuming must restore the same state.
+task_pid="$(pgrep -x milltask | head -n 1)"
+if [[ -z "$task_pid" ]] ||
+   ! python3 - "$root/health/health.sock" "$root/live.ini" "$task_pid" <<'PY'; then
+import json, os, signal, socket, sys, time
+
+path, ini, task = sys.argv[1], sys.argv[2], int(sys.argv[3])
+
+
+def health():
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(2)
+        client.connect(path)
+        client.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
+        reply = b""
+        while chunk := client.recv(4096):
+            reply += chunk
+    head, _, body = reply.partition(b"\r\n\r\n")
+    assert head.startswith(b"HTTP/1.1 200 "), head
+    result = json.loads(body)
+    assert result["serving"] is True, result
+    return result["machine"]
+
+
+def wait_for(available, seconds):
+    deadline = time.monotonic() + seconds
+    while True:
+        machine = health()
+        if machine["available"] == available or time.monotonic() > deadline:
+            return machine
+        time.sleep(0.02)
+
+
+machine = wait_for(True, 10)
+assert machine["available"] is True, machine
+assert 0 <= machine["age_ms"] < 500, machine
+assert machine["task_state"] in (1, 2, 3, 4), machine
+assert machine["interp_state"] in (1, 2, 3, 4), machine
+assert isinstance(machine["in_position"], bool), machine
+assert os.path.realpath(machine["ini"]) == os.path.realpath(ini), machine
+
+os.kill(task, signal.SIGSTOP)
+try:
+    paused = time.monotonic()
+    stopped = wait_for(False, 3)
+    waited = time.monotonic() - paused
+    assert stopped == {"available": False}, stopped
+    assert waited < 0.9, f"stopped task reported available for {waited:.2f} s"
+finally:
+    os.kill(task, signal.SIGCONT)
+
+resumed = wait_for(True, 5)
+assert resumed["available"] is True, resumed
+assert resumed["task_state"] == machine["task_state"], (machine, resumed)
+PY
+  cat "$root/server.log" >&2
+  exit 1
+fi
+
+if [[ -n "$health_check" ]]; then
+  if ! "$health_check" "unix:$root/health/health.sock"; then
+    echo "linuxcnc-grpc-live-integration: local health check failed" >&2
+    exit 1
+  fi
+  if "$health_check" "unix:$root/health/missing.sock" 2>/dev/null; then
+    echo "linuxcnc-grpc-live-integration: health check passed without a server" >&2
+    exit 1
+  fi
 fi
 
 # Give the shutdown-race phase a fresh bounded executor while preserving the

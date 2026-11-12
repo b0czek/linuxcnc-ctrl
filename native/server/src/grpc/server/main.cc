@@ -1,15 +1,17 @@
+#ifdef LINUXCNC_GRPC_HAS_REFLECTION
 #include <grpcpp/ext/proto_server_reflection_plugin.h>
+#endif
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/health_check_service_interface.h>
 #include <grpcpp/resource_quota.h>
 #include <pthread.h>
 
 #include <algorithm>
+#include <chrono>
 #include <csignal>
-#include <fstream>
 #include <iostream>
-#include <iterator>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -19,23 +21,19 @@
 #include "linuxcnc_grpc/grpc/server.hpp"
 #include "linuxcnc_grpc/hal/value_telemetry.hpp"
 #include "linuxcnc_grpc/linuxcnc/active_ini.hpp"
+#include "linuxcnc_grpc/linuxcnc/machine_health.hpp"
+#include "linuxcnc_grpc/listener_credentials.hpp"
 #include "linuxcnc_grpc/position/telemetry.hpp"
 #include "linuxcnc_grpc/program/workspace.hpp"
 #include "linuxcnc_grpc/scope/telemetry.hpp"
 #include "linuxcnc_grpc/telemetry_websocket_server.hpp"
+#include "linuxcnc_transport/grpc_credentials.hpp"
 
 namespace linuxcnc::server {
 namespace {
 
 constexpr int kMaxGrpcMessageBytes = 16 * 1024 * 1024 + 64 * 1024;
 constexpr int kMaxGrpcThreads = 64;
-
-std::string read_file(const std::filesystem::path& path) {
-  std::ifstream input(path, std::ios::binary);
-  if (!input) return {};
-  return {std::istreambuf_iterator<char>(input),
-          std::istreambuf_iterator<char>()};
-}
 
 }  // namespace
 
@@ -55,11 +53,19 @@ int run_grpc_server(const DaemonConfig& config) {
     return 2;
   }
 
-  ::grpc::EnableDefaultHealthCheckService(true);
-  if (config.reflection)
-    ::grpc::reflection::InitProtoReflectionServerBuilderPlugin();
-
   try {
+    // Process TLS defaults must precede gRPC, SSL contexts, and every worker.
+    auto credentials = load_listener_credentials(config);
+    ::grpc::EnableDefaultHealthCheckService(true);
+#ifdef LINUXCNC_GRPC_HAS_REFLECTION
+    if (config.reflection)
+      ::grpc::reflection::InitProtoReflectionServerBuilderPlugin();
+#else
+    if (config.reflection)
+      throw std::runtime_error(
+          "reflection support is not installed in this build");
+#endif
+
     // Construct the LinuxCNC parser before binding either listener. IniFile is
     // cached by LinuxCNC, so this also fixes the snapshot for this session.
     auto active_ini = std::make_shared<const ActiveIni>(config.ini_file);
@@ -80,8 +86,13 @@ int run_grpc_server(const DaemonConfig& config) {
     auto position_telemetry = std::make_shared<PositionTelemetry>(10000);
     auto hal_telemetry = std::make_shared<HalValueTelemetry>(128);
     auto scope_telemetry = std::make_shared<ScopeTelemetry>();
+    // Allow several missed polls, and task cycles up to about half a second,
+    // before reporting a stopped task.
+    auto machine_health = std::make_shared<MachineHealthCache>(
+        std::max(std::chrono::milliseconds(500), 5 * config.status_period));
     auto machine = detail::make_machine_service(
-        config, workspaces, position_telemetry, blocking, stream_admission);
+        config, workspaces, position_telemetry, blocking, stream_admission,
+        machine_health);
     auto ini = detail::make_ini_service(active_ini);
     auto program =
         detail::make_program_service(config, workspaces, upload_admission);
@@ -91,38 +102,18 @@ int run_grpc_server(const DaemonConfig& config) {
         detail::make_scope_service(config, scope_worker, scope_telemetry);
     auto telemetry_websocket = std::make_unique<TelemetryWebSocketServer>(
         config, position_telemetry, hal_telemetry, scope_telemetry, workspaces,
-        parser_worker, stream_admission);
+        parser_worker, stream_admission, credentials.identity);
 
     ::grpc::ServerBuilder builder;
     ::grpc::ResourceQuota resource_quota;
     resource_quota.Resize(std::size_t{256} * 1024U * 1024U);
     resource_quota.SetMaxThreads(kMaxGrpcThreads);
     builder.SetResourceQuota(resource_quota);
+    transport::ApplyGrpcServerHandshakeTimeout(builder);
     builder.SetMaxReceiveMessageSize(kMaxGrpcMessageBytes);
     builder.SetMaxSendMessageSize(kMaxGrpcMessageBytes);
 
-    std::shared_ptr<::grpc::ServerCredentials> credentials;
-    if (!config.tls) {
-      credentials = ::grpc::InsecureServerCredentials();
-    } else {
-      ::grpc::SslServerCredentialsOptions options;
-      options.pem_key_cert_pairs.push_back({read_file(config.tls_private_key),
-                                            read_file(config.tls_certificate)});
-      options.pem_root_certs = read_file(config.tls_client_ca);
-      if (options.pem_key_cert_pairs.front().private_key.empty() ||
-          options.pem_key_cert_pairs.front().cert_chain.empty()) {
-        std::cerr
-            << "linuxcnc-grpc-server: failed to read TLS key/certificate\n";
-        return 2;
-      }
-      if (config.mtls) {
-        options.client_certificate_request =
-            GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY;
-      }
-      credentials = ::grpc::SslServerCredentials(options);
-    }
-
-    builder.AddListeningPort(config.endpoint, credentials);
+    builder.AddListeningPort(config.endpoint, credentials.grpc);
     builder.RegisterService(machine->service());
     builder.RegisterService(ini->service());
     builder.RegisterService(program->service());
@@ -134,9 +125,6 @@ int run_grpc_server(const DaemonConfig& config) {
                 << '\n';
       return 2;
     }
-    std::cout << "linuxcnc-grpc-server listening on " << config.endpoint
-              << " and telemetry on ws://" << config.telemetry_endpoint << '\n'
-              << std::flush;
 
     detail::ServerRuntime runtime(
         std::move(server), std::move(machine), std::move(ini),
@@ -144,6 +132,13 @@ int run_grpc_server(const DaemonConfig& config) {
         std::move(telemetry_websocket), std::move(position_telemetry),
         std::move(hal_telemetry), stream_admission, upload_admission,
         component_admission, blocking, parser_worker, hal_worker, scope_worker);
+    runtime.start_local_health(config.health_endpoint,
+                               std::move(machine_health));
+    std::cout << "linuxcnc-grpc-server listening on " << config.endpoint
+              << " and telemetry on " << (config.tls ? "wss://" : "ws://")
+              << config.telemetry_endpoint << '\n'
+              << std::flush;
+
     runtime.start_control_thread(shutdown_signals);
     runtime.wait();
     runtime.finalize();
