@@ -16,6 +16,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -205,6 +206,26 @@ bool verify_hal_and_scope(const std::shared_ptr<grpc::Channel>& channel,
     assert(create_signal_status.ok());
     assert(create_signal_response.signal().name() == name);
     assert(create_signal_response.signal().type() == type);
+  }
+
+  // HAL (2.10+) has 64-bit integer signals only: a signal requested as S32 or
+  // U32 is created as, and reported with, the 64-bit type of the same
+  // signedness.
+  for (const auto& [name, requested, reported] :
+       {std::tuple{"grpc-live-s32", linuxcnc::v1::HAL_TYPE_S32,
+                   linuxcnc::v1::HAL_TYPE_S64},
+        std::tuple{"grpc-live-u32", linuxcnc::v1::HAL_TYPE_U32,
+                   linuxcnc::v1::HAL_TYPE_U64}}) {
+    linuxcnc::v1::CreateHalSignalRequest create_signal_request;
+    create_signal_request.set_name(name);
+    create_signal_request.set_type(requested);
+    linuxcnc::v1::CreateHalSignalResponse create_signal_response;
+    grpc::ClientContext create_signal_context;
+    const auto create_signal_status = hal->CreateSignal(
+        &create_signal_context, create_signal_request, &create_signal_response);
+    assert(create_signal_status.ok());
+    assert(create_signal_response.signal().name() == name);
+    assert(create_signal_response.signal().type() == reported);
   }
 
   linuxcnc::v1::CreateHalSignalRequest conflicting_signal;
@@ -683,16 +704,19 @@ bool verify_hal_and_scope(const std::shared_ptr<grpc::Channel>& channel,
   assert(scope_response.has_status());
   assert(!scope_response.websocket_path().empty());
 
+  // Sample one integer pin (HAL reports integers as S64/U64 only) and one
+  // bit/float pin, so both the 64-bit integer and the other sample paths run.
+  const linuxcnc::v1::HalPinInfo* scope_integer_pin = nullptr;
   const linuxcnc::v1::HalPinInfo* scope_pin = nullptr;
   for (const auto& candidate : topology.topology().pins()) {
-    if (candidate.type() == linuxcnc::v1::HAL_TYPE_BIT ||
-        candidate.type() == linuxcnc::v1::HAL_TYPE_FLOAT ||
-        candidate.type() == linuxcnc::v1::HAL_TYPE_S32 ||
-        candidate.type() == linuxcnc::v1::HAL_TYPE_U32) {
+    if (!scope_integer_pin && (candidate.type() == linuxcnc::v1::HAL_TYPE_S64 ||
+                               candidate.type() == linuxcnc::v1::HAL_TYPE_U64))
+      scope_integer_pin = &candidate;
+    if (!scope_pin && (candidate.type() == linuxcnc::v1::HAL_TYPE_BIT ||
+                       candidate.type() == linuxcnc::v1::HAL_TYPE_FLOAT))
       scope_pin = &candidate;
-      break;
-    }
   }
+  assert(scope_integer_pin != nullptr);
   assert(scope_pin != nullptr);
   linuxcnc::v1::ScopeConfigure scope_configure;
   auto* acquisition = scope_configure.mutable_config();
@@ -703,7 +727,13 @@ bool verify_hal_and_scope(const std::shared_ptr<grpc::Channel>& channel,
   scope_channel->set_index(0);
   scope_channel->set_enabled(true);
   scope_channel->mutable_item()->set_kind(linuxcnc::v1::HAL_ITEM_KIND_PIN);
-  scope_channel->mutable_item()->set_name(scope_pin->name());
+  scope_channel->mutable_item()->set_name(scope_integer_pin->name());
+  auto* scope_second_channel = acquisition->add_channels();
+  scope_second_channel->set_index(1);
+  scope_second_channel->set_enabled(true);
+  scope_second_channel->mutable_item()->set_kind(
+      linuxcnc::v1::HAL_ITEM_KIND_PIN);
+  scope_second_channel->mutable_item()->set_name(scope_pin->name());
   grpc::ClientContext configure_context;
   assert(scope->Configure(&configure_context, scope_configure, &scope_response)
              .ok());
@@ -730,6 +760,12 @@ bool verify_hal_and_scope(const std::shared_ptr<grpc::Channel>& channel,
   assert(scope_frame.ParseFromArray(scope_bytes.data(),
                                     static_cast<int>(scope_bytes.size())));
   assert(scope_frame.has_capture() || scope_frame.has_roll());
+  const auto& scope_channels = scope_frame.has_capture()
+                                   ? scope_frame.capture().channels()
+                                   : scope_frame.roll().channels();
+  assert(scope_channels.size() >= 2);
+  assert(scope_channels.Get(0).index() == 0 && scope_channels.Get(0).enabled());
+  assert(scope_channels.Get(1).index() == 1 && scope_channels.Get(1).enabled());
 
   grpc::ClientContext trigger_context;
   assert(scope->Trigger(&trigger_context, {}, &scope_response).ok());
