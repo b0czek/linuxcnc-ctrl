@@ -486,6 +486,25 @@ if(LINUXCNC_GRPC_BUILD_TESTS)
                     "$<TARGET_FILE:linuxcnc-grpc-gcode-parser-integration>")
     endif()
 
+    if(LINUXCNC_GRPC_HAS_HAL)
+        add_executable(linuxcnc-grpc-hal-value-codec-tests
+            tests/hal_value_codec_tests.cc)
+        target_compile_features(linuxcnc-grpc-hal-value-codec-tests PRIVATE cxx_std_20)
+        target_link_libraries(linuxcnc-grpc-hal-value-codec-tests PRIVATE
+            linuxcnc-grpc-domain)
+        target_compile_definitions(linuxcnc-grpc-hal-value-codec-tests PRIVATE ULAPI)
+        target_include_directories(linuxcnc-grpc-hal-value-codec-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${LINUXCNC_ROOT}/include"
+            "${LINUXCNC_ROOT}/src"
+            "${LINUXCNC_ROOT}/src/hal"
+            "${LINUXCNC_ROOT}/src/rtapi")
+        target_compile_options(linuxcnc-grpc-hal-value-codec-tests PRIVATE
+            -Wall -Wextra -Wpedantic)
+        add_test(NAME linuxcnc-grpc-hal-value-codec-tests
+                 COMMAND linuxcnc-grpc-hal-value-codec-tests)
+    endif()
+
     if(LINUXCNC_GRPC_HAS_SCOPE)
         add_executable(linuxcnc-grpc-scope-controller-contract-tests
             tests/scope_controller_contract_tests.cc)

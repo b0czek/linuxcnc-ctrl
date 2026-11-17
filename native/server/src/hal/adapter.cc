@@ -23,6 +23,7 @@
 #include <utility>
 
 #include "hal/query.hpp"
+#include "hal/value_codec.hpp"
 
 namespace linuxcnc::server {
 namespace {
@@ -153,51 +154,69 @@ HalAdapterValue from_hal(hal_type_t type, const hal_query_value_u& value) {
   }
 }
 
-// Converts a client value for an item of HAL type `type`. Integer values must
-// match the item's signedness; 32-bit values are widened to HAL's 64-bit
-// storage, which cannot go out of range. Cross-signedness writes are refused,
-// as mismatched types were before.
-std::optional<hal_query_value_u> to_hal(hal_type_t type,
-                                        const HalAdapterValue& value) {
-  hal_query_value_u result{};
-  switch (type) {
-    case HAL_BOOL:
-      if (const auto* typed = std::get_if<bool>(&value)) {
-        result.b = *typed;
-        return result;
-      }
-      break;
-    case HAL_REAL:
-      if (const auto* typed = std::get_if<double>(&value)) {
-        result.r = *typed;
-        return result;
-      }
-      break;
-    case HAL_SINT:
-      if (const auto* typed = std::get_if<std::int64_t>(&value)) {
-        result.s = *typed;
-        return result;
-      }
-      if (const auto* typed = std::get_if<std::int32_t>(&value)) {
-        result.s = *typed;
-        return result;
-      }
-      break;
-    case HAL_UINT:
-      if (const auto* typed = std::get_if<std::uint64_t>(&value)) {
-        result.u = *typed;
-        return result;
-      }
-      if (const auto* typed = std::get_if<std::uint32_t>(&value)) {
-        result.u = *typed;
-        return result;
-      }
-      break;
-    default:
-      break;
+using hal_codec::fits_declared;
+using hal_codec::read_owned;
+using hal_codec::to_hal;
+
+// The pins and parameters of owned components declared S32 or U32. HAL
+// stores them in 64 bits and lists them as S64/U64, but their owner reads them
+// clamped to 32 bits (read_owned()). Writes from outside are therefore checked
+// against the declared range, so that a value is never acknowledged to the
+// writer and then seen differently by the owner. Entries are keyed by the
+// name the item was created with (HAL keeps it as the alias's old name when
+// the item is renamed by an alias) and matched against the owning component
+// id, so a foreign item that reuses a name is never mistaken for an owned one.
+class NarrowItemRegistry final {
+ public:
+  // Returns false, registering nothing, when the name is already registered;
+  // HAL then refuses to create the item because the name is taken.
+  bool add(bool pin, const std::string& name, int component_id,
+           HalAdapterType declared) {
+    std::lock_guard lock(mutex_);
+    return items_.try_emplace({pin, name}, Entry{component_id, declared})
+        .second;
   }
-  return std::nullopt;
-}
+
+  void remove(bool pin, const std::string& name, int component_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = items_.find({pin, name});
+    if (found != items_.end() && found->second.component_id == component_id)
+      items_.erase(found);
+  }
+
+  bool empty() const {
+    std::lock_guard lock(mutex_);
+    return items_.empty();
+  }
+
+  // Whether a write of `value` (HAL type `type`) to the item named `name`
+  // (with old name `alias` when aliased, else null) reaches its owner
+  // unchanged; true for every item that is not an owned narrow item.
+  bool accepts(bool pin, const char* name, const char* alias, int component_id,
+               hal_type_t type, const hal_query_value_u& value) const {
+    std::lock_guard lock(mutex_);
+    for (const char* candidate : {name, alias}) {
+      if (!candidate) continue;
+      const auto found = items_.find({pin, candidate});
+      if (found != items_.end() && found->second.component_id == component_id &&
+          !fits_declared(found->second.declared, type, value))
+        return false;
+    }
+    return true;
+  }
+
+  static bool is_narrow(HalAdapterType type) {
+    return type == HalAdapterType::S32 || type == HalAdapterType::U32;
+  }
+
+ private:
+  struct Entry {
+    int component_id = 0;
+    HalAdapterType declared = HalAdapterType::S32;
+  };
+  mutable std::mutex mutex_;
+  std::map<std::pair<bool, std::string>, Entry> items_;
+};
 
 // Looks up a pin (HAL_QTYPE_PIN) or parameter (HAL_QTYPE_PARAM) by name.
 // The returned query's strings are valid only while HAL's mutex is held.
@@ -270,11 +289,16 @@ struct PreparedWrite {
 // Checks that `reference` exists and accepts `value` from outside HAL. Must
 // run under run_locked() together with apply_unlocked(). The rules are those
 // of the previous direct implementation: unlinked non-output pins, HAL_RW
-// parameters and signals without a writer pin.
+// parameters and signals without a writer pin. In addition, the value must
+// fit the declared range of an owned S32/U32 item it reaches: the item itself,
+// or for a signal, every owned narrow pin linked to it.
 std::optional<PreparedWrite> prepare_unlocked(
-    const HalAdapterReference& reference, const HalAdapterValue& value) {
+    const HalAdapterReference& reference, const HalAdapterValue& value,
+    const NarrowItemRegistry& narrow) {
   PreparedWrite prepared;
   prepared.reference = &reference;
+  int owner_id = 0;
+  std::optional<std::string> alias;
   try {
     if (reference.kind == HalAdapterItemKind::Signal) {
       const auto query = find_signal(reference.name);
@@ -290,6 +314,8 @@ std::optional<PreparedWrite> prepare_unlocked(
           query->pp.dir != HAL_RW)
         return std::nullopt;
       prepared.type = query->pp.type;
+      owner_id = query->pp.comp_id;
+      if (query->pp.alias) alias = query->pp.alias;
     }
   } catch (const HalAdapterError& error) {
     // An item without a data target (-EIO) is not writable, as before.
@@ -299,6 +325,28 @@ std::optional<PreparedWrite> prepare_unlocked(
   const auto converted = to_hal(prepared.type, value);
   if (!converted) return std::nullopt;
   prepared.value = *converted;
+  if (narrow.empty()) return prepared;
+  if (reference.kind != HalAdapterItemKind::Signal) {
+    if (!narrow.accepts(reference.kind == HalAdapterItemKind::Pin,
+                        reference.name.c_str(),
+                        alias ? alias->c_str() : nullptr, owner_id,
+                        prepared.type, prepared.value))
+      return std::nullopt;
+    return prepared;
+  }
+  bool accepted = true;
+  checked(
+      hal_query::list_signal_pins(
+          reference.name.c_str(),
+          [&](hal_query_t& query) {
+            if (narrow.accepts(true, query.name, query.pp.alias,
+                               query.pp.comp_id, prepared.type, prepared.value))
+              return 0;
+            accepted = false;
+            return hal_query::kStop;
+          }),
+      "hal_list_p_s");
+  if (!accepted) return std::nullopt;
   return prepared;
 }
 
@@ -380,34 +428,6 @@ int create_param(int component_id, hal_pdir_t direction, HalAdapterType type,
                                 name);
   }
   return -EINVAL;
-}
-
-// Reads an owned item through its handle. Items declared with a 32-bit type
-// keep that type for their owner; HAL stores 64 bits, so a value outside the
-// 32-bit range (set from outside, or by a linked 64-bit writer) is clamped.
-std::optional<HalAdapterValue> read_owned(HalAdapterType type,
-                                          const hal_refs_u& ref) {
-  switch (type) {
-    case HalAdapterType::Bit:
-      if (!ref.b) return std::nullopt;
-      return static_cast<bool>(hal_get_bool(ref.b));
-    case HalAdapterType::Float:
-      if (!ref.r) return std::nullopt;
-      return static_cast<double>(hal_get_real(ref.r));
-    case HalAdapterType::S32:
-      if (!ref.s) return std::nullopt;
-      return static_cast<std::int32_t>(hal_get_si32_clamped(ref.s));
-    case HalAdapterType::U32:
-      if (!ref.u) return std::nullopt;
-      return static_cast<std::uint32_t>(hal_get_ui32_clamped(ref.u));
-    case HalAdapterType::S64:
-      if (!ref.s) return std::nullopt;
-      return static_cast<std::int64_t>(hal_get_sint(ref.s));
-    case HalAdapterType::U64:
-      if (!ref.u) return std::nullopt;
-      return static_cast<std::uint64_t>(hal_get_uint(ref.u));
-  }
-  return std::nullopt;
 }
 
 bool write_owned(HalAdapterType type, const hal_refs_u& ref,
@@ -506,18 +526,20 @@ struct LinuxCncHalComponent::Impl {
   std::string prefix;
   bool ready = false;
   std::shared_ptr<HalAllocationSlab> slab;
+  std::shared_ptr<NarrowItemRegistry> narrow;
   std::map<std::string, Item> items;
 
   void close() {
+    const int id_before_exit = id;
     if (id > 0) {
       hal_exit(id);
       id = 0;
     }
-    if (slab) {
-      for (const auto& [suffix, item] : items) {
-        (void)suffix;
-        slab->release(item.slab_slot);
-      }
+    for (const auto& [suffix, item] : items) {
+      (void)suffix;
+      if (slab) slab->release(item.slab_slot);
+      if (narrow && NarrowItemRegistry::is_narrow(item.type))
+        narrow->remove(item.pin, item.full_name, id_before_exit);
     }
     items.clear();
   }
@@ -539,11 +561,16 @@ struct LinuxCncHalComponent::Impl {
       return false;
     }
     const auto& item = it->second;
+    // Registered before HAL creates the item, so no write can reach it
+    // unchecked.
+    const bool narrow_item = narrow && NarrowItemRegistry::is_narrow(type) &&
+                             narrow->add(pin, item.full_name, id, type);
     const int result =
         pin ? create_pin(id, direction, type, item.ref, item.full_name.c_str())
             : create_param(id, direction, type, item.ref,
                            item.full_name.c_str());
     if (result != 0) {
+      if (narrow_item) narrow->remove(pin, full, id);
       items.erase(it);
       slab->release(*slot);
       throw HalAdapterError(std::string(pin ? "hal_pin_new" : "hal_param_new") +
@@ -574,6 +601,8 @@ struct LinuxCncHalAdapter::Impl {
   int component_id = 0;
   std::string component_name;
   std::shared_ptr<HalAllocationSlab> slab;
+  std::shared_ptr<NarrowItemRegistry> narrow =
+      std::make_shared<NarrowItemRegistry>();
   std::mutex beat_mutex;
   std::unordered_map<std::string, BeatState> beats;
   std::optional<bool> last_running;
@@ -966,7 +995,7 @@ bool LinuxCncHalAdapter::write(const HalAdapterReference& reference,
                                HalAdapterValue* written) {
   bool applied = false;
   run_locked([&] {
-    const auto prepared = prepare_unlocked(reference, value);
+    const auto prepared = prepare_unlocked(reference, value, *impl_->narrow);
     if (!prepared || !apply_unlocked(*prepared)) return;
     if (written) *written = read_back_unlocked(reference);
     applied = true;
@@ -984,7 +1013,7 @@ std::size_t LinuxCncHalAdapter::write_many(
     for (const auto& [reference, value] : updates) {
       if (stop_token.stop_requested())
         throw HalAdapterError("HAL write cancelled", -ECANCELED);
-      auto item = prepare_unlocked(reference, value);
+      auto item = prepare_unlocked(reference, value, *impl_->narrow);
       if (!item) return;
       prepared.push_back(*item);
     }
@@ -1058,6 +1087,7 @@ std::unique_ptr<LinuxCncHalComponent> LinuxCncHalAdapter::open_component(
   component_impl->name = name;
   component_impl->prefix = prefix.empty() ? name : prefix;
   component_impl->slab = impl_->slab;
+  component_impl->narrow = impl_->narrow;
   if (component_impl->prefix.size() > HAL_NAME_LEN)
     throw HalAdapterError("invalid client HAL component prefix", -EINVAL);
   component_impl->id = hal_init(component_impl->name.c_str());
