@@ -32,7 +32,7 @@ Ported to v2.10.0-pre2. Differences from the patch on the old base:
  src/emc/nml_intf/emc.hh                       |   14 +
  src/emc/nml_intf/emc_nml.hh                   |   22 +
  src/emc/nml_intf/emcops.cc                    |    4 +
- src/emc/task/emctaskmain.cc                   |  422 ++++-
+ src/emc/task/emctaskmain.cc                   |  439 ++++-
  src/emc/task/taskintf.cc                      |   67 +-
  src/emc/tp/tp.c                               |  133 +-
  src/emc/tp/tp_types.h                         |   12 +
@@ -72,7 +72,7 @@ Ported to v2.10.0-pre2. Differences from the patch on the old base:
  tests/resumable-stop/thread-then-steps.ngc    |   10 +
  tests/resumable-stop/thread.ngc               |    7 +
  tests/resumable-stop/tool.tbl                 |    1 +
- 52 files changed, 2750 insertions(+), 25 deletions(-)
+ 52 files changed, 2767 insertions(+), 25 deletions(-)
  create mode 100644 tests/resumable-stop/README
  create mode 100644 tests/resumable-stop/after-abort.ngc
  create mode 100644 tests/resumable-stop/after-tap-m5.ngc
@@ -616,7 +616,7 @@ index ed6a962..a6b2345 100644
  {
  }
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index a3b5256..124eaf2 100644
+index a3b5256..0e54734 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -124,6 +124,40 @@ static int emcTaskEager = 0;
@@ -691,7 +691,7 @@ index a3b5256..124eaf2 100644
  	// now handle call logic
  	// check for subsystems done
  	if (interp_list.len() == 0 &&
-@@ -781,6 +825,256 @@ static bool allow_while_idle_type() {
+@@ -781,6 +825,275 @@ static bool allow_while_idle_type() {
      return 0;
  }
  
@@ -791,6 +791,22 @@ index a3b5256..124eaf2 100644
 +    }
 +}
 +
++/*
++ * A second Stop, or a Pause, while Resume is pending cancels it: a Resume
++ * latched during STOPPING is dropped, and STARTING returns to STOPPED with
++ * the outputs Resume switched back on off again. The program stays stopped
++ * until the next Resume, Run or Single Step.
++ */
++static void emcTaskStopCancelResume()
++{
++    stop_resume_latched = false;
++    stop_single_step = false;
++    if (emcStatus->task.stopState == EMC_TASK_STOP_STATE::STARTING) {
++        emcTaskStopDisableSavedOutputs();
++        emcStatus->task.stopState = EMC_TASK_STOP_STATE::STOPPED;
++    }
++}
++
 +static void emcTaskStopResume()
 +{
 +    stop_resume_latched = false;
@@ -808,11 +824,14 @@ index a3b5256..124eaf2 100644
 +        stop_spindles[s].restore_wait_at_speed = false;
 +        if (stop_spindles[s].running) {
 +            stop_spindles[s].restore_seq = emcSpindleStopRestoreSeq(s);
++            // A spindle restored at commanded speed 0 (M3 S0) does not spin
++            // up, and an at-speed comparator need not drop for it.
 +            stop_spindles[s].restore_wait_at_speed =
 +                emcSpindleOn(s, stop_spindles[s].speed,
 +                    stop_spindles[s].css_factor,
 +                    stop_spindles[s].css_xoffset,
-+                    EMCMOT_SPINDLE_AT_SPEED_PRESERVE) == 0;
++                    EMCMOT_SPINDLE_AT_SPEED_PRESERVE) == 0 &&
++                stop_spindles[s].speed != 0.0;
 +        }
 +        if (stop_spindles[s].orienting) {
 +            emcSpindleOrient(s, stop_spindles[s].orientation,
@@ -948,7 +967,7 @@ index a3b5256..124eaf2 100644
  /*
    emcTaskPlan()
  
-@@ -809,6 +1103,29 @@ static int emcTaskPlan(void)
+@@ -809,6 +1122,29 @@ static int emcTaskPlan(void)
  	return retval;
      }
  
@@ -978,7 +997,7 @@ index a3b5256..124eaf2 100644
      // handle any new command
      switch (emcStatus->task.state) {
      case EMC_TASK_STATE::OFF:
-@@ -1734,6 +2051,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -1734,6 +2070,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	    // found to have been rejected), invisibly to the task-level
  	    // MDI/AUTO/MANUAL state.
  	    homingPriorMode = emcStatus->motion.traj.mode;
@@ -986,7 +1005,7 @@ index a3b5256..124eaf2 100644
  	    if (homingPriorMode != EMC_TRAJ_MODE::FREE) {
  		emcTrajSetMode(EMC_TRAJ_MODE::FREE);
  	    }
-@@ -1937,6 +2255,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -1937,6 +2274,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	retval = emcTrajPause();
  	break;
  
@@ -998,7 +1017,7 @@ index a3b5256..124eaf2 100644
      case EMC_TRAJ_RESUME_TYPE:
  	emcStatus->task.task_paused = 0;
  	retval = emcTrajResume();
-@@ -2039,6 +2362,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2039,6 +2381,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_SPINDLE_WAIT_ORIENT_COMPLETE_TYPE:
  	wait_spindle_orient_complete_msg = reinterpret_cast<EMC_SPINDLE_WAIT_ORIENT_COMPLETE *>(cmd);
@@ -1010,7 +1029,7 @@ index a3b5256..124eaf2 100644
  	taskExecDelayTimeout = etime() + wait_spindle_orient_complete_msg->timeout;
  	break;
  
-@@ -2099,6 +2427,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2099,6 +2446,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_SPINDLE_ORIENT_TYPE:
  	spindle_orient_msg = reinterpret_cast<EMC_SPINDLE_ORIENT *>(cmd);
@@ -1025,7 +1044,7 @@ index a3b5256..124eaf2 100644
  	retval = emcSpindleOrient(spindle_orient_msg->spindle, spindle_orient_msg->orientation,
  			spindle_orient_msg->mode);
  	break;
-@@ -2191,7 +2527,52 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2191,7 +2546,49 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
  	// task commands
  
@@ -1060,10 +1079,7 @@ index a3b5256..124eaf2 100644
 +            retval = emcTrajStop();
 +            break;
 +        case EMC_TASK_STOP_STATE::STARTING:
-+            emcTaskStopDisableSavedOutputs();
-+            emcStatus->task.stopState = EMC_TASK_STOP_STATE::STOPPED;
-+            stop_resume_latched = false;
-+            stop_single_step = false;
++            emcTaskStopCancelResume();
 +            retval = 0;
 +            break;
 +        default:
@@ -1078,7 +1094,7 @@ index a3b5256..124eaf2 100644
  	// abort everything
  	emcTaskAbort();
  	// KLUDGE call motion abort before state restore to make absolutely sure no
-@@ -2215,6 +2596,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2215,6 +2612,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	    mode_msg->mode != EMC_TASK_MODE::AUTO) {
  	    emcOperatorError(_("Can't switch mode while mode is AUTO and interpreter is not IDLE"));
  	} else { // we can honour the modeswitch
@@ -1088,7 +1104,7 @@ index a3b5256..124eaf2 100644
  	    if (mode_msg->mode == EMC_TASK_MODE::MANUAL &&
  		emcStatus->task.mode != EMC_TASK_MODE::MANUAL) {
  		// leaving auto or mdi mode for manual
-@@ -2259,6 +2643,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2259,6 +2659,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_TASK_SET_STATE_TYPE:
  	state_msg = reinterpret_cast<EMC_TASK_SET_STATE *>(cmd);
@@ -1098,7 +1114,15 @@ index a3b5256..124eaf2 100644
  	retval = emcTaskSetState(state_msg->state);
  	break;
  
-@@ -2484,11 +2871,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2451,6 +2854,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+ 	break;
+ 
+     case EMC_TASK_PLAN_PAUSE_TYPE:
++	emcTaskStopCancelResume();
+ 	emcTrajPause();
+ 	if (emcStatus->task.interpState != EMC_TASK_INTERP::PAUSED) {
+ 	    interpResumeState = emcStatus->task.interpState;
+@@ -2484,11 +2888,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_TASK_PLAN_RESUME_TYPE:
  	emcTrajResume();
@@ -1111,7 +1135,7 @@ index a3b5256..124eaf2 100644
  	retval = 0;
  	break;
  
-@@ -2701,6 +3085,7 @@ static int emcTaskExecute(void)
+@@ -2701,6 +3102,7 @@ static int emcTaskExecute(void)
  
      switch (emcStatus->task.execState) {
      case EMC_TASK_EXEC::ERROR:
@@ -1119,7 +1143,7 @@ index a3b5256..124eaf2 100644
  
  	/*! \todo FIXME-- duplicate code for abort,
  	   also near end of main, when aborting on subordinate errors,
-@@ -2746,7 +3131,9 @@ static int emcTaskExecute(void)
+@@ -2746,7 +3148,9 @@ static int emcTaskExecute(void)
      case EMC_TASK_EXEC::DONE:
  	STEPPING_CHECK();
  	if (!emcStatus->motion.traj.queueFull &&
@@ -1130,7 +1154,7 @@ index a3b5256..124eaf2 100644
  	    if (NULL == emcTaskCommand) {
  		// need a new command
  		emcTaskCommand = interp_list.get();
-@@ -2767,7 +3154,7 @@ static int emcTaskExecute(void)
+@@ -2767,7 +3171,7 @@ static int emcTaskExecute(void)
  			emcStatus->task.execState = emcTaskCheckPreconditions(emcTaskCommand.get());
  		    }
  		}
@@ -1139,7 +1163,7 @@ index a3b5256..124eaf2 100644
  		// have an outstanding command
  		// This is the one emcTaskIssueCommand() call site followed by
  		// emcTaskCheckPostconditions(), i.e. the only one whose commands
-@@ -3040,6 +3427,18 @@ static int emcTaskExecute(void)
+@@ -3040,6 +3444,18 @@ static int emcTaskExecute(void)
  
      case EMC_TASK_EXEC::WAITING_FOR_DELAY:
  	STEPPING_CHECK();
@@ -1158,7 +1182,7 @@ index a3b5256..124eaf2 100644
  	// check if delay has passed
  	emcStatus->task.delayLeft = taskExecDelayTimeout - etime();
  	if (etime() >= taskExecDelayTimeout) {
-@@ -3626,6 +4025,7 @@ int main(int argc, char *argv[])
+@@ -3626,6 +4042,7 @@ int main(int argc, char *argv[])
  	prev_traj_enabled = emcStatus->motion.traj.enabled;
  	// synchronize subordinate states
  	if (emcStatus->io.aux.estop) {
@@ -1166,7 +1190,7 @@ index a3b5256..124eaf2 100644
  	    if (emcStatus->motion.traj.enabled) {
  		emcTrajDisable();
  		emcTaskAbort();
-@@ -3707,6 +4107,7 @@ int main(int argc, char *argv[])
+@@ -3707,6 +4124,7 @@ int main(int argc, char *argv[])
  	    // 	emcOperatorError("wait for orient complete timed out");
  	    // }
  
@@ -1174,7 +1198,7 @@ index a3b5256..124eaf2 100644
              // abort everything
              emcTaskAbort();
              emcIoAbort(EMC_ABORT::MOTION_OR_IO_RCS_ERROR);
-@@ -3742,6 +4143,12 @@ int main(int argc, char *argv[])
+@@ -3742,6 +4160,12 @@ int main(int argc, char *argv[])
  	    emcTaskQueueTaskPlanSynchCmd();
  	}
  
@@ -1187,7 +1211,7 @@ index a3b5256..124eaf2 100644
  	// update task-specific status
  	emcTaskUpdate(&emcStatus->task);
  
-@@ -3762,6 +4169,9 @@ int main(int argc, char *argv[])
+@@ -3762,6 +4186,9 @@ int main(int argc, char *argv[])
  	    emcStatus->io.status == RCS_STATUS::ERROR) {
  	    emcStatus->status = RCS_STATUS::ERROR;
  	    emcStatus->task.status = RCS_STATUS::ERROR;

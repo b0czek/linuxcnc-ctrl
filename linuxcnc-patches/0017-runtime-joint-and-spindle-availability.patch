@@ -40,7 +40,7 @@ other motion-logger tests.
  src/emc/motion-logger/motion-logger.c         |  22 +
  src/emc/motion/axis.c                         |   2 +-
  src/emc/motion/command.c                      | 374 +++++++++++-
- src/emc/motion/control.c                      | 550 ++++++++++++++++--
+ src/emc/motion/control.c                      | 559 ++++++++++++++++--
  src/emc/motion/mot_priv.h                     |  21 +
  src/emc/motion/motion.c                       |  16 +
  src/emc/motion/motion.h                       |  60 +-
@@ -49,7 +49,7 @@ other motion-logger tests.
  src/emc/nml_intf/emc_nml.hh                   |  29 +
  src/emc/nml_intf/emcops.cc                    |  10 +-
  src/emc/task/emctask.cc                       |   1 +
- src/emc/task/emctaskmain.cc                   | 230 +++++++-
+ src/emc/task/emctaskmain.cc                   | 269 ++++++++-
  src/emc/task/task.hh                          |   1 +
  src/emc/task/taskintf.cc                      |  94 ++-
  src/emc/usr_intf/axis/extensions/emcmodule.cc |  24 +
@@ -95,7 +95,7 @@ other motion-logger tests.
  tests/runtime-availability/test.ini.in        |   3 +
  tests/runtime-availability/test.sh            |   5 +
  tests/runtime-availability/tool.tbl           |   0
- 64 files changed, 2806 insertions(+), 83 deletions(-)
+ 64 files changed, 2846 insertions(+), 91 deletions(-)
  create mode 100644 tests/motion-target-preparation/availability-cases.h
  create mode 100644 tests/motion-target-preparation/availability-fixture.h
  create mode 100644 tests/runtime-availability-regressions/.gitignore
@@ -1045,7 +1045,7 @@ index ead94cb..3734dae 100644
          }
  	    break;
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index f22ab9b..8d4c3e8 100644
+index f22ab9b..ff24751 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
 @@ -45,6 +45,9 @@ static int    switchkins_type = 0;
@@ -1160,7 +1160,7 @@ index f22ab9b..8d4c3e8 100644
      }
  
      // a fault was signalled during a spindle-orient in progress
-@@ -629,6 +647,391 @@ static void process_inputs(void)
+@@ -629,6 +647,400 @@ static void process_inputs(void)
      }
  }
  
@@ -1375,6 +1375,7 @@ index f22ab9b..8d4c3e8 100644
 +                     * which also owns the FREE dip and mode restoration. */
 +                    a->state = EMCMOT_AVAILABILITY_HOMING;
 +                    a->phase = AVAIL_PHASE_WAIT_HOME_REQUEST;
++                    a->transition_started = now;
 +                } else {
 +                    if (!validate_joint_position(n)) {
 +                        set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_POSITION_MISMATCH);
@@ -1388,11 +1389,19 @@ index f22ab9b..8d4c3e8 100644
 +                set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_ACQUIRE_TIMEOUT);
 +            break;
 +        case EMCMOT_AVAILABILITY_HOMING:
++            /* The home must start within the timeout. Task holds its home
++             * request while the program is paused or stopped, so that time
++             * does not count. */
++            if (a->phase != AVAIL_PHASE_WAIT_HOME_FINISH && emcmotStatus->paused)
++                a->transition_started = now;
 +            if (!ack) {
 +                set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_ACK_LOST);
 +            } else if (a->phase != AVAIL_PHASE_WAIT_HOME_FINISH &&
 +                       hal_get_bool(emcmot_hal_data->homing_inhibit)) {
 +                set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_HOME_ABORTED);
++            } else if (a->phase != AVAIL_PHASE_WAIT_HOME_FINISH &&
++                       now - a->transition_started >= a->timeout) {
++                set_joint_availability_fault(n, EMCMOT_AVAILABILITY_FAULT_HOME_FAILED);
 +            } else if (a->phase == AVAIL_PHASE_WAIT_FREE) {
 +                /* Task's home request was accepted; it has dipped motion
 +                 * into FREE. Completion is finish_availability_homing(). */
@@ -1552,7 +1561,7 @@ index f22ab9b..8d4c3e8 100644
  static void joint_jog_abort_all(bool immediate)
  {
      int jNum;
-@@ -691,7 +1094,7 @@ static void do_forward_kins(void)
+@@ -691,7 +1103,7 @@ static void do_forward_kins(void)
     at the traj rate */
  
      double joint_pos[EMCMOT_MAX_JOINTS] = {0,};
@@ -1561,7 +1570,7 @@ index f22ab9b..8d4c3e8 100644
      emcmot_joint_t *joint;
  
      /* copy joint position feedback to local array */
-@@ -873,7 +1276,9 @@ static void check_for_faults(void)
+@@ -873,7 +1285,9 @@ static void check_for_faults(void)
      }
      /* check for spindle ampfifier errors */
      for (spindle_num = 0; spindle_num < emcmotConfig->numSpindles; spindle_num++){
@@ -1572,7 +1581,7 @@ index f22ab9b..8d4c3e8 100644
              reportError(_("spindle %d amplifier fault"), spindle_num);
              emcmotInternal->enabling = 0;
          }
-@@ -945,6 +1350,7 @@ static void set_operating_mode(void)
+@@ -945,6 +1359,7 @@ static void set_operating_mode(void)
  
      /* check for disabling */
      if (!emcmotInternal->enabling && GET_MOTION_ENABLE_FLAG()) {
@@ -1580,7 +1589,7 @@ index f22ab9b..8d4c3e8 100644
  	/* clear out the motion emcmotInternal->coord_tp and interpolators */
  	tpClear(&emcmotInternal->coord_tp);
  	for (joint_num = 0; joint_num < ALL_JOINTS; joint_num++) {
-@@ -999,8 +1405,9 @@ static void set_operating_mode(void)
+@@ -999,8 +1414,9 @@ static void set_operating_mode(void)
              }
  	}
  	SET_MOTION_ENABLE_FLAG(1);
@@ -1592,7 +1601,7 @@ index f22ab9b..8d4c3e8 100644
      }
  
      /* check for entering teleop mode */
-@@ -1028,7 +1435,7 @@ static void set_operating_mode(void)
+@@ -1028,7 +1444,7 @@ static void set_operating_mode(void)
  	    /* Initialize things to do when starting teleop mode. */
  	    SET_MOTION_TELEOP_FLAG(1);
  	    SET_MOTION_COORD_FLAG(0);
@@ -1601,7 +1610,7 @@ index f22ab9b..8d4c3e8 100644
  
              kinematicsForward(positions, &emcmotStatus->carte_pos_cmd, &fflags, &iflags);
              // entering teleop (INPOS), remove ext offsets
-@@ -1072,7 +1479,7 @@ static void set_operating_mode(void)
+@@ -1072,7 +1488,7 @@ static void set_operating_mode(void)
  		emcmotStatus->overrideLimitMask = 0;
  		SET_MOTION_COORD_FLAG(1);
  		SET_MOTION_TELEOP_FLAG(0);
@@ -1610,7 +1619,7 @@ index f22ab9b..8d4c3e8 100644
  	    } else {
  		/* not in position-- defer the mode change; the request stays
  		   pending and is honored when motion comes to rest */
-@@ -1092,7 +1499,7 @@ static void set_operating_mode(void)
+@@ -1092,7 +1508,7 @@ static void set_operating_mode(void)
  		}
  		SET_MOTION_COORD_FLAG(0);
  		SET_MOTION_TELEOP_FLAG(0);
@@ -1619,7 +1628,7 @@ index f22ab9b..8d4c3e8 100644
  	    } else {
  		/* not in position-- defer the mode change; the request stays
  		   pending and is honored when motion comes to rest */
-@@ -1127,10 +1534,17 @@ static void handle_jjogwheels(void)
+@@ -1127,10 +1543,17 @@ static void handle_jjogwheels(void)
  	/* point to joint data */
  	joint_data = &(emcmot_hal_data->joint[joint_num]);
  	joint = &joints[joint_num];
@@ -1641,7 +1650,7 @@ index f22ab9b..8d4c3e8 100644
  
          // disallow accel bogus fractions
          rtapi_real jjog_accel_fraction = hal_get_real(joint_data->jjog_accel_fraction);
-@@ -1145,6 +1559,7 @@ static void handle_jjogwheels(void)
+@@ -1145,6 +1568,7 @@ static void handle_jjogwheels(void)
  	delta = new_jjog_counts - joint->old_jjog_counts;
  	/* save value for next time */
  	joint->old_jjog_counts = new_jjog_counts;
@@ -1649,7 +1658,7 @@ index f22ab9b..8d4c3e8 100644
  	/* initialization complete */
  	if ( first_pass ) {
  	    continue;
-@@ -1276,6 +1691,16 @@ static int prepare_joint_targets(const EmcPose *pose, double *positions,
+@@ -1276,6 +1700,16 @@ static int prepare_joint_targets(const EmcPose *pose, double *positions,
              reportError(_("kinematicsInverse gave non-finite joint location on joint %d"), n);
              return -1;
          }
@@ -1666,7 +1675,7 @@ index f22ab9b..8d4c3e8 100644
          cubics[n] = joints[n].cubic;
          if (cubicNeedNextPoint(&cubics[n]) &&
              cubicAddPoint(&cubics[n], positions[n]) != 0) {
-@@ -1365,7 +1790,10 @@ static void get_pos_cmds(long period)
+@@ -1365,7 +1799,10 @@ static void get_pos_cmds(long period)
  	for (joint_num = 0; joint_num < ALL_JOINTS; joint_num++) {
  	    /* point to joint struct */
  	    joint = &joints[joint_num];
@@ -1678,7 +1687,7 @@ index f22ab9b..8d4c3e8 100644
  	        /* if joint is not active, skip it */
  	        continue;
              }
-@@ -1521,8 +1949,7 @@ static void get_pos_cmds(long period)
+@@ -1521,8 +1958,7 @@ static void get_pos_cmds(long period)
              result = prepare_joint_targets(&emcmotStatus->carte_pos_cmd,
                                             positions, staged_cubics);
              if (result != 0) {
@@ -1688,7 +1697,7 @@ index f22ab9b..8d4c3e8 100644
                  break;
              }
              for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
-@@ -1583,8 +2010,7 @@ static void get_pos_cmds(long period)
+@@ -1583,8 +2019,7 @@ static void get_pos_cmds(long period)
          result = prepare_joint_targets(&emcmotStatus->carte_pos_cmd,
                                         positions, staged_cubics);
          if (result != 0) {
@@ -1698,7 +1707,7 @@ index f22ab9b..8d4c3e8 100644
              break;
          }
          for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
-@@ -1595,6 +2021,8 @@ static void get_pos_cmds(long period)
+@@ -1595,6 +2030,8 @@ static void get_pos_cmds(long period)
                  &joint->vel_cmd, &joint->acc_cmd, &joint->jerk_cmd);
          }
  
@@ -1707,7 +1716,7 @@ index f22ab9b..8d4c3e8 100644
  
  	/* END OF OUTPUT KINS */
  
-@@ -1611,10 +2039,13 @@ static void get_pos_cmds(long period)
+@@ -1611,10 +2048,13 @@ static void get_pos_cmds(long period)
      case EMCMOT_MOTION_DISABLED:
  	/* set position commands to match feedbacks, this avoids
  	   disturbances and/or following errors when enabling */
@@ -1722,7 +1731,7 @@ index f22ab9b..8d4c3e8 100644
  	    /* save old command */
  	    joint->pos_cmd = joint->pos_fb;
  	    /* set joint velocity and acceleration to zero */
-@@ -2002,8 +2433,6 @@ static void output_to_hal(void)
+@@ -2002,8 +2442,6 @@ static void output_to_hal(void)
      double inch_mult;
      emcmot_joint_t *joint;
      joint_hal_t *joint_data;
@@ -1731,7 +1740,7 @@ index f22ab9b..8d4c3e8 100644
  
      /* output machine info to HAL for scoping, etc */
      hal_set_bool(emcmot_hal_data->motion_enabled, GET_MOTION_ENABLE_FLAG());
-@@ -2045,6 +2474,9 @@ static void output_to_hal(void)
+@@ -2045,6 +2483,9 @@ static void output_to_hal(void)
  
      for (spindle_num = 0; spindle_num < emcmotConfig->numSpindles; spindle_num++){
          double speed;
@@ -1741,7 +1750,7 @@ index f22ab9b..8d4c3e8 100644
  		if(emcmotStatus->spindle_status[spindle_num].css_factor) {
  			double denom = fabs(emcmotStatus->spindle_status[spindle_num].xoffset
  								- emcmotStatus->carte_pos_cmd.tran.x);
-@@ -2079,14 +2511,22 @@ static void output_to_hal(void)
+@@ -2079,14 +2520,22 @@ static void output_to_hal(void)
              }
          }
  
@@ -1768,7 +1777,7 @@ index f22ab9b..8d4c3e8 100644
          // What is this for? Docs don't say
          hal_set_real(emcmot_hal_data->spindle[spindle_num].spindle_speed_cmd_rps,
  				emcmotStatus->spindle_status[spindle_num].speed / 60.);
-@@ -2147,6 +2587,13 @@ static void output_to_hal(void)
+@@ -2147,6 +2596,13 @@ static void output_to_hal(void)
  
      /* two way handshaking for the spindle encoder */
      for (spindle_num = 0; spindle_num < emcmotConfig->numSpindles; spindle_num++){
@@ -1782,7 +1791,7 @@ index f22ab9b..8d4c3e8 100644
  		if(emcmotStatus->spindle_status[spindle_num].spindle_index_enable
  				&& !old_motion_index[spindle_num]) {
  			hal_set_bool(emcmot_hal_data->spindle[spindle_num].spindle_index_enable, 1);
-@@ -2189,7 +2636,14 @@ static void output_to_hal(void)
+@@ -2189,7 +2645,14 @@ static void output_to_hal(void)
  	hal_set_real(joint_data->motor_pos_cmd, joint->motor_pos_cmd);
  	hal_set_real(joint_data->joint_pos_cmd, joint->pos_cmd);
  	hal_set_real(joint_data->joint_pos_fb, joint->pos_fb);
@@ -2230,7 +2239,7 @@ index 90cc136..5a1e60e 100644
  
      // clear out the pending command
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 7923ce4..170f044 100644
+index f3bcb8e..c465732 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -172,6 +172,61 @@ volatile int done;
@@ -2311,7 +2320,38 @@ index 7923ce4..170f044 100644
      }
      return 1;
  }
-@@ -922,6 +982,13 @@ static bool emcTaskArmSingleStep()
+@@ -452,6 +512,10 @@ static EMC_TRAJ_MODE homingPriorMode = EMC_TRAJ_MODE::FREE; // mode to restore o
+ // into FREE, determineMode() reports MANUAL, so resumable Stop uses this to
+ // recognise a G28.2 that belongs to an AUTO program.
+ static EMC_TASK_MODE homingPriorTaskMode = EMC_TASK_MODE::MANUAL;
++// Set when an acquisition home failed to start: motion refuses mode changes
++// while the acquisition is in transition, so homingPriorMode is restored once
++// the abort that follows has cancelled it.
++static bool homingRestoreAfterAvailability = false;
+ // True only while emcTaskExecute() is issuing a command taken off the
+ // interp_list. emcTaskIssueCommand() serves both that queued path and the
+ // immediate commands emcTaskPlan() sends straight through (the GUI's Home
+@@ -463,6 +527,19 @@ static EMC_TASK_MODE homingPriorTaskMode = EMC_TASK_MODE::MANUAL;
+ // an immediate home keeps its original pass-through behaviour.
+ static bool issuingQueuedCommand = false;
+ 
++// Undo the FREE dip of a home that never started.
++static void emcTaskRestoreHomingMode()
++{
++    if (homingPriorMode == EMC_TRAJ_MODE::FREE) {
++        return;
++    }
++    if (availability_pending.active) {
++        homingRestoreAfterAvailability = true;
++    } else {
++        emcTrajSetMode(homingPriorMode);
++    }
++}
++
+ static EMC_SPINDLE_SPEED *spindle_speed_msg;
+ static EMC_SPINDLE_ORIENT *spindle_orient_msg;
+ static EMC_SPINDLE_WAIT_ORIENT_COMPLETE *wait_spindle_orient_complete_msg;
+@@ -922,6 +999,13 @@ static bool emcTaskArmSingleStep()
      return true;
  }
  
@@ -2325,7 +2365,7 @@ index 7923ce4..170f044 100644
  static void emcTaskStopClear()
  {
      bool was_active = emcStatus &&
-@@ -1143,6 +1210,31 @@ static int emcTaskPlan(void)
+@@ -1162,6 +1246,31 @@ static int emcTaskPlan(void)
          return emcTaskIssueCommand(emcCommand);
      }
  
@@ -2357,7 +2397,7 @@ index 7923ce4..170f044 100644
      if (emcStatus->task.stopState != EMC_TASK_STOP_STATE::IDLE &&
              (type == EMC_TASK_PLAN_RUN_TYPE ||
               type == EMC_TASK_PLAN_RESUME_TYPE ||
-@@ -1162,6 +1254,36 @@ static int emcTaskPlan(void)
+@@ -1181,6 +1290,36 @@ static int emcTaskPlan(void)
          return 0;
      }
  
@@ -2394,7 +2434,7 @@ index 7923ce4..170f044 100644
      // handle any new command
      switch (emcStatus->task.state) {
      case EMC_TASK_STATE::OFF:
-@@ -1674,9 +1796,7 @@ static int emcTaskPlan(void)
+@@ -1693,9 +1832,7 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -2405,7 +2445,7 @@ index 7923ce4..170f044 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1939,6 +2059,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
+@@ -1958,6 +2095,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
      case EMC_TRAJ_CLEAR_PROBE_TRIPPED_FLAG_TYPE:	// and this
      case EMC_AUX_INPUT_WAIT_TYPE:
      case EMC_SPINDLE_WAIT_ORIENT_COMPLETE_TYPE:
@@ -2414,7 +2454,26 @@ index 7923ce4..170f044 100644
  	return EMC_TASK_EXEC::WAITING_FOR_MOTION_AND_IO;
  	break;
  
-@@ -2174,6 +2296,24 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2164,6 +2303,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+ 		emcTrajSetMode(EMC_TRAJ_MODE::FREE);
+ 	    }
+ 	    homingWaitJoint = target_joint;
++	    homingRestoreAfterAvailability = false;
+ 	    homingStarted = false;
+ 	    homingIssueTime = etime();
+ 	    homingWaiting = true;
+@@ -2177,9 +2317,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+ 		// from it) stays stuck at FREE/MANUAL until the operator
+ 		// manually cycles mode again.
+ 		homingWaiting = false;
+-		if (homingPriorMode != EMC_TRAJ_MODE::FREE) {
+-		    emcTrajSetMode(homingPriorMode);
+-		}
++		emcTaskRestoreHomingMode();
+ 	    }
+ 	}
+ 	break;
+@@ -2193,6 +2331,24 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	retval = emcJointUnhome(unhome_msg->joint);
  	break;
  
@@ -2439,7 +2498,7 @@ index 7923ce4..170f044 100644
      case EMC_JOG_CONT_TYPE:
  	jog_cont_msg = reinterpret_cast<EMC_JOG_CONT *>(cmd);
  	retval = emcJogCont(jog_cont_msg->joint_or_axis,
-@@ -2541,6 +2681,26 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2560,6 +2716,26 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	retval = emcSpindleOff(spindle_off_msg->spindle, spindle_off_msg->wait_for_spindle_at_speed);
  	break;
  
@@ -2466,7 +2525,7 @@ index 7923ce4..170f044 100644
      case EMC_SPINDLE_BRAKE_RELEASE_TYPE:
      spindle_brake_release_msg = reinterpret_cast<EMC_SPINDLE_BRAKE_RELEASE *>(cmd);
  	retval = emcSpindleBrakeRelease(spindle_brake_release_msg->spindle);
-@@ -2998,7 +3158,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -3015,7 +3191,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	break;
  
      case EMC_TASK_PLAN_SYNCH_TYPE:
@@ -2481,7 +2540,7 @@ index 7923ce4..170f044 100644
  	if (retval > INTERP_MIN_ERROR) {
  	    retval = -1;
  	}
-@@ -3113,6 +3280,11 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3130,6 +3313,11 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
  	return EMC_TASK_EXEC::DONE;
  	break;
  
@@ -2493,7 +2552,7 @@ index 7923ce4..170f044 100644
      case EMC_TASK_PLAN_RUN_TYPE:
      case EMC_TASK_PLAN_PAUSE_TYPE:
      case EMC_TASK_PLAN_END_TYPE:
-@@ -3195,6 +3367,12 @@ static int emcTaskExecute(void)
+@@ -3212,6 +3400,12 @@ static int emcTaskExecute(void)
      int status;			// status of child from EMC_SYSTEM_CMD
      pid_t pid;			// pid returned from waitpid()
  
@@ -2506,7 +2565,7 @@ index 7923ce4..170f044 100644
      // first check for an abandoned system command and abort it
      if (emcSystemCmdPid != 0 &&
  	emcStatus->task.execState !=
-@@ -3313,11 +3491,49 @@ static int emcTaskExecute(void)
+@@ -3330,11 +3524,59 @@ static int emcTaskExecute(void)
  	break;
  
      case EMC_TASK_EXEC::WAITING_FOR_MOTION:
@@ -2517,6 +2576,11 @@ index 7923ce4..170f044 100644
 +                !op.cancelled && !op.spindle && op.available && !op.home_issued &&
 +                emcStatus->motion.joint[op.index].availability_state ==
 +                    EMCMOT_AVAILABILITY_HOMING) {
++                // Like a queued G28.2, the home does not start while the
++                // program is paused or stopped; it starts after Resume.
++                if (emcStatus->task.interpState == EMC_TASK_INTERP::PAUSED ||
++                    emcStatus->task.stopState != EMC_TASK_STOP_STATE::IDLE)
++                    break;
 +                // Acquisition homes an unhomed joint through the queued G28.2
 +                // home cycle: FREE dip, WAITING_FOR_HOMING, mode restore.
 +                EMC_JOINT_HOME home;
@@ -2532,6 +2596,11 @@ index 7923ce4..170f044 100644
 +            if (completion == EMC_TASK_EXEC::WAITING_FOR_MOTION) break;
 +            if (availability_pending.cancelled) {
 +                availability_pending.active = false;
++                if (homingRestoreAfterAvailability) {
++                    homingRestoreAfterAvailability = false;
++                    if (emcStatus->task.state == EMC_TASK_STATE::ON)
++                        emcTrajSetMode(homingPriorMode);
++                }
 +                emcStatus->task.execState = EMC_TASK_EXEC::DONE;
 +                retval = availability_pending.failed ? -1 : 0;
 +                break;
@@ -2556,7 +2625,21 @@ index 7923ce4..170f044 100644
  	    emcStatus->task.execState = EMC_TASK_EXEC::DONE;
  	    emcTaskEager = 1;
  	}
-@@ -3532,7 +3748,9 @@ static int emcTaskExecute(void)
+@@ -3479,11 +3721,8 @@ static int emcTaskExecute(void)
+ 		emcTaskEager = 1;
+ 		homingWaiting = false;
+ 		// Nothing physically moved, so it's safe to restore the
+-		// mode immediately instead of leaving the machine parked
+-		// in FREE.
+-		if (homingPriorMode != EMC_TRAJ_MODE::FREE) {
+-		    emcTrajSetMode(homingPriorMode);
+-		}
++		// mode instead of leaving the machine parked in FREE.
++		emcTaskRestoreHomingMode();
+ 		break;
+ 	    }
+ 	    // It ran and has now stopped; did it reach the expected end state?
+@@ -3549,7 +3788,9 @@ static int emcTaskExecute(void)
  				    "coordinated motion until every joint is homed"));
  		emcStatus->task.execState = EMC_TASK_EXEC::ERROR;
  	    } else if (success) {

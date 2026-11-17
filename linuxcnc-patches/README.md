@@ -206,6 +206,10 @@ connected, or tied true) does not hold Resume. A second Stop, Abort, E-stop or
 Machine Off end the wait. A next-feed at-speed wait that was pending before
 Stop still holds after Resume, and a later `S` word change still arms one.
 Resume or Run during a Stop leaves single-step mode entered by an earlier Step.
+Pause while Resume is pending (in `STARTING`, or a Resume latched during
+`STOPPING`) cancels it like a second Stop: the program returns to `STOPPED`
+with the restored outputs off. A spindle restored at commanded speed 0 does not
+hold Resume; spindle override 0 still waits for at-speed.
 
 While Stop waits for motion to come to rest, task issues only commands that
 add to the motion queue. Spindle, coolant, I/O, dwell, tool-change and other
@@ -220,11 +224,11 @@ spindle-state bookkeeping of later spindle commands untouched.
 
 The `tests/resumable-stop` LinuxCNC regressions run as four tests
 (`general`, `threading`, `g76-stop`, `g76-step`) that share one driver, so they
-run in parallel. With patches 0009 and 0011 they hold 37 scenarios with the
+run in parallel. With patches 0009 and 0011 they hold 40 scenarios with the
 jerk-limited planner and four re-runs with the trapezoidal planner. They cover
 Stop/Resume and Stop/Single-Step preserving the queued program, spindle and
 coolant handling, the at-speed wait on Resume including a stale at-speed
-signal, commands queued behind a thread, `G33` threading including a chain of
+signal, Pause while Resume is pending, Resume of a spindle restored at S0, commands queued behind a thread, `G33` threading including a chain of
 `G33` moves and `G33`/`G95`/`G33`, `G33.1` rigid tapping, Stop during and after
 an interrupted `G28.2`, and that `STOPPED` is never reported while moving.
 
@@ -296,7 +300,12 @@ characters before its newline. Loading, database replies, formatting, saving
 and database notification refuse a longer line with an error instead of
 cutting it; a table loaded with a refused line is not saved over until it is
 reloaded without it, and an edit whose save or notification fails is rolled
-back in memory. The G-code preview applies the same geometry-plus-wear offset
+back in memory. On a random toolchanger the table is saved after every M6 and
+M61; if that save fails, the change is reported as an error ("tool table ...
+not saved after the tool change") and the program aborts. The tools stay
+swapped in memory, as they are on the machine, and the new tool's offset is
+applied, but the file is unchanged and must be corrected before it is reloaded.
+`tests/tool-line-length-save` covers this. The G-code preview applies the same geometry-plus-wear offset
 as the machine.
 
 ### 0008 — Tapered G76 drive lines and alternating infeed
@@ -403,6 +412,14 @@ rejects `[EMCIO]DB_PROGRAM` during IO initialization and requires file-backed
 that need a database program (`tests/tooldb/*`, added upstream after the old
 base) are therefore skipped. Saving keeps patch 0007's 510-character line limit
 and its refusal to overwrite a table loaded with refused lines.
+
+A tool-table file with an unrecognised line does not load at all, so no
+partial table is ever published. At startup task reports "can't load tool
+table ..." and runs with no tools; a failed reload keeps the previous table. In
+both cases nothing saves over the file (G10, a random-changer M6, tool CRUD)
+until a table loads successfully; a missing table file can still be created by
+a save. CRLF line endings, whitespace-only lines and comment-only lines count as
+blank. `tests/tool-table-load` covers this.
 
 Tool-table reload now preserves the live table when opening, parsing, or
 validation fails. Read-only mmap clients detect inode replacement after a
@@ -513,7 +530,12 @@ Acquisition homing uses the home cycle LinuxCNC provides for `G28.2`: task
 queues the joint home, waits in its homing state with the usual start timeout,
 and restores the task mode afterwards. Abort, E-stop and Machine Off cancel it
 as they cancel a `G28.2`, and a resumable Stop (patch 0004) during it is
-accepted and stays `STOPPING` until homing ends. A failed acquisition homing
+accepted and stays `STOPPING` until homing ends. Stop or Pause before the
+hardware acknowledgment of an unhomed joint does not hold `STOPPING`: the
+acknowledgment completes the handshake and the acquisition home starts only
+after Resume. Once acknowledged, the home must start within
+`AVAILABILITY_TIMEOUT`, not counting time paused or stopped; if it does not,
+the trajectory mode is restored once Abort has cancelled the acquisition. A failed acquisition homing
 reports the `G28.2` homing messages; the motion fault code is set as before.
 Other resources can continue operating while a joint or spindle is released.
 Coordinated and teleop motion are permitted only when inverse kinematics leaves
@@ -571,7 +593,13 @@ HOME ALL ordering and negative synchronized `HOME_SEQUENCE` groups retain the
 global sequence controller. HOME ALL or a synchronized group cannot start
 while independent homing is active, and independent requests cannot be mixed
 into an active global sequence. Duplicate requests for an active joint are
-rejected. An abort or homing error affects only that joint during independent
+rejected. An individual request is also refused while any other joint is
+homing if either joint sets `HOME_IS_SHARED` or `HOME_IGNORE_LIMITS`: its home
+input may be a shared switch or a limit chain that the other joint's motion
+trips, latching a wrong home position. Such joints home one at a time when
+homed individually; HOME ALL and synchronized `HOME_SEQUENCE` groups keep
+upstream behavior. Homing modules export `get_home_is_exclusive()` for this
+check (`homing.c` and both `homecomp.comp` variants). An abort or homing error affects only that joint during independent
 homing, while sequence-controlled operations preserve their group-wide abort
 behavior. No NML or protobuf interface changes are required.
 
@@ -670,9 +698,12 @@ left an NGC remap's MDI command hanging. Commands queued behind it also
 survived and ran after the machine was re-enabled; they are now dropped.
 
 `emcTaskAbort()` now runs `mdi_execute_abort()` after its interpreter reset,
-and `EMC_TASK_PLAN_INIT` runs it before re-initialising the interpreter.
-`tests/remap/mdi-remap-abort` interrupts a waiting NGC and Python remap with
-each of these and checks that MDI still works. The bug is present in plain
+and `EMC_TASK_PLAN_INIT` runs it before re-initialising the interpreter when an
+interrupted call exists; an ordinary MDI move keeps running and keeps its
+interpreter state. `tests/remap/mdi-remap-abort` interrupts a waiting NGC and
+Python remap with each of these, checks that an MDI command queued behind it
+never runs and that MDI still works, and resets the interpreter during a plain
+MDI move. The bug is present in plain
 v2.10.0-pre2; the fix touches only upstream code paths.
 
 ### 0026 — Identify the command an operator error rejects
