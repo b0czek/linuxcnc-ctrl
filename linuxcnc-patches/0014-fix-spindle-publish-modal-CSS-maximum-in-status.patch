@@ -40,10 +40,10 @@ index 513c932..d6e8437 100644
  
  template <class MSG=EMC_SPINDLE_ON>
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index f8ffe7c..7923ce4 100644
+index ae1462b..f3bcb8e 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -1016,7 +1016,7 @@ static void emcTaskStopProgress()
+@@ -1035,7 +1035,7 @@ static void emcTaskStopProgress()
          bool spindle_output_active = false;
          for (int s = 0; s < emcStatus->motion.traj.spindles; ++s) {
              const auto &status = emcStatus->motion.spindle[s];
