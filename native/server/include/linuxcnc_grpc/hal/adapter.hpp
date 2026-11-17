@@ -113,8 +113,10 @@ class HalAdapterError final : public std::runtime_error {
  * or the daemon shuts down.
  *
  * Items keep their declared type for read() and write(). An item declared
- * S32 or U32 is a 64-bit HAL item; read() clamps a value outside the 32-bit
- * range to the nearest 32-bit limit.
+ * S32 or U32 is a 64-bit HAL item (listed as S64/U64); LinuxCncHalAdapter
+ * refuses writes from outside that do not fit the declared range, and read()
+ * clamps a value outside it (which only a linked 64-bit writer pin can still
+ * produce) to the nearest 32-bit limit.
  */
 class LinuxCncHalComponent final {
  public:
@@ -151,6 +153,11 @@ class LinuxCncHalComponent final {
  * (topology(), read_many(), write_many(), ...) runs under one hold of HAL's
  * mutex, so it observes and modifies a consistent HAL state. It intentionally
  * exposes no signal link/unlink methods.
+ *
+ * write() and write_many() refuse (return false / apply nothing) a value that
+ * would reach an S32/U32 item of an owned component outside its declared
+ * range, written to the item directly or to a signal it is linked to, exactly
+ * like a mistyped write.
  *
  * Thread "running" is derived from each thread's threadbeat pin, because HAL
  * no longer publishes its global flag. It can lag a start or stop by up to
