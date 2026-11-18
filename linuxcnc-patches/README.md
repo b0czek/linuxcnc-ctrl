@@ -206,9 +206,9 @@ connected, or tied true) does not hold Resume. A second Stop, Abort, E-stop or
 Machine Off end the wait. A next-feed at-speed wait that was pending before
 Stop still holds after Resume, and a later `S` word change still arms one.
 Resume or Run during a Stop leaves single-step mode entered by an earlier Step.
-Pause while Resume is pending (in `STARTING`, or a Resume latched during
-`STOPPING`) cancels it like a second Stop: the program returns to `STOPPED`
-with the restored outputs off. A spindle restored at commanded speed 0 does not
+A second Stop or a Pause while Resume is pending (in `STARTING`, or a Resume
+latched during `STOPPING`) cancels it: the program stays in or returns to
+`STOPPED` with the restored outputs off. A spindle restored at commanded speed 0 does not
 hold Resume; spindle override 0 still waits for at-speed.
 
 While Stop waits for motion to come to rest, task issues only commands that
@@ -224,11 +224,11 @@ spindle-state bookkeeping of later spindle commands untouched.
 
 The `tests/resumable-stop` LinuxCNC regressions run as four tests
 (`general`, `threading`, `g76-stop`, `g76-step`) that share one driver, so they
-run in parallel. With patches 0009 and 0011 they hold 40 scenarios with the
+run in parallel. With patches 0009 and 0011 they hold 42 scenarios with the
 jerk-limited planner and four re-runs with the trapezoidal planner. They cover
 Stop/Resume and Stop/Single-Step preserving the queued program, spindle and
 coolant handling, the at-speed wait on Resume including a stale at-speed
-signal, Pause while Resume is pending, Resume of a spindle restored at S0, commands queued behind a thread, `G33` threading including a chain of
+signal, Stop and Pause while Resume is pending, Pause during an in-flight Step, Resume of a spindle restored at S0, commands queued behind a thread, `G33` threading including a chain of
 `G33` moves and `G33`/`G95`/`G33`, `G33.1` rigid tapping, Stop during and after
 an interrupted `G28.2`, and that `STOPPED` is never reported while moving.
 
@@ -386,8 +386,8 @@ before stopping at an exact boundary. Later motion remains queued and does not
 begin, including when several following blocks or threading passes were
 prequeued by readahead.
 
-The temporary exact boundary is restored if Step is canceled by Resume or Stop.
-Existing paused source-line stepping and two-stage G76 stepping remain intact.
+The temporary exact boundary is restored if Step is canceled by Resume, Stop or
+Pause; Pause during an in-flight Step is an ordinary Pause. Existing paused source-line stepping and two-stage G76 stepping remain intact.
 Two additional runtime scenarios arm Step during an ordinary block with three
 later blocks queued and during an active G76 cut with later passes queued;
 they are part of the resumable-stop tests described under patch 0004. During an
@@ -418,7 +418,11 @@ partial table is ever published. At startup task reports "can't load tool
 table ..." and runs with no tools; a failed reload keeps the previous table. In
 both cases nothing saves over the file (G10, a random-changer M6, tool CRUD)
 until a table loads successfully; a missing table file can still be created by
-a save. CRLF line endings, whitespace-only lines and comment-only lines count as
+a save. A reload that is refused reports why and keeps the table in use. If the
+refused file still matches that table, saves continue. Pocket numbers above the
+changer limit are refused only on a random changer, where they address slots. On
+a random changer a reload is also refused unless pocket 0 holds the tool in the
+spindle, so a file left stale by a failed save cannot replace the real layout. CRLF line endings, whitespace-only lines and comment-only lines count as
 blank. `tests/tool-table-load` covers this.
 
 Tool-table reload now preserves the live table when opening, parsing, or

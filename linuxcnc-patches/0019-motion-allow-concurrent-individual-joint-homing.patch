@@ -36,10 +36,10 @@ so the new concurrency checks never refuse it.
  create mode 100644 tests/homing-concurrent/tool.tbl
 
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index 3734dae..35eee04 100644
+index e24a9d2..dd99fd8 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
-@@ -1746,10 +1746,29 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1753,10 +1753,29 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	                   joint_num);
                  return;
  	    }

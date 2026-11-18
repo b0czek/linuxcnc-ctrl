@@ -26,29 +26,32 @@ tests/tooldb tests, which need a db program, are skipped.
  src/emc/nml_intf/emc.hh                       |   5 +
  src/emc/nml_intf/emc_nml.hh                   |  44 +++
  src/emc/task/emctaskmain.cc                   |  61 +++-
- src/emc/task/taskclass.cc                     | 256 +++++++++++++++--
+ src/emc/task/taskclass.cc                     | 280 ++++++++++++++++--
  src/emc/task/taskclass.hh                     |   5 +-
- src/emc/tooldata/tooldata.hh                  |  14 +
- src/emc/tooldata/tooldata_common.cc           | 260 ++++++++++++------
+ src/emc/tooldata/tooldata.hh                  |  18 ++
+ src/emc/tooldata/tooldata_common.cc           | 274 +++++++++++------
  src/emc/tooldata/tooldata_mmap.cc             | 102 ++++++-
- src/emc/tooldata/tooldata_nml.cc              |  16 ++
+ src/emc/tooldata/tooldata_nml.cc              |  16 +
+ tests/tool-line-length-save/random-ui.py      |  31 ++
  tests/tool-table-load/.gitignore              |   4 +
  tests/tool-table-load/checkresult             |   2 +
  tests/tool-table-load/common.py               |  76 +++++
  tests/tool-table-load/crlf-ui.py              |  27 ++
  tests/tool-table-load/garbage-ui.py           |  56 ++++
+ tests/tool-table-load/reload-ui.py            |  26 ++
  tests/tool-table-load/test.ini                |  84 ++++++
- tests/tool-table-load/test.sh                 |  16 ++
+ tests/tool-table-load/test.sh                 |  29 ++
  .../reload-tool/non-random/test-ui.py         |  14 +
  .../toolchanger/reload-tool/random/test-ui.py |   3 +-
  tests/tooldb/db-g10-offset/skip               |   3 +
  tests/tooldb/db-line-length/skip              |   3 +
- 21 files changed, 960 insertions(+), 124 deletions(-)
+ 23 files changed, 1073 insertions(+), 123 deletions(-)
  create mode 100644 tests/tool-table-load/.gitignore
  create mode 100755 tests/tool-table-load/checkresult
  create mode 100644 tests/tool-table-load/common.py
  create mode 100755 tests/tool-table-load/crlf-ui.py
  create mode 100755 tests/tool-table-load/garbage-ui.py
+ create mode 100755 tests/tool-table-load/reload-ui.py
  create mode 100644 tests/tool-table-load/test.ini
  create mode 100755 tests/tool-table-load/test.sh
  create mode 100644 tests/tooldb/db-g10-offset/skip
@@ -198,7 +201,7 @@ index cf8bc14..b40c76d 100644
    public:
      EMC_TOOL_SET_NUMBER()
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 2a3c750..ae1462b 100644
+index f69fcbb..269facc 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -1263,7 +1263,18 @@ static int emcTaskPlan(void)
@@ -302,7 +305,7 @@ index 2a3c750..ae1462b 100644
      case EMC_TOOL_SET_NUMBER_TYPE:
  	emc_tool_set_number_msg = reinterpret_cast<EMC_TOOL_SET_NUMBER *>(cmd);
  	retval = emcToolSetNumber(emc_tool_set_number_msg->tool);
-@@ -3059,6 +3116,8 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3060,6 +3117,8 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
      case EMC_TOOL_UNLOAD_TYPE:
      case EMC_TOOL_LOAD_TOOL_TABLE_TYPE:
      case EMC_TOOL_SET_OFFSET_TYPE:
@@ -312,7 +315,7 @@ index 2a3c750..ae1462b 100644
      case EMC_SPINDLE_SPEED_TYPE:
      case EMC_SPINDLE_ON_TYPE:
 diff --git a/src/emc/task/taskclass.cc b/src/emc/task/taskclass.cc
-index 72b698b4..07b68b2 100644
+index 72b698b4..6594e3d 100644
 --- a/src/emc/task/taskclass.cc
 +++ b/src/emc/task/taskclass.cc
 @@ -17,6 +17,7 @@
@@ -402,7 +405,7 @@ index 72b698b4..07b68b2 100644
      reload_tool_number(emcioStatus.tool.toolInSpindle);
  
      if (0 != iniTool(emc_inifile)) {
-@@ -589,10 +589,38 @@ int Task::emcToolUnload()//EMC_TOOL_UNLOAD_TYPE
+@@ -589,10 +589,60 @@ int Task::emcToolUnload()//EMC_TOOL_UNLOAD_TYPE
      return 0;
  }
  
@@ -427,14 +430,36 @@ index 72b698b4..07b68b2 100644
 +    CANON_TOOL_TABLE loaded[CANON_POCKETS_MAX];
 +    int loaded_last = 0;
 +    bool refused_lines = false;
-+    if (tooldata_load_snapshot(file, loaded, &loaded_last, &refused_lines) ||
-+        !valid_table(loaded, loaded_last, random_toolchanger) ||
-+        (emcioStatus.tool.toolInSpindle > 0 &&
-+         find_tool(loaded, loaded_last, emcioStatus.tool.toolInSpindle,
-+                   random_toolchanger) < 0)) {
-+        // the table in memory stays, but the file it is saved to now holds
-+        // something else: it is not saved over until a table loads
-+        if (same_file(file, tooltable_filename)) tooldata_set_refused_lines(true);
++    const int spindle_tool = emcioStatus.tool.toolInSpindle;
++    const char *problem = nullptr;
++    const bool parsed =
++        !tooldata_load_snapshot(file, loaded, &loaded_last, &refused_lines);
++    if (!parsed) {
++        problem = "it could not be read";
++    } else if (!valid_table(loaded, loaded_last, random_toolchanger)) {
++        problem = "it has invalid or duplicate entries";
++    } else if (spindle_tool > 0 &&
++               find_tool(loaded, loaded_last, spindle_tool,
++                         random_toolchanger) < 0) {
++        problem = "it does not have the tool in the spindle";
++    } else if (random_toolchanger && spindle_tool > 0 &&
++               loaded[0].toolno != spindle_tool) {
++        // the file must say where the tools are: the changer moves by it
++        problem = "pocket 0 does not hold the tool in the spindle";
++    }
++    if (problem) {
++        // the table in memory stays. If the file now holds something else,
++        // it is not saved over until a table loads
++        CANON_TOOL_TABLE current[CANON_POCKETS_MAX];
++        int current_last = 0;
++        const bool unchanged = parsed && !refused_lines &&
++            !tooldata_snapshot(current, &current_last) &&
++            tooldata_tables_match(loaded, loaded_last, current, current_last);
++        if (!unchanged && same_file(file, tooltable_filename)) {
++            tooldata_set_refused_lines(true);
++        }
++        emcOperatorError("can't load tool table %s: %s; the table in use is kept",
++                         file, problem);
 +        return -1;
 +    }
 +    if (tooldata_replace(loaded, loaded_last)) return -1;
@@ -442,7 +467,7 @@ index 72b698b4..07b68b2 100644
      reload_tool_number(emcioStatus.tool.toolInSpindle);
      return 0;
  }
-@@ -634,9 +662,10 @@ int Task::emcToolSetOffset(int idx, int toolno, const EmcPose& offset,
+@@ -634,9 +684,10 @@ int Task::emcToolSetOffset(int idx, int toolno, const EmcPose& offset,
          UNEXPECTED_MSG;
      }
      bool stored = (0 == tooldata_save(tooltable_filename));
@@ -454,7 +479,7 @@ index 72b698b4..07b68b2 100644
          int pno = idx; // for random_toolchanger
          if (!random_toolchanger) { pno = tdata.pocketno; }
          if (tooldata_db_notify(TOOL_OFFSET,toolno,pno,tdata)) {
-@@ -656,6 +685,191 @@ int Task::emcToolSetOffset(int idx, int toolno, const EmcPose& offset,
+@@ -656,6 +707,193 @@ int Task::emcToolSetOffset(int idx, int toolno, const EmcPose& offset,
      return 0;
  }
  
@@ -497,7 +522,9 @@ index 72b698b4..07b68b2 100644
 +    for (int idx = random ? 0 : 1; idx <= last; ++idx) {
 +        const auto &entry = table[idx];
 +        if (entry.toolno < 0) continue;
-+        if (entry.pocketno < 0 || entry.pocketno >= CANON_POCKETS_MAX ||
++        // without a random changer the pocket number is only a label
++        if (entry.pocketno < 0 ||
++            (random && entry.pocketno >= CANON_POCKETS_MAX) ||
 +            entry.orientation < 0 || entry.orientation > 9 ||
 +            !isfinite(entry.diameter) || entry.diameter < 0.0 ||
 +            !isfinite(entry.frontangle) || !isfinite(entry.backangle)) return false;
@@ -670,7 +697,7 @@ index 509f11f..d9afc98 100644
  };
  
 diff --git a/src/emc/tooldata/tooldata.hh b/src/emc/tooldata/tooldata.hh
-index db3e6b7..0b28e0e 100644
+index db3e6b7..d4829ff 100644
 --- a/src/emc/tooldata/tooldata.hh
 +++ b/src/emc/tooldata/tooldata.hh
 @@ -58,6 +58,8 @@ void   tooldata_reset(void);
@@ -682,7 +709,7 @@ index db3e6b7..0b28e0e 100644
  
  // ignore_zero_values:1 for file writes
  //                   :0 for use with tooldata_db_notify()
-@@ -76,8 +78,20 @@ void   tooldata_set_db(tooldb_t mode);
+@@ -76,8 +78,24 @@ void   tooldata_set_db(tooldb_t mode);
  
  //----------------------------------------------------------
  int tooldata_load(const char *filename);
@@ -695,6 +722,10 @@ index db3e6b7..0b28e0e 100644
 +// the published table was loaded with refused lines, or the table file
 +// did not load: saves are refused until a table without them is loaded
 +void tooldata_set_refused_lines(bool refused);
++
++// whether two tables would be written to a table file identically
++bool tooldata_tables_match(const CANON_TOOL_TABLE *a, int last_a,
++                           const CANON_TOOL_TABLE *b, int last_b);
  
  int tooldata_save(const char *filename);
 +int tooldata_save_snapshot(const char *filename,
@@ -704,7 +735,7 @@ index db3e6b7..0b28e0e 100644
  //----------------------------------------------------------
  //mmap specific
 diff --git a/src/emc/tooldata/tooldata_common.cc b/src/emc/tooldata/tooldata_common.cc
-index ceefe9b..a0ca625 100644
+index ceefe9b..93626f8 100644
 --- a/src/emc/tooldata/tooldata_common.cc
 +++ b/src/emc/tooldata/tooldata_common.cc
 @@ -24,7 +24,12 @@
@@ -950,7 +981,7 @@ index ceefe9b..a0ca625 100644
      if (db_mode == DB_ACTIVE && idx != 0 ) {
          return 0;
      }
-@@ -433,63 +498,82 @@ static int write_tool_line(std::string &table,int idx)
+@@ -433,63 +498,98 @@ static int write_tool_line(std::string &table,int idx)
                                        tdata,theline)) {
              return -1;
          }
@@ -961,9 +992,8 @@ index ceefe9b..a0ca625 100644
  } // write_tool_line()
  
 -int tooldata_save(const char *filename)
-+int tooldata_save_snapshot(const char *filename,
-+                           const CANON_TOOL_TABLE *table,
-+                           int last_index)
++bool tooldata_tables_match(const CANON_TOOL_TABLE *a, int last_a,
++                           const CANON_TOOL_TABLE *b, int last_b)
  {
 -    int idx;
 -    FILE *fp;
@@ -989,15 +1019,19 @@ index ceefe9b..a0ca625 100644
 -                    filename);
 -            return -1;
 -        }
-+    if (!filename || !filename[0] || !table || last_index < 0 ||
-+        last_index >= CANON_POCKETS_MAX || db_mode == DB_ACTIVE) return -1;
-+    if (table_has_refused_lines) {
-+        fprintf(stderr, "%s: not saved: lines refused when it was loaded "
-+                "would be lost; correct them and reload the tool table\n",
-+                filename);
-+        return -1;
++    const int last = last_a > last_b ? last_a : last_b;
++    for (int idx = is_random_toolchanger ? 0 : 1; idx <= last; ++idx) {
++        char line_a[CANON_TOOL_ENTRY_LEN] = {0};
++        char line_b[CANON_TOOL_ENTRY_LEN] = {0};
++        if (idx <= last_a && a[idx].toolno != -1 &&
++            tooldata_format_toolline(idx, 1, a[idx], line_a)) return false;
++        if (idx <= last_b && b[idx].toolno != -1 &&
++            tooldata_format_toolline(idx, 1, b[idx], line_b)) return false;
++        if (strcmp(line_a, line_b)) return false;
      }
--
++    return true;
++}
+ 
 -    // format every line first: a tool whose line is too long leaves the
 -    // file as it was rather than written without that tool
 -    std::string table;
@@ -1009,6 +1043,18 @@ index ceefe9b..a0ca625 100644
 -        for (idx = start_idx; idx < CANON_POCKETS_MAX; idx++) {
 -            if (write_tool_line(table,idx)) {return -1;}
 -        }
++int tooldata_save_snapshot(const char *filename,
++                           const CANON_TOOL_TABLE *table,
++                           int last_index)
++{
++    if (!filename || !filename[0] || !table || last_index < 0 ||
++        last_index >= CANON_POCKETS_MAX || db_mode == DB_ACTIVE) return -1;
++    if (table_has_refused_lines) {
++        fprintf(stderr, "%s: not saved: lines refused when it was loaded "
++                "would be lost; correct them and reload the tool table\n",
++                filename);
++        return -1;
++    }
 +    // a tool whose line is too long fails the write, and the file stays as
 +    // it was: the table goes to a temporary file renamed over it only when
 +    // every line has been written
@@ -1324,6 +1370,47 @@ index f333925..a7ee61e 100644
 +    memcpy(the_table, table, CANON_POCKETS_MAX * sizeof(*table));
 +    return 0;
 +}
+diff --git a/tests/tool-line-length-save/random-ui.py b/tests/tool-line-length-save/random-ui.py
+index 35b3c18..4b2e267 100755
+--- a/tests/tool-line-length-save/random-ui.py
++++ b/tests/tool-line-length-save/random-ui.py
+@@ -58,5 +58,36 @@ if s.tool_table[0].id != 1:
+ if table() != before:
+     fail("the table file was rewritten:\n" + table())
+ print("tool.tbl unchanged, T3's line kept")
++
++print("*** a reload is refused while pocket 0 does not show the spindle tool")
++short_t3 = "T3 P3 Z+2.000000 ;shortened\n"
++with open("tool.tbl", "w") as f:
++    f.write("T2 P0 Z+1.000000\nT1 P1 Z+10.000000\n" + short_t3)
++c.load_tool_table()
++c.wait_complete()
++wait_error("pocket 0")
++s.poll()
++if s.tool_in_spindle != 1 or s.tool_table[0].id != 1:
++    fail("reload changed the spindle: status T%d, pocket 0 T%d"
++         % (s.tool_in_spindle, s.tool_table[0].id))
++
++print("*** with the file matching the machine, the reload and changes work")
++with open("tool.tbl", "w") as f:
++    f.write("T1 P0 Z+10.000000\nT2 P1 Z+1.000000\n" + short_t3)
++c.load_tool_table()
++c.wait_complete()
++c.mode(linuxcnc.MODE_MDI)
++c.wait_complete()
++c.mdi("t2 m6")
++c.wait_complete()
++deadline = time.time() + 10
++while time.time() < deadline:
++    s.poll()
++    lines = [" ".join(line.split()) for line in table().split("\n")]
++    if s.tool_in_spindle == 2 and any(l.startswith("T2 P0") for l in lines):
++        break
++    time.sleep(0.01)
++else:
++    fail("T2 M6 after the reload was not saved:\n" + table())
+ print("*** all checks passed")
+ sys.exit(0)
 diff --git a/tests/tool-table-load/.gitignore b/tests/tool-table-load/.gitignore
 new file mode 100644
 index 0000000..76e1adf
@@ -1519,6 +1606,38 @@ index 0000000..89099f9
 +print(table())
 +print("*** all checks passed")
 +sys.exit(0)
+diff --git a/tests/tool-table-load/reload-ui.py b/tests/tool-table-load/reload-ui.py
+new file mode 100755
+index 0000000..5e073f5
+--- /dev/null
++++ b/tests/tool-table-load/reload-ui.py
+@@ -0,0 +1,26 @@
++#!/usr/bin/env python3
++"""Reload accepts what startup accepts for a nonrandom changer, where P is
++only a label. A reload refused for a file that still matches the table in
++memory tells the operator and does not stop saves."""
++
++from common import *
++
++start()
++duplicate = "T5 P6" in table()
++if duplicate:
++    print("*** a refused reload of the unchanged file does not stop saves")
++    c.load_tool_table()
++    c.wait_complete()
++    wait_error("can't load tool table")
++else:
++    print("*** a pocket label above the changer limit reloads")
++    wait_for(lambda: sorted(tools()) == [1, 99999], "T1 and T99999")
++    c.load_tool_table()
++    c.wait_complete()
++
++mdi_mode()
++mdi("g10 l1 p1 z5")
++wait_for(lambda: "T1 P1 Z+5.000000" in saved(), "the saved edit")
++print(table())
++print("*** all checks passed")
++sys.exit(0)
 diff --git a/tests/tool-table-load/test.ini b/tests/tool-table-load/test.ini
 new file mode 100644
 index 0000000..9338ce7
@@ -1611,10 +1730,10 @@ index 0000000..9338ce7
 +HOME_SEQUENCE = 0
 diff --git a/tests/tool-table-load/test.sh b/tests/tool-table-load/test.sh
 new file mode 100755
-index 0000000..6819e71
+index 0000000..c629639
 --- /dev/null
 +++ b/tests/tool-table-load/test.sh
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,29 @@
 +#!/bin/bash
 +set -e
 +
@@ -1630,6 +1749,19 @@ index 0000000..6819e71
 +printf 'T1 P1 Z+1.000000\nnot a tool line\nT2 P2 Z+2.000000\n' > tool.tbl
 +rm -f sim.var
 +sed -e 's#^DISPLAY = ./test-ui.py$#DISPLAY = ./garbage-ui.py#' test.ini > run.ini
++linuxcnc -r run.ini
++
++# run 3: a nonrandom pocket number is only a label, so a table that loads at
++# startup also reloads, and saving keeps working
++printf 'T1 P1 Z+1.000000\nT99999 P99999 Z+2.000000\n' > tool.tbl
++rm -f sim.var
++sed -e 's#^DISPLAY = ./test-ui.py$#DISPLAY = ./reload-ui.py#' test.ini > run.ini
++linuxcnc -r run.ini
++
++# run 4: a reload refused for a file that matches the table in use reports
++# the refusal and does not stop saves
++printf 'T1 P1 Z+1.000000\nT5 P5 Z+5.000000\nT5 P6 Z+6.000000\n' > tool.tbl
++rm -f sim.var
 +linuxcnc -r run.ini
 diff --git a/tests/toolchanger/reload-tool/non-random/test-ui.py b/tests/toolchanger/reload-tool/non-random/test-ui.py
 index fca46c3..445e5ee 100755

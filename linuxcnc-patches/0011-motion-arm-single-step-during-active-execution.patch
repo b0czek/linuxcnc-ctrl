@@ -11,12 +11,12 @@ Ported onto v2.10.0-pre2. The two in-flight scenarios, already present
 in the earlier G76 Stop patch's test list, are added here with the
 feature and its program.
 ---
- src/emc/motion/command.c                   |  17 +-
+ src/emc/motion/command.c                   |  24 ++-
  src/emc/motion/control.c                   |   9 +-
- src/emc/task/emctaskmain.cc                |  48 ++---
- src/emc/tp/tp.c                            |  80 +++++++--
+ src/emc/task/emctaskmain.cc                |  48 +++--
+ src/emc/tp/tp.c                            |  80 +++++--
  src/emc/tp/tp_types.h                      |   6 +-
- tests/resumable-stop/README                |  33 ++++
+ tests/resumable-stop/README                |  33 +++
  tests/resumable-stop/after-tap-m5.ngc      |   2 +-
  tests/resumable-stop/after-thread-m5.ngc   |   2 +-
  tests/resumable-stop/after-thread-m9.ngc   |   2 +-
@@ -31,25 +31,25 @@ feature and its program.
  tests/resumable-stop/g76-stop/scenarios    |   5 +
  tests/resumable-stop/g76-stop/test.sh      |   3 +
  tests/resumable-stop/general/checkresult   |   2 +
- tests/resumable-stop/general/scenarios     |  23 +++
+ tests/resumable-stop/general/scenarios     |  24 +++
  tests/resumable-stop/general/test.sh       |   3 +
  tests/resumable-stop/inflight-step.ngc     |   7 +
  tests/resumable-stop/multi-spindle.ngc     |   2 +-
  tests/resumable-stop/orient.ngc            |   2 +-
  tests/resumable-stop/rapid-then-feed.ngc   |   2 +-
  tests/resumable-stop/resume-s0.ngc         |   7 +
- tests/resumable-stop/run-scenarios.sh      |  61 +++++++
+ tests/resumable-stop/run-scenarios.sh      |  61 ++++++
  tests/resumable-stop/tap.ngc               |   6 +-
- tests/resumable-stop/test-ui.py            | 200 +++++++++++++++++++++
+ tests/resumable-stop/test-ui.py            | 237 +++++++++++++++++++++
  tests/resumable-stop/test.ngc              |   2 +-
- tests/resumable-stop/test.sh               |  87 ---------
+ tests/resumable-stop/test.sh               |  87 --------
  tests/resumable-stop/thread-g95-thread.ngc |   2 +-
  tests/resumable-stop/thread-then-steps.ngc |   4 +-
  tests/resumable-stop/thread.ngc            |   6 +-
  tests/resumable-stop/threading/checkresult |   2 +
- tests/resumable-stop/threading/scenarios   |  10 ++
+ tests/resumable-stop/threading/scenarios   |  11 +
  tests/resumable-stop/threading/test.sh     |   3 +
- 38 files changed, 514 insertions(+), 160 deletions(-)
+ 38 files changed, 560 insertions(+), 160 deletions(-)
  create mode 100755 tests/resumable-stop/check-result.sh
  delete mode 100755 tests/resumable-stop/checkresult
  create mode 100755 tests/resumable-stop/g76-step/checkresult
@@ -70,10 +70,24 @@ feature and its program.
  create mode 100755 tests/resumable-stop/threading/test.sh
 
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index a8e8ae3..ead94cb 100644
+index a8e8ae3..ff48890 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
-@@ -1381,26 +1381,29 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1334,6 +1334,13 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+ 	    /* pause the motion */
+ 	    /* can happen at any time */
+ 	    rtapi_print_msg(RTAPI_MSG_DBG, "PAUSE");
++	    if (emcmotStatus->stepping &&
++		    emcmotInternal->coord_tp.stepping_to_motion_target) {
++		/* Pause overrides an armed Step: drop its target, so this is
++		   an ordinary pause instead of re-arming the Step. */
++		tpResume(&emcmotInternal->coord_tp);
++		emcmotStatus->stepping = 0;
++	    }
+ 	    tpPause(&emcmotInternal->coord_tp);
+ 	    emcmotStatus->paused = 1;
+ 	    break;
+@@ -1381,26 +1388,29 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    break;
  
  	case EMCMOT_STEP:
@@ -135,7 +149,7 @@ index e347bf1..75a9f1c 100644
              emcmotStatus->stepping = 0;
              emcmotStatus->paused = 1;
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 1154fd8..2a3c750 100644
+index e2a7209..f69fcbb 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -504,6 +504,7 @@ static int programStartLine = 0;	// which line to run program from
@@ -226,7 +240,7 @@ index 1154fd8..2a3c750 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -4101,6 +4099,10 @@ int main(int argc, char *argv[])
+@@ -4102,6 +4100,10 @@ int main(int argc, char *argv[])
  	// update subordinate status
  
  	emcMotionUpdate(&emcStatus->motion);
@@ -649,18 +663,18 @@ index 0000000..713f576
 +exec bash ../run-scenarios.sh scenarios
 diff --git a/tests/resumable-stop/general/checkresult b/tests/resumable-stop/general/checkresult
 new file mode 100755
-index 0000000..dea9811
+index 0000000..362de54
 --- /dev/null
 +++ b/tests/resumable-stop/general/checkresult
 @@ -0,0 +1,2 @@
 +#!/bin/sh
-+exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 23
++exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 24
 diff --git a/tests/resumable-stop/general/scenarios b/tests/resumable-stop/general/scenarios
 new file mode 100644
-index 0000000..d2ee92d
+index 0000000..d8e2870
 --- /dev/null
 +++ b/tests/resumable-stop/general/scenarios
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,24 @@
 +idle-rejected
 +ordinary
 +trapezoidal:ordinary
@@ -684,6 +698,7 @@ index 0000000..d2ee92d
 +resume-atspeed
 +pause-starting
 +resume-s0
++pause-inflight-step
 diff --git a/tests/resumable-stop/general/test.sh b/tests/resumable-stop/general/test.sh
 new file mode 100755
 index 0000000..713f576
@@ -835,10 +850,10 @@ index 3060ac4..2182f18 100644
  M5
  M2
 diff --git a/tests/resumable-stop/test-ui.py b/tests/resumable-stop/test-ui.py
-index d29f03f..add6ef4 100755
+index d29f03f..9d8a771 100755
 --- a/tests/resumable-stop/test-ui.py
 +++ b/tests/resumable-stop/test-ui.py
-@@ -261,6 +261,42 @@ def run_stop_single_step_test():
+@@ -261,6 +261,74 @@ def run_stop_single_step_test():
      wait_for_program_complete(20.0)
      assert_outputs_stopped_after_program()
  
@@ -878,10 +893,42 @@ index d29f03f..add6ef4 100755
 +    c.auto(linuxcnc.AUTO_RESUME)
 +    wait_for_program_complete(40.0, timeout=10.0)
 +
++
++def run_pause_inflight_single_step_test():
++    # Pause during an armed Single Step is an ordinary Pause: motion stops
++    # where it is instead of finishing the block, and Resume continues.
++    open_auto_program("inflight-step.ngc")
++    c.auto(linuxcnc.AUTO_RUN, 0)
++    wait_for(
++        lambda: s.queue >= 3 and 1.0 < s.position[0] < 5.0,
++        "program did not prequeue later blocks during its first move",
++    )
++    c.auto(linuxcnc.AUTO_STEP)
++    wait_for(
++        lambda: s.single_stepping and not s.task_paused and not s.paused,
++        "in-flight Single Step did not remain unpaused while armed",
++    )
++    c.auto(linuxcnc.AUTO_PAUSE)
++    wait_for(
++        lambda: s.task_paused and s.paused and abs(s.current_vel) < 0.001,
++        "Pause did not stop the in-flight Single Step",
++        timeout=15.0,
++    )
++    paused_x = s.position[0]
++    if paused_x > 9.5:
++        fail("Pause let the Single Step finish its block: X=%.3f" % paused_x)
++    time.sleep(0.25)
++    s.poll()
++    if not math.isclose(s.position[0], paused_x, abs_tol=0.001):
++        fail("motion continued after Pause during Single Step")
++
++    c.auto(linuxcnc.AUTO_RESUME)
++    wait_for_program_complete(40.0, timeout=10.0)
++
  
  def run_rapid_resume_without_at_speed_test():
      hal.set_p("spindle.0.at-speed", "false")
-@@ -790,6 +826,48 @@ def run_tapered_g76_single_step_test():
+@@ -790,6 +858,48 @@ def run_tapered_g76_single_step_test():
          "tapered-drive G76",
      )
  
@@ -930,7 +977,7 @@ index d29f03f..add6ef4 100755
  
  def run_g76_exit_taper_stop_test(program, expected_clear_x, label):
      open_auto_program(program)
-@@ -1286,6 +1364,123 @@ def run_resume_atspeed_wait_test():
+@@ -1286,6 +1396,124 @@ def run_resume_atspeed_wait_test():
          fail("Abort while waiting: the feed moved")
  
  
@@ -972,9 +1019,10 @@ index d29f03f..add6ef4 100755
 +    assert_outputs_stopped_after_program()
 +
 +
-+def run_pause_after_latched_resume_test():
-+    # Resume during STOPPING is latched until Stop completes; a Pause after
-+    # it cancels the latched Resume, so the program stays STOPPED.
++def run_cancel_latched_resume_test(label, cancel):
++    # Resume during STOPPING is latched until Stop completes; a Pause or a
++    # second Stop after it cancels the latched Resume, so the program stays
++    # STOPPED.
 +    open_auto_program("thread-then-steps.ngc")
 +    c.auto(linuxcnc.AUTO_RUN, 0)
 +    wait_for(
@@ -991,27 +1039,27 @@ index d29f03f..add6ef4 100755
 +        timeout=1.0,
 +    )
 +    c.auto(linuxcnc.AUTO_RESUME)
-+    c.auto(linuxcnc.AUTO_PAUSE)
++    cancel()
 +    s.poll()
 +    if s.stop_state != linuxcnc.STOP_STOPPING:
-+        fail("G33 finished before Resume and Pause were sent")
++        fail("G33 finished before Resume and %s were sent" % label)
 +
 +    wait_for(
 +        lambda: s.stop_state == linuxcnc.STOP_STOPPED
 +        and math.isclose(s.position[2], -5.0, abs_tol=0.01),
-+        lambda: "Pause after latched Resume did not leave the program "
++        lambda: "%s after latched Resume did not leave the program "
 +        "STOPPED: X=%.3f Z=%.3f stop=%d"
-+        % (s.position[0], s.position[2], s.stop_state),
++        % (label, s.position[0], s.position[2], s.stop_state),
 +        timeout=15.0,
 +    )
 +    time.sleep(0.4)
 +    s.poll()
 +    if s.stop_state != linuxcnc.STOP_STOPPED or not s.task_paused:
-+        fail("Pause after latched Resume: program left STOPPED")
++        fail("%s after latched Resume: program left STOPPED" % label)
 +    if hal.get_value("spindle.0.on"):
-+        fail("Pause after latched Resume: spindle on while STOPPED")
++        fail("%s after latched Resume: spindle on while STOPPED" % label)
 +    if abs(s.position[0]) > 0.001:
-+        fail("Pause after latched Resume: feed after G33 moved")
++        fail("%s after latched Resume: feed after G33 moved" % label)
 +
 +    c.auto(linuxcnc.AUTO_RESUME)
 +    wait_for(
@@ -1054,7 +1102,7 @@ index d29f03f..add6ef4 100755
  def run_multi_spindle_stop_resume_test():
      open_auto_program("multi-spindle.ngc")
      c.spindle(linuxcnc.SPINDLE_FORWARD, 120.0, 0)
-@@ -1769,6 +1964,7 @@ SCENARIOS = {
+@@ -1769,6 +1997,7 @@ SCENARIOS = {
      "idle-rejected": run_idle_program_stop_rejected_test,
      "ordinary": run_ordinary_stop_resume_test,
      "single-step": run_stop_single_step_test,
@@ -1062,7 +1110,7 @@ index d29f03f..add6ef4 100755
      "rapid-no-atspeed": run_rapid_resume_without_at_speed_test,
      "paused-resume": lambda: run_stop_while_program_paused_test(False),
      "paused-run": lambda: run_stop_while_program_paused_test(True),
-@@ -1782,6 +1978,7 @@ SCENARIOS = {
+@@ -1782,6 +2011,7 @@ SCENARIOS = {
      "g76-tapered": run_tapered_g76_stop_resume_test,
      "g76-single-step": run_g76_single_step_test,
      "g76-tapered-single-step": run_tapered_g76_single_step_test,
@@ -1070,12 +1118,16 @@ index d29f03f..add6ef4 100755
      "g76-exit-taper": run_cylindrical_g76_exit_taper_stop_test,
      "g76-tapered-exit-taper": run_tapered_g76_exit_taper_stop_test,
      "g76-handoff-stress": run_g76_cut_retract_handoff_stress_test,
-@@ -1791,6 +1988,9 @@ SCENARIOS = {
+@@ -1791,6 +2021,13 @@ SCENARIOS = {
      "dwell-atspeed": run_dwell_atspeed_barrier_test,
      "command-after-sync": run_command_after_sync_motion_test,
      "resume-atspeed": run_resume_atspeed_wait_test,
 +    "pause-starting": run_pause_while_starting_test,
-+    "pause-latched-resume": run_pause_after_latched_resume_test,
++    "pause-latched-resume": lambda: run_cancel_latched_resume_test(
++        "Pause", lambda: c.auto(linuxcnc.AUTO_PAUSE)),
++    "stop-latched-resume": lambda: run_cancel_latched_resume_test(
++        "Stop", c.program_stop),
++    "pause-inflight-step": run_pause_inflight_single_step_test,
 +    "resume-s0": run_resume_zero_speed_test,
      "multi-spindle": run_multi_spindle_stop_resume_test,
      "css": run_css_stop_resume_test,
@@ -1228,18 +1280,18 @@ index 5976979..c3ec6d0 100644
  M2
 diff --git a/tests/resumable-stop/threading/checkresult b/tests/resumable-stop/threading/checkresult
 new file mode 100755
-index 0000000..3b2acd1
+index 0000000..664eed8
 --- /dev/null
 +++ b/tests/resumable-stop/threading/checkresult
 @@ -0,0 +1,2 @@
 +#!/bin/sh
-+exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 10
++exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 11
 diff --git a/tests/resumable-stop/threading/scenarios b/tests/resumable-stop/threading/scenarios
 new file mode 100644
-index 0000000..c248aa5
+index 0000000..a4410d4
 --- /dev/null
 +++ b/tests/resumable-stop/threading/scenarios
-@@ -0,0 +1,10 @@
+@@ -0,0 +1,11 @@
 +rigid-tap
 +g33
 +queued-g33
@@ -1250,6 +1302,7 @@ index 0000000..c248aa5
 +g33-no-following-rapid
 +command-after-sync
 +pause-latched-resume
++stop-latched-resume
 diff --git a/tests/resumable-stop/threading/test.sh b/tests/resumable-stop/threading/test.sh
 new file mode 100755
 index 0000000..713f576

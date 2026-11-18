@@ -306,7 +306,7 @@ index 5d61f0b..f1ce1d7 100644
  
  #ifdef __cplusplus
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index 35eee04..f434080 100644
+index dd99fd8..00ae21c 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
 @@ -157,6 +157,19 @@ STATIC int spindle_range_is_available(int first, int last)
@@ -695,7 +695,7 @@ index c03bfc3..05a29fe 100644
    public:
      EMC_JOG_CONT()
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index c465732..d06c467 100644
+index 79a8355..f0d4ab8 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -1462,6 +1462,7 @@ static int emcTaskPlan(void)
