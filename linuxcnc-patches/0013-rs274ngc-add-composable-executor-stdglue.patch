@@ -462,10 +462,10 @@ index 8457e40..f7d7d47 100644
 -
 -
 diff --git a/src/emc/rs274ngc/interp_internal.hh b/src/emc/rs274ngc/interp_internal.hh
-index 6f90dbe..ff5f379 100644
+index 210b4db..65197e8 100644
 --- a/src/emc/rs274ngc/interp_internal.hh
 +++ b/src/emc/rs274ngc/interp_internal.hh
-@@ -618,6 +618,9 @@ struct pycontext {
+@@ -620,6 +620,9 @@ struct pycontext {
      pycontext(const struct pycontext &);
      pycontext &operator=(const struct pycontext &);
      ~pycontext();

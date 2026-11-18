@@ -70,7 +70,7 @@ that adds in-flight stepping.
  create mode 100644 tests/resumable-stop/g76-tapered.ngc
 
 diff --git a/docs/src/gcode/g-code.adoc b/docs/src/gcode/g-code.adoc
-index 950dc5c..f13ec12 100644
+index 39cbf04..67dd545 100644
 --- a/docs/src/gcode/g-code.adoc
 +++ b/docs/src/gcode/g-code.adoc
 @@ -2307,6 +2307,21 @@ pass, so a relief groove will be required at the entry unless the
@@ -474,7 +474,7 @@ index 91d4b7b..109cf46 100644
  void PALLET_SHUTTLE() {}
  void SELECT_TOOL(int tool) {parse_state.selected_tool = tool;}
 diff --git a/src/emc/rs274ngc/interp_convert.cc b/src/emc/rs274ngc/interp_convert.cc
-index 196d48c..e894e64 100644
+index 7b19bf8..0183299 100644
 --- a/src/emc/rs274ngc/interp_convert.cc
 +++ b/src/emc/rs274ngc/interp_convert.cc
 @@ -5943,11 +5943,13 @@ threading_pass(setup_pointer settings, block_pointer block,
@@ -546,7 +546,7 @@ index 196d48c..e894e64 100644
  }
  
  int Interp::check_tapered_threading_pass(setup_pointer settings,
-@@ -6273,9 +6283,13 @@ int Interp::convert_threading_cycle(block_pointer block,
+@@ -6272,9 +6282,13 @@ int Interp::convert_threading_cycle(block_pointer block,
  	}
      }
  

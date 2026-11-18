@@ -328,10 +328,11 @@ line, including their independently corrected synchronized leads. Interpreter
 regressions cover external and internal threads, both taper directions,
 absolute and incremental endpoints, radius and diameter modes, entry/exit
 tapers in both Z directions, compound infeed, spring passes, and rejection of
-Y endpoints. G76 also accepts `D0` for the existing fixed compound-infeed
-direction (the default) and `D1` to alternate roughing passes across the final
-thread line; full-depth and spring passes remain centered, and `Q0` keeps every
-pass on the centered line. Both cylindrical and tapered alternating paths are
+Y endpoints. `G76.1` takes the same words as G76 and alternates roughing passes
+across the final thread line; full-depth and spring passes remain centered, and
+`Q0` keeps every pass on the centered line. Status reports it as `G76`. `D` is
+not accepted on either code, because upstream `master` uses it on G76 for a
+spindle start angle. Both cylindrical and tapered alternating paths are
 covered. No NML or public transport changes are required.
 
 On v2.10.0-pre2 a tapered cycle passes upstream's synchronized-feed check:
