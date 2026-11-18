@@ -11,8 +11,11 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <iostream>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
@@ -23,7 +26,9 @@
 #include "linuxcnc_grpc/command_coordinator.hpp"
 #include "linuxcnc_grpc/gcode/canon_preview.hpp"
 #include "linuxcnc_grpc/hal/value_telemetry.hpp"
+#include "linuxcnc_grpc/linuxcnc/command_completion_tracker.hpp"
 #include "linuxcnc_grpc/linuxcnc/command_validation.hpp"
+#include "linuxcnc_grpc/linuxcnc/nml_adapter.hpp"
 #include "linuxcnc_grpc/position/history.hpp"
 #include "linuxcnc_grpc/program/workspace.hpp"
 #include "linuxcnc_grpc/program/workspace_archive.hpp"
@@ -244,6 +249,386 @@ void deferred_command_completion_test() {
   fail("late failure");
   assert(ticket.wait().state == CommandState::Completed);
   coordinator.shutdown();
+}
+
+// Unlike assert(), stays active when NDEBUG is defined.
+void require(bool condition, const char* description) {
+  if (condition) return;
+  std::cerr << "command hold check failed: " << description << "\n";
+  std::abort();
+}
+
+constexpr auto kSettle = std::chrono::milliseconds(40);
+constexpr auto kPatience = std::chrono::seconds(5);
+
+// The order in which commands reached the simulated LinuxCNC channel.
+class WriteLog {
+ public:
+  void add(int serial) {
+    {
+      std::lock_guard lock(mutex_);
+      writes_.push_back(serial);
+    }
+    condition_.notify_all();
+  }
+
+  bool wait_for(int serial) {
+    std::unique_lock lock(mutex_);
+    return condition_.wait_for(lock, kPatience, [&] {
+      return std::find(writes_.begin(), writes_.end(), serial) != writes_.end();
+    });
+  }
+
+  std::vector<int> writes() const {
+    std::lock_guard lock(mutex_);
+    return writes_;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::condition_variable condition_;
+  std::vector<int> writes_;
+};
+
+CommandResult finished(const CommandTicket& ticket, const char* description) {
+  CommandResult result;
+  require(ticket.wait_for(kPatience, &result), description);
+  return result;
+}
+
+// Starts a hold from inside a command and returns its release callable.
+std::function<void()> start_hold(CommandCoordinator& coordinator,
+                                 std::chrono::milliseconds limit) {
+  std::function<void()> release;
+  const auto ticket =
+      submitted(coordinator.submit_with_context([&](CommandContext& context) {
+        release = context.hold_normal_commands(limit);
+      }));
+  (void)finished(ticket, "the holding command finishes");
+  return release;
+}
+
+CommandTicket logged(CommandCoordinator& coordinator, WriteLog& log, int serial,
+                     CommandPriority priority = CommandPriority::Normal,
+                     CommandHoldPolicy policy = CommandHoldPolicy::Wait) {
+  return submitted(coordinator.submit_with_context(
+      [&log, serial](CommandContext&) { log.add(serial); }, {}, priority,
+      policy));
+}
+
+void command_hold_keeps_later_commands_in_order_test() {
+  CommandCoordinator coordinator(4);
+  WriteLog log;
+  const auto release = start_hold(coordinator, std::chrono::seconds(30));
+  const auto first = logged(coordinator, log, 1);
+  const auto second = logged(coordinator, log, 2);
+  std::this_thread::sleep_for(kSettle);
+  require(log.writes().empty(), "held commands do not start");
+  require(coordinator.queued() == 2, "held commands stay queued");
+  release();
+  (void)finished(first, "first held command runs after release");
+  (void)finished(second, "second held command runs after release");
+  require(log.writes() == std::vector<int>({1, 2}),
+          "held commands keep their order");
+  release();  // A repeated release is harmless.
+  coordinator.shutdown();
+}
+
+void command_hold_bypass_test() {
+  CommandCoordinator coordinator(4, 2);
+  WriteLog log;
+  const auto release = start_hold(coordinator, std::chrono::seconds(30));
+  const auto held = logged(coordinator, log, 1);
+  const auto safety = logged(coordinator, log, 2, CommandPriority::Safety);
+  (void)finished(safety, "a safety command passes a hold");
+  const auto bypass = logged(coordinator, log, 3, CommandPriority::Normal,
+                             CommandHoldPolicy::Bypass);
+  (void)finished(bypass, "a bypassing command passes a hold");
+  std::this_thread::sleep_for(kSettle);
+  require(log.writes() == std::vector<int>({2, 3}),
+          "ordinary commands stay held while others pass");
+  release();
+  (void)finished(held, "the held command runs after release");
+  require(log.writes() == std::vector<int>({2, 3, 1}),
+          "the held command runs last");
+  coordinator.shutdown();
+}
+
+void command_hold_bypass_keeps_order_without_hold_test() {
+  CommandCoordinator coordinator(4);
+  WriteLog log;
+  Gate blocker;
+  const auto busy = submitted(coordinator.submit([&] {
+    blocker.arrive();
+    blocker.wait_until_open();
+  }));
+  blocker.wait_for_arrival();
+  const auto first = logged(coordinator, log, 1);
+  const auto second = logged(coordinator, log, 2, CommandPriority::Normal,
+                             CommandHoldPolicy::Bypass);
+  blocker.open();
+  (void)finished(busy, "the blocking command finishes");
+  (void)finished(first, "the first command runs");
+  (void)finished(second, "the second command runs");
+  require(log.writes() == std::vector<int>({1, 2}),
+          "bypass does not reorder commands when nothing is held");
+  coordinator.shutdown();
+}
+
+void command_hold_expiry_test() {
+  CommandCoordinator coordinator(4);
+  WriteLog log;
+  const auto started = std::chrono::steady_clock::now();
+  const auto expired = start_hold(coordinator, kSettle);
+  const auto after_expiry = logged(coordinator, log, 1);
+  (void)finished(after_expiry, "a hold ends at its limit without a release");
+  require(std::chrono::steady_clock::now() - started >= kSettle,
+          "a hold lasts until its limit");
+
+  // A late release of the expired hold must not end a newer hold.
+  const auto release = start_hold(coordinator, std::chrono::seconds(30));
+  expired();
+  const auto held = logged(coordinator, log, 2);
+  std::this_thread::sleep_for(kSettle);
+  require(log.writes() == std::vector<int>({1}),
+          "a stale release leaves the newer hold in place");
+  release();
+  (void)finished(held, "the current release ends the hold");
+  coordinator.shutdown();
+}
+
+void command_hold_shutdown_test() {
+  CommandCoordinator coordinator(4);
+  WriteLog log;
+  const auto release = start_hold(coordinator, std::chrono::minutes(10));
+  const auto held = logged(coordinator, log, 1);
+  const auto started = std::chrono::steady_clock::now();
+  coordinator.shutdown();
+  require(std::chrono::steady_clock::now() - started < kPatience,
+          "shutdown does not wait for a hold");
+  require(log.writes() == std::vector<int>({1}),
+          "shutdown drains held commands");
+  (void)finished(held, "a drained command finishes");
+  release();
+}
+
+void nml_command_routing_test() {
+  const auto routed = [](NmlCommandKind kind, std::int32_t integer = 0) {
+    NmlCommand command;
+    command.kind = kind;
+    command.integer = integer;
+    return detail::nml_command_routing(command);
+  };
+  for (const auto kind :
+       {NmlCommandKind::LoadToolTable, NmlCommandKind::SetTool,
+        NmlCommandKind::DeleteTool, NmlCommandKind::SetJointAvailability,
+        NmlCommandKind::SetSpindleAvailability}) {
+    const auto routing = routed(kind);
+    require(routing.task_queued, "task-queued commands start a hold");
+    require(routing.priority == CommandPriority::Normal &&
+                routing.hold_policy == CommandHoldPolicy::Wait,
+            "task-queued commands wait for an earlier hold");
+  }
+  for (const auto kind : {NmlCommandKind::AbortTask, NmlCommandKind::Pause,
+                          NmlCommandKind::StopProgram}) {
+    const auto routing = routed(kind);
+    require(routing.priority == CommandPriority::Safety, "stops are safety");
+    require(!routing.task_queued, "stops do not start a hold");
+  }
+  for (const auto state :
+       {detail::kNmlTaskStateEstop, detail::kNmlTaskStateOff}) {
+    require(routed(NmlCommandKind::SetTaskState, state).priority ==
+                CommandPriority::Safety,
+            "E-stop and machine off are safety commands");
+  }
+  for (const auto state : {2, 4}) {
+    const auto routing = routed(NmlCommandKind::SetTaskState, state);
+    require(routing.priority == CommandPriority::Normal &&
+                routing.hold_policy == CommandHoldPolicy::Wait,
+            "E-stop reset and machine on wait for a hold");
+  }
+  for (const auto kind : {NmlCommandKind::Resume, NmlCommandKind::Step,
+                          NmlCommandKind::SpindleOff}) {
+    const auto routing = routed(kind);
+    require(routing.priority == CommandPriority::Normal &&
+                routing.hold_policy == CommandHoldPolicy::Bypass,
+            "commands needed to finish held work pass a hold");
+  }
+  const auto ordinary = routed(NmlCommandKind::SetFeedRate);
+  require(ordinary.priority == CommandPriority::Normal &&
+              ordinary.hold_policy == CommandHoldPolicy::Wait &&
+              !ordinary.task_queued,
+          "ordinary commands wait and do not hold");
+}
+
+NmlStatusSnapshot task_status(int echo, std::int32_t rcs_status) {
+  NmlStatusSnapshot snapshot;
+  snapshot.echo_serial_number = echo;
+  snapshot.rcs_status = rcs_status;
+  return snapshot;
+}
+
+constexpr std::int32_t kRcsExec = 2;
+
+// A command coordinator and completion tracker around a simulated channel.
+class TrackedCommands {
+ public:
+  explicit TrackedCommands(std::chrono::milliseconds timeout = {})
+      : timeout(timeout), tracker(timeout) {
+    tracker.observe(task_status(0, detail::kNmlRcsStatusDone));
+  }
+
+  CommandTicket write(int serial, bool task_queued,
+                      CommandPriority priority = CommandPriority::Normal) {
+    return submitted(coordinator.submit_with_context(
+        [this, serial, task_queued](CommandContext& context) {
+          log.add(serial);
+          detail::track_written_command(
+              &tracker, context, serial, task_queued, timeout,
+              [this] { ++completed_callbacks; },
+              [this] { ++failed_callbacks; });
+        },
+        {}, priority));
+  }
+
+  std::chrono::milliseconds timeout;
+  detail::CommandCompletionTracker tracker;
+  WriteLog log;
+  std::atomic<int> completed_callbacks{0};
+  std::atomic<int> failed_callbacks{0};
+  CommandCoordinator coordinator{8};
+};
+
+void queued_command_failure_attribution_test() {
+  TrackedCommands commands;
+  const auto queued = commands.write(10, true);
+  const auto next = commands.write(11, false);
+  require(commands.log.wait_for(10), "the queued command is written");
+
+  commands.tracker.observe(task_status(9, detail::kNmlRcsStatusDone));
+  commands.tracker.observe(task_status(10, kRcsExec));
+  std::this_thread::sleep_for(kSettle);
+  require(commands.log.writes() == std::vector<int>({10}),
+          "the next command waits for the queued command's result");
+
+  commands.tracker.observe(task_status(10, detail::kNmlRcsStatusError));
+  const auto failed = finished(queued, "the queued command resolves");
+  require(failed.state == CommandState::Failed,
+          "the failure belongs to the queued command");
+  require(failed.error == "LinuxCNC rejected the command",
+          "the queued command reports the rejection");
+  require(commands.failed_callbacks == 1, "the failure callback runs");
+  require(commands.log.wait_for(11), "the next command follows the result");
+
+  commands.tracker.observe(task_status(11, detail::kNmlRcsStatusDone));
+  require(finished(next, "the next command resolves").state ==
+              CommandState::Completed,
+          "the next command does not inherit the failure");
+  require(commands.completed_callbacks == 1, "only the next command completed");
+}
+
+void queued_command_success_releases_hold_test() {
+  TrackedCommands commands;
+  const auto queued = commands.write(10, true);
+  const auto next = commands.write(11, true);
+  require(commands.log.wait_for(10), "the first queued command is written");
+  commands.tracker.observe(task_status(10, detail::kNmlRcsStatusDone));
+  require(finished(queued, "the first command resolves").state ==
+              CommandState::Completed,
+          "the first queued command completes");
+  require(commands.log.wait_for(11), "the second queued command follows");
+  commands.tracker.observe(task_status(11, detail::kNmlRcsStatusDone));
+  require(finished(next, "the second command resolves").state ==
+              CommandState::Completed,
+          "the second queued command completes");
+}
+
+void queued_command_superseded_by_safety_test() {
+  TrackedCommands commands;
+  const auto queued = commands.write(10, true);
+  require(commands.log.wait_for(10), "the queued command is written");
+  const auto held = commands.write(12, false);
+  const auto abort = commands.write(11, false, CommandPriority::Safety);
+  require(commands.log.wait_for(11), "the safety command passes the hold");
+  std::this_thread::sleep_for(kSettle);
+  require(commands.log.writes() == std::vector<int>({10, 11}),
+          "the normal command stays held behind the queued command");
+
+  commands.tracker.observe(task_status(11, detail::kNmlRcsStatusDone));
+  const auto superseded = finished(queued, "the overtaken command resolves");
+  require(superseded.state == CommandState::Failed,
+          "an overtaken queued command is not reported complete");
+  require(superseded.error.find("outcome is unknown") != std::string::npos,
+          "the error says the outcome is unknown");
+  require(commands.completed_callbacks == 1,
+          "only the safety command completed");
+  require(finished(abort, "the safety command resolves").state ==
+              CommandState::Completed,
+          "the safety command completes");
+  require(commands.log.wait_for(12), "the hold ends with the queued command");
+  commands.tracker.observe(task_status(12, detail::kNmlRcsStatusDone));
+  (void)finished(held, "the held command resolves");
+}
+
+void immediate_command_completes_on_later_echo_test() {
+  TrackedCommands commands;
+  const auto immediate = commands.write(10, false);
+  const auto next = commands.write(11, false);
+  require(commands.log.wait_for(11), "immediate commands do not hold");
+  commands.tracker.observe(task_status(11, detail::kNmlRcsStatusDone));
+  require(finished(immediate, "the first command resolves").state ==
+              CommandState::Completed,
+          "a later echo completes an immediate command");
+  require(finished(next, "the second command resolves").state ==
+              CommandState::Completed,
+          "the echoed command completes");
+}
+
+void queued_command_timeout_releases_hold_test() {
+  TrackedCommands commands(std::chrono::milliseconds(60));
+  const auto queued = commands.write(10, true);
+  const auto next = commands.write(11, false);
+  require(commands.log.wait_for(10), "the queued command is written");
+  commands.tracker.observe(task_status(10, kRcsExec));
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  commands.tracker.tick();
+  const auto timed_out = finished(queued, "the queued command times out");
+  require(timed_out.state == CommandState::Failed, "a timeout is a failure");
+  require(timed_out.error.find("timed out") != std::string::npos,
+          "the error reports the timeout");
+  require(commands.log.wait_for(11), "a timeout releases the hold");
+  commands.tracker.observe(task_status(11, detail::kNmlRcsStatusDone));
+  (void)finished(next, "the next command resolves");
+}
+
+void queued_command_hold_outlives_silent_status_test() {
+  // With no status at all nothing resolves the command, so the hold's own
+  // limit is what lets later commands continue.
+  TrackedCommands commands(std::chrono::milliseconds(60));
+  const auto queued = commands.write(10, true);
+  const auto next = commands.write(11, false);
+  require(commands.log.wait_for(10), "the queued command is written");
+  require(commands.log.wait_for(11), "the hold limit releases later commands");
+  commands.tracker.observe(task_status(11, detail::kNmlRcsStatusDone));
+  require(finished(queued, "the expired command resolves").state ==
+              CommandState::Failed,
+          "a command overtaken after expiry is not reported complete");
+  (void)finished(next, "the next command resolves");
+}
+
+void queued_command_channel_failure_releases_hold_test() {
+  TrackedCommands commands;
+  const auto queued = commands.write(10, true);
+  const auto next = commands.write(11, false);
+  require(commands.log.wait_for(10), "the queued command is written");
+  commands.tracker.channel_failed();
+  require(finished(queued, "the queued command resolves").state ==
+              CommandState::Failed,
+          "losing the status channel fails the queued command");
+  require(commands.log.wait_for(11), "losing the channel releases the hold");
+  require(
+      finished(next, "the next command resolves").state == CommandState::Failed,
+      "the next command also reports the lost channel");
 }
 
 void command_validation_test() {
@@ -905,6 +1290,19 @@ int main() {
   command_failure_wait_test();
   command_priority_and_reserved_capacity_test();
   deferred_command_completion_test();
+  command_hold_keeps_later_commands_in_order_test();
+  command_hold_bypass_test();
+  command_hold_bypass_keeps_order_without_hold_test();
+  command_hold_expiry_test();
+  command_hold_shutdown_test();
+  nml_command_routing_test();
+  queued_command_failure_attribution_test();
+  queued_command_success_releases_hold_test();
+  queued_command_superseded_by_safety_test();
+  immediate_command_completes_on_later_echo_test();
+  queued_command_timeout_releases_hold_test();
+  queued_command_hold_outlives_silent_status_test();
+  queued_command_channel_failure_releases_hold_test();
   command_validation_test();
   nml_serial_wrap_test();
   position_cursor_generation_and_replacement_test();

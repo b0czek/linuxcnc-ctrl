@@ -382,6 +382,8 @@ int main(int argc, char** argv) {
   }
   assert(tool_deleted);
 
+  verify_task_queued_command_ordering(machine.get());
+
   expect_command_error(machine.get(), ExecuteCommandRequest{},
                        grpc::StatusCode::INVALID_ARGUMENT);
   ExecuteCommandRequest missing_tool;

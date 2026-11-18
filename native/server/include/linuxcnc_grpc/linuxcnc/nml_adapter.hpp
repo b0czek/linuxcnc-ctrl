@@ -18,7 +18,18 @@ namespace linuxcnc::server {
 // LinuxCNC's EMC_TASK_PLAN_OPEN::file is a LINELEN-sized C string.
 inline constexpr std::size_t kNmlProgramPathCapacity = 255;
 
+// Longest time later normal commands wait for a task-queued command when no
+// command completion timeout is configured. A configured timeout replaces it.
+inline constexpr std::chrono::seconds kNmlTaskQueuedHoldLimit{30};
+
 namespace detail {
+// LinuxCNC's RCS_STATUS and EMC_TASK_STATE values; nml_adapter.cc checks them
+// against the LinuxCNC headers.
+inline constexpr std::int32_t kNmlRcsStatusDone = 1;
+inline constexpr std::int32_t kNmlRcsStatusError = 3;
+inline constexpr std::int32_t kNmlTaskStateEstop = 1;
+inline constexpr std::int32_t kNmlTaskStateOff = 3;
+
 constexpr bool nml_serial_after(std::int32_t lhs, std::int32_t rhs) {
   return static_cast<std::int32_t>(static_cast<std::uint32_t>(lhs) -
                                    static_cast<std::uint32_t>(rhs)) > 0;
@@ -263,6 +274,52 @@ struct NmlCommand {
   std::function<void()> on_completed;
   std::function<void()> on_failed;
 };
+
+namespace detail {
+struct NmlCommandRouting {
+  CommandPriority priority = CommandPriority::Normal;
+  CommandHoldPolicy hold_policy = CommandHoldPolicy::Wait;
+  // LinuxCNC reports this command's result some cycles after reading it, and
+  // only until it reads another command.
+  bool task_queued = false;
+};
+
+// Later commands wait for a task-queued command because task reports one
+// result, for the command it read last. Safety commands go first regardless.
+// Resume, Step and SpindleOff keep their queue position but pass a hold: task
+// admits them during an availability operation, and a queued command cannot
+// finish while the program is paused until Resume or Step is delivered.
+inline NmlCommandRouting nml_command_routing(const NmlCommand& command) {
+  NmlCommandRouting routing;
+  switch (command.kind) {
+    case NmlCommandKind::StopProgram:
+    case NmlCommandKind::Pause:
+    case NmlCommandKind::AbortTask:
+      routing.priority = CommandPriority::Safety;
+      break;
+    case NmlCommandKind::SetTaskState:
+      if (command.integer == kNmlTaskStateEstop ||
+          command.integer == kNmlTaskStateOff)
+        routing.priority = CommandPriority::Safety;
+      break;
+    case NmlCommandKind::Resume:
+    case NmlCommandKind::Step:
+    case NmlCommandKind::SpindleOff:
+      routing.hold_policy = CommandHoldPolicy::Bypass;
+      break;
+    case NmlCommandKind::LoadToolTable:
+    case NmlCommandKind::SetTool:
+    case NmlCommandKind::DeleteTool:
+    case NmlCommandKind::SetJointAvailability:
+    case NmlCommandKind::SetSpindleAvailability:
+      routing.task_queued = true;
+      break;
+    default:
+      break;
+  }
+  return routing;
+}
+}  // namespace detail
 
 struct NmlStatusSnapshot {
   std::int32_t echo_serial_number = 0;
