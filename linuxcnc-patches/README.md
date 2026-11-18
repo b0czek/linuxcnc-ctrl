@@ -374,13 +374,13 @@ not stop after the lock alone. A Stop during plain `G33` threading still
 finishes the synchronized run as patch 0004 describes; only G76 passes use the
 marked clearance target.
 
-### 0010 — Recording canon backend for native G-code preview
+### 0010 — Support for the native G-code preview
 
-Adds `recordingcanon.cc` and `recordingcanon.hh`, a separate link-selected
-implementation of LinuxCNC's global CANON API for native offline interpreters.
-It follows the same backend boundary already used by task (`emccanon.cc`), Axis
-(`gcodemodule.cc`), and the standalone interpreter (`saicanon.cc`), leaving
-those existing implementations untouched.
+The native server records previews with its own implementation of LinuxCNC's
+CANON API (`native/server/src/gcode/recording_canon.cc`). This patch adds what
+that implementation needs inside LinuxCNC: the interpreter reports cutter
+compensation being switched on and off through the existing canon calls, and
+`tool_mmap_user()` is safe to call from several threads.
 
 ### 0011 — In-flight Single Step arming
 

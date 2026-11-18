@@ -21,7 +21,6 @@ homing ends as it does during G28.2.
  src/emc/rs274ngc/interp_internal.hh           |   7 +
  src/emc/rs274ngc/interp_read.cc               |   9 +-
  src/emc/rs274ngc/interp_remap.cc              |   2 +
- src/emc/rs274ngc/recordingcanon.cc            |   3 +
  src/emc/sai/saicanon.cc                       |   5 +
  src/emc/task/emccanon.cc                      |  18 ++
  .../.gitignore                                |   2 +
@@ -74,7 +73,7 @@ homing ends as it does during G28.2.
  tests/interp/availability-mcodes/test.sh      |  80 +++++++
  .../availability-mcodes/valid-joint.ngc       |   3 +
  .../availability-mcodes/valid-spindle.ngc     |   3 +
- 65 files changed, 705 insertions(+), 7 deletions(-)
+ 64 files changed, 702 insertions(+), 7 deletions(-)
  create mode 100644 tests/availability-mcodes-regressions/.gitignore
  create mode 100644 tests/availability-mcodes-regressions/README
  create mode 100755 tests/availability-mcodes-regressions/checkresult
@@ -256,7 +255,7 @@ index a900d33..d95b187 100644
     7,  7,  7, 7, -1, -1, -1, -1, -1, -1,  // 79
    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  // 89
 diff --git a/src/emc/rs274ngc/interp_check.cc b/src/emc/rs274ngc/interp_check.cc
-index 50781c6..7981131 100644
+index c65a3b2..219a007 100644
 --- a/src/emc/rs274ngc/interp_check.cc
 +++ b/src/emc/rs274ngc/interp_check.cc
 @@ -17,6 +17,7 @@
@@ -317,7 +316,7 @@ index 50781c6..7981131 100644
        int p_value = round_to_int(block->p_number);
        CHKS(((motion == G_2 || motion == G_3 || (block->m_modes[7] == 19)) &&
 diff --git a/src/emc/rs274ngc/interp_convert.cc b/src/emc/rs274ngc/interp_convert.cc
-index 462eb90..fddac65 100644
+index 3c676b6..624903f 100644
 --- a/src/emc/rs274ngc/interp_convert.cc
 +++ b/src/emc/rs274ngc/interp_convert.cc
 @@ -4443,6 +4443,17 @@ if ((block->m_modes[9] == 53)  && ONCE_M(9)){
@@ -354,10 +353,10 @@ index 46eb9e1..6bb5760 100644
    write_canon_state_tag(block, settings);
    return INTERP_OK;
 diff --git a/src/emc/rs274ngc/interp_internal.cc b/src/emc/rs274ngc/interp_internal.cc
-index 4ec4f7a..41e032d 100644
+index e08e4a6..21edbb7 100644
 --- a/src/emc/rs274ngc/interp_internal.cc
 +++ b/src/emc/rs274ngc/interp_internal.cc
-@@ -287,6 +287,7 @@ int Interp::init_block(block_pointer block)      //!< pointer to a block to be i
+@@ -288,6 +288,7 @@ int Interp::init_block(block_pointer block)      //!< pointer to a block to be i
    block->line_number = -1;
    block->n_number = -1;
    block->motion_to_be = -1;
@@ -366,10 +365,10 @@ index 4ec4f7a..41e032d 100644
    for (n = 0; n < 11; n++) {
      block->m_modes[n] = -1;
 diff --git a/src/emc/rs274ngc/interp_internal.hh b/src/emc/rs274ngc/interp_internal.hh
-index ff5f379..d642007 100644
+index 65197e8..ddae1dc 100644
 --- a/src/emc/rs274ngc/interp_internal.hh
 +++ b/src/emc/rs274ngc/interp_internal.hh
-@@ -478,12 +478,19 @@ struct block_struct
+@@ -479,12 +479,19 @@ struct block_struct
    int line_number{};
    int saved_line_number{};  // value of sequence_number when a remap was encountered
    int motion_to_be{};
@@ -390,7 +389,7 @@ index ff5f379..d642007 100644
    bool b_flag{};
    bool c_flag{};
 diff --git a/src/emc/rs274ngc/interp_read.cc b/src/emc/rs274ngc/interp_read.cc
-index 6e58d16..22eb924 100644
+index b397cc0..2480073 100644
 --- a/src/emc/rs274ngc/interp_read.cc
 +++ b/src/emc/rs274ngc/interp_read.cc
 @@ -20,6 +20,7 @@
@@ -414,7 +413,7 @@ index 6e58d16..22eb924 100644
    block->dollar_flag = true;
    return INTERP_OK;
  }
-@@ -871,7 +876,9 @@ int Interp::read_items(block_pointer block,      //!< pointer to a block being f
+@@ -876,7 +881,9 @@ int Interp::read_items(block_pointer block,      //!< pointer to a block being f
    }
  
    for (; counter < length;) {
@@ -437,20 +436,6 @@ index cf192c1..6cfdd5c 100644
              m_code == 60 ||
              m_code == 61 ||
              m_code == 62 ||
-diff --git a/src/emc/rs274ngc/recordingcanon.cc b/src/emc/rs274ngc/recordingcanon.cc
-index f64dbd7..61735a9 100644
---- a/src/emc/rs274ngc/recordingcanon.cc
-+++ b/src/emc/rs274ngc/recordingcanon.cc
-@@ -429,6 +429,9 @@ void STOP_SPINDLE_TURNING(int spindle, int)
-         recording::active().spindle_direction[spindle] = CANON_STOPPED;
- }
- 
-+void SET_JOINT_AVAILABILITY(int /*joint*/, int /*available*/) {}
-+void SET_SPINDLE_AVAILABILITY(int /*spindle*/, int /*available*/) {}
-+
- void USE_TOOL_LENGTH_OFFSET(const EmcPose &offset)
- {
-     tool_offset = offset;
 diff --git a/src/emc/sai/saicanon.cc b/src/emc/sai/saicanon.cc
 index faeae9f..a45ebab 100644
 --- a/src/emc/sai/saicanon.cc

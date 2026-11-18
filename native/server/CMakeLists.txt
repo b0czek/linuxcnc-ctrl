@@ -112,7 +112,7 @@ if(LINUXCNC_GRPC_ENABLE_NML AND
             src/gcode/parser.cc
             src/gcode/canon_preview.cc
             src/gcode/python_modules.cc
-            "${LINUXCNC_ROOT}/src/emc/rs274ngc/recordingcanon.cc")
+            src/gcode/recording_canon.cc)
         target_compile_definitions(linuxcnc-grpc-domain PUBLIC LINUXCNC_GRPC_HAS_RS274=1)
         set(LINUXCNC_GRPC_HAS_RS274 TRUE)
         target_compile_definitions(linuxcnc-grpc-domain PRIVATE ULAPI)
