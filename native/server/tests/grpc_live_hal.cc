@@ -73,6 +73,7 @@ void require_narrow(linuxcnc::v1::HalService::Stub* hal,
 
 void run_halcmd(const char* halcmd, const std::string& arguments) {
   const auto command = std::string(halcmd) + " " + arguments;
+  // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing here changes the environment
   live_require(std::system(command.c_str()) == 0, command.c_str());
 }
 
@@ -163,6 +164,7 @@ void verify_narrow_write_paths(linuxcnc::v1::HalService::Stub* hal) {
   live_require(write_item(hal, kSignalKind, signal, 0) == grpc::StatusCode::OK,
                "the unlinked signal is reset");
 
+  // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing here changes the environment
   const char* halcmd = std::getenv("LINUXCNC_GRPC_LIVE_HALCMD");
   if (halcmd) {
     run_halcmd(halcmd, "linkps grpc-live-narrow.linked " + signal);
