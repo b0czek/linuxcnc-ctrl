@@ -300,7 +300,9 @@ characters before its newline. Loading, database replies, formatting, saving
 and database notification refuse a longer line with an error instead of
 cutting it; a table loaded with a refused line is not saved over until it is
 reloaded without it, and an edit whose save or notification fails is rolled
-back in memory. On a random toolchanger the table is saved after every M6 and
+back in memory. A `G10` whose save fails reports "tool N: offsets not stored,
+tool table unchanged" and fails the command, so the program or MDI command
+aborts. On a random toolchanger the table is saved after every M6 and
 M61; if that save fails, the change is reported as an error ("tool table ...
 not saved after the tool change") and the program aborts. The tools stay
 swapped in memory, as they are on the machine, and the new tool's offset is
@@ -425,6 +427,18 @@ a random changer a reload is also refused unless pocket 0 holds the tool in the
 spindle, so a file left stale by a failed save cannot replace the real layout. CRLF line endings, whitespace-only lines and comment-only lines count as
 blank. `tests/tool-table-load` covers this.
 
+A save replaces the table atomically and follows symbolic links, so a linked
+table stays linked. LinuxCNC remembers the bytes it last loaded from or saved to
+the configured file and refuses a save if the file now holds anything else,
+including a file created after startup found none; reloading accepts the change.
+A deleted file is created again. Only loading the configured file lifts a save
+block. On a random changer, the first table to load after a failed startup sets
+the spindle tool and `iocontrol.0.tool-number` from pocket 0.
+
+A refused tool update or delete tells the operator why and fails only that
+command: spindle, coolant and an open program are unaffected.
+`tests/tool-crud-refusal` covers this.
+
 Tool-table reload now preserves the live table when opening, parsing, or
 validation fails. Read-only mmap clients detect inode replacement after a
 LinuxCNC restart and remap under the same process lock used by all mmap
@@ -531,7 +545,10 @@ unavailable controlled joints and continues with its ordinary sequence.
 Controlled joints are homed individually only by acquisition and reject user
 HOME and UNHOME commands, so AVAILABLE implies a valid homed state.
 Acquisition homing uses the home cycle LinuxCNC provides for `G28.2`: task
-queues the joint home, waits in its homing state with the usual start timeout,
+queues the joint home, waits in its homing state with the usual start timeout
+(motion publishes the command number of the last home it started, so a home
+that begins and ends between two task status reads counts as run; this also
+applies to `G28.2` and is covered by `tests/interp/g28.2/instant-home`),
 and restores the task mode afterwards. Abort, E-stop and Machine Off cancel it
 as they cancel a `G28.2`, and a resumable Stop (patch 0004) during it is
 accepted and stays `STOPPING` until homing ends. Stop or Pause before the
@@ -702,9 +719,12 @@ left an NGC remap's MDI command hanging. Commands queued behind it also
 survived and ran after the machine was re-enabled; they are now dropped.
 
 `emcTaskAbort()` now runs `mdi_execute_abort()` after its interpreter reset,
-and `EMC_TASK_PLAN_INIT` runs it before re-initialising the interpreter when an
-interrupted call exists; an ordinary MDI move keeps running and keeps its
-interpreter state. `tests/remap/mdi-remap-abort` interrupts a waiting NGC and
+and `EMC_TASK_PLAN_INIT` always drops MDI commands the interpreter has not read,
+including one already moved towards execution, because they were written for
+the modal state being discarded. It runs `mdi_execute_abort()` only when a call
+is interrupted. A command already read keeps running and stays reported until it
+ends, including one that returned `INTERP_EXECUTE_FINISH` outside a call
+(`G38.n`, `M66`, `M6`, `G28.2`). `tests/remap/mdi-remap-abort` interrupts a waiting NGC and
 Python remap with each of these, checks that an MDI command queued behind it
 never runs and that MDI still works, and resets the interpreter during a plain
 MDI move. The bug is present in plain
