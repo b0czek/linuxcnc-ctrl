@@ -477,7 +477,7 @@ index e814320..029af60 100644
          if (!motion_enable_flag)              { continue; }
          if (!hal_get_bool(axis_data->ajog_enable)) { continue; }
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index ead94cb..3734dae 100644
+index ff48890..e24a9d2 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
 @@ -80,6 +80,16 @@ extern int motion_num_spindles;
@@ -712,7 +712,7 @@ index ead94cb..3734dae 100644
  		tpSetSpindleSync(&emcmotInternal->coord_tp, emcmotCommand->spindle, emcmotCommand->spindlesync, emcmotCommand->flags);
  		break;
  
-@@ -1501,6 +1637,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1508,6 +1644,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	       controller cycle (it *will* be honored) */
  	    rtapi_print_msg(RTAPI_MSG_DBG, "DISABLE");
  	    emcmotInternal->enabling = 0;
@@ -720,7 +720,7 @@ index ead94cb..3734dae 100644
  	    if (emcmotConfig->kinType == KINEMATICS_INVERSE_ONLY) {
  		emcmotInternal->teleoperating = 0;
  		emcmotInternal->coordinating = 0;
-@@ -1513,10 +1650,16 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1520,10 +1657,16 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    /* set the emcmotInternal->enabling flag to defer enable until
  	       controller cycle */
  	    rtapi_print_msg(RTAPI_MSG_DBG, "ENABLE");
@@ -738,7 +738,7 @@ index ead94cb..3734dae 100644
  		if (emcmotConfig->kinType == KINEMATICS_INVERSE_ONLY) {
  		    emcmotInternal->teleoperating = 0;
  		    emcmotInternal->coordinating = 0;
-@@ -1533,6 +1676,13 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1540,6 +1683,13 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    if (joint == 0) {
  		break;
  	    }
@@ -752,7 +752,7 @@ index ead94cb..3734dae 100644
  	    SET_JOINT_ACTIVE_FLAG(joint, 1);
  	    break;
  
-@@ -1545,6 +1695,13 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1552,6 +1702,13 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    if (joint == 0) {
  		break;
  	    }
@@ -766,7 +766,7 @@ index ead94cb..3734dae 100644
  	    SET_JOINT_ACTIVE_FLAG(joint, 0);
  	    break;
  
-@@ -1556,6 +1713,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1563,6 +1720,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    rtapi_print_msg(RTAPI_MSG_DBG, "JOINT_HOME");
  	    rtapi_print_msg(RTAPI_MSG_DBG, " %d", joint_num);
  
@@ -781,7 +781,7 @@ index ead94cb..3734dae 100644
  	    /* Normally homing requires free (joint) mode. The queued G28.2 path
  	     * (emctaskmain EMC_TASK_EXEC::WAITING_FOR_HOMING) dips motion into
  	     * FREE before issuing this command; while that transition is still
-@@ -1588,6 +1753,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1595,6 +1760,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    if (!GET_MOTION_ENABLE_FLAG()) {
  		break;
  	    }
@@ -794,7 +794,7 @@ index ead94cb..3734dae 100644
  
  	    // Negative joint_num specifies homeall
  	    do_home_joint(joint_num);
-@@ -1604,6 +1775,26 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1611,6 +1782,26 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
                  return;
              }
  
@@ -821,7 +821,7 @@ index ead94cb..3734dae 100644
              // For configs that require homing and have joints configured as VOLATILE_HOME
              // 'get_allhomed()' will change from TRUE to FALSE. If that happens we need to
              // switch motion mode to 'free'.
-@@ -1622,6 +1813,160 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1629,6 +1820,160 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  
              break;
  
@@ -982,7 +982,7 @@ index ead94cb..3734dae 100644
  	case EMCMOT_CLEAR_PROBE_FLAGS:
  	    rtapi_print_msg(RTAPI_MSG_DBG, "CLEAR_PROBE_FLAGS");
  	    emcmotStatus->probing = 0;
-@@ -1818,6 +2163,11 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1825,6 +2170,11 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -994,7 +994,7 @@ index ead94cb..3734dae 100644
          for (n = s0; n<=s1; n++){
  
  	        if (hal_get_bool(emcmot_hal_data->spindle[n].spindle_orient))
-@@ -1923,8 +2273,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1930,8 +2280,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -1008,7 +1008,7 @@ index ead94cb..3734dae 100644
  	        if (n > emcmotConfig->numSpindles){
                  rtapi_print_msg(RTAPI_MSG_ERR, "spindle number <%d> too high in M19",n);
                  break;
-@@ -1974,6 +2328,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1981,6 +2335,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -1019,7 +1019,7 @@ index ead94cb..3734dae 100644
          for (n = s0; n<=s1; n++){
  	        if (emcmotStatus->spindle_status[n].speed > 0) {
  		    emcmotStatus->spindle_status[n].speed += emcmotStatus->spindle_status[n].increment;
-@@ -1998,6 +2356,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -2005,6 +2363,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -1030,7 +1030,7 @@ index ead94cb..3734dae 100644
          for (n = s0; n<=s1; n++){
              if (emcmotStatus->spindle_status[n].speed > emcmotStatus->spindle_status[n].increment) {
                  emcmotStatus->spindle_status[n].speed -= emcmotStatus->spindle_status[n].increment;
-@@ -2044,8 +2406,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -2051,8 +2413,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -2239,7 +2239,7 @@ index 90cc136..5a1e60e 100644
  
      // clear out the pending command
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index f3bcb8e..c465732 100644
+index 7a81049..79a8355 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -172,6 +172,61 @@ volatile int done;
@@ -2525,7 +2525,7 @@ index f3bcb8e..c465732 100644
      case EMC_SPINDLE_BRAKE_RELEASE_TYPE:
      spindle_brake_release_msg = reinterpret_cast<EMC_SPINDLE_BRAKE_RELEASE *>(cmd);
  	retval = emcSpindleBrakeRelease(spindle_brake_release_msg->spindle);
-@@ -3015,7 +3191,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -3016,7 +3192,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	break;
  
      case EMC_TASK_PLAN_SYNCH_TYPE:
@@ -2540,7 +2540,7 @@ index f3bcb8e..c465732 100644
  	if (retval > INTERP_MIN_ERROR) {
  	    retval = -1;
  	}
-@@ -3130,6 +3313,11 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3131,6 +3314,11 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
  	return EMC_TASK_EXEC::DONE;
  	break;
  
@@ -2552,7 +2552,7 @@ index f3bcb8e..c465732 100644
      case EMC_TASK_PLAN_RUN_TYPE:
      case EMC_TASK_PLAN_PAUSE_TYPE:
      case EMC_TASK_PLAN_END_TYPE:
-@@ -3212,6 +3400,12 @@ static int emcTaskExecute(void)
+@@ -3213,6 +3401,12 @@ static int emcTaskExecute(void)
      int status;			// status of child from EMC_SYSTEM_CMD
      pid_t pid;			// pid returned from waitpid()
  
@@ -2565,7 +2565,7 @@ index f3bcb8e..c465732 100644
      // first check for an abandoned system command and abort it
      if (emcSystemCmdPid != 0 &&
  	emcStatus->task.execState !=
-@@ -3330,11 +3524,59 @@ static int emcTaskExecute(void)
+@@ -3331,11 +3525,59 @@ static int emcTaskExecute(void)
  	break;
  
      case EMC_TASK_EXEC::WAITING_FOR_MOTION:
@@ -2625,7 +2625,7 @@ index f3bcb8e..c465732 100644
  	    emcStatus->task.execState = EMC_TASK_EXEC::DONE;
  	    emcTaskEager = 1;
  	}
-@@ -3479,11 +3721,8 @@ static int emcTaskExecute(void)
+@@ -3480,11 +3722,8 @@ static int emcTaskExecute(void)
  		emcTaskEager = 1;
  		homingWaiting = false;
  		// Nothing physically moved, so it's safe to restore the
@@ -2639,7 +2639,7 @@ index f3bcb8e..c465732 100644
  		break;
  	    }
  	    // It ran and has now stopped; did it reach the expected end state?
-@@ -3549,7 +3788,9 @@ static int emcTaskExecute(void)
+@@ -3550,7 +3789,9 @@ static int emcTaskExecute(void)
  				    "coordinated motion until every joint is homed"));
  		emcStatus->task.execState = EMC_TASK_EXEC::ERROR;
  	    } else if (success) {

@@ -1606,7 +1606,7 @@ index 7620a30..55fb417 100644
      // clear out the interpreter state
      emcStatus->task.interpState = EMC_TASK_INTERP::IDLE;
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 0e54734..4f046a8 100644
+index 15aac38..6025a96 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -613,6 +613,9 @@ interpret_again:
@@ -1679,7 +1679,7 @@ index 0e54734..4f046a8 100644
  	break;
  
  	// task commands
-@@ -3129,6 +3153,7 @@ static int emcTaskExecute(void)
+@@ -3130,6 +3154,7 @@ static int emcTaskExecute(void)
  	// clear out pending command
  	emcTaskCommand = NULL;
  	interp_list.clear();
@@ -1687,7 +1687,7 @@ index 0e54734..4f046a8 100644
  	emcAbortCleanup(EMC_ABORT::TASK_EXEC_ERROR);
          emcStatus->task.currentLine = 0;
  
-@@ -3695,7 +3720,8 @@ static int emctask_startup()
+@@ -3696,7 +3721,8 @@ static int emctask_startup()
      }
      // initialize the subsystems
  
@@ -1697,7 +1697,7 @@ index 0e54734..4f046a8 100644
      if (emcIoInit() != 0) {
          rcs_print_error("can't initialize IO\n");
          return -1;
-@@ -4145,6 +4171,7 @@ int main(int argc, char *argv[])
+@@ -4146,6 +4172,7 @@ int main(int argc, char *argv[])
  	    // clear out the pending command
  	    emcTaskCommand = NULL;
  	    interp_list.clear();
