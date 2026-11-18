@@ -19,6 +19,15 @@ QtDragon, `tooledit` and similar) are out of scope: we do not add features to
 them, fix them, test them, or keep patches compatible with them. `halui` is a
 headless HAL interface and stays in scope.
 
+The older remote interfaces (`linuxcncrsh`, `halrmt`, `schedrmt`) and tool
+database programs (`[EMCIO]DB_PROGRAM`) are out of scope in the same way:
+clients use this repository's gRPC APIs, and tool data lives in the file-backed
+tool table.
+
+Out of scope means we do not care about these features. It does not mean we
+remove them: patches neither fix them nor strip them out, and code a patch
+already touches stays as it is unless other work requires a change.
+
 ## Repository layout
 
 - `proto/`: canonical versioned protobuf wire contract and its existing license.

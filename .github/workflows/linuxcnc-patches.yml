@@ -110,10 +110,12 @@ jobs:
           shard_tests=()
           resumable_index=0
           while IFS= read -r -d '' test_path; do
-            # LinuxCNC's GUIs are out of scope for this repository.
+            # LinuxCNC features that are out of scope for this repository.
             case "${test_path}" in
-              tests/build/ui/* | tests/glcanon/* | tests/pyvcp/* | \
-                tests/tooledit/* | tests/ui-smoke/*)
+              tests/build/ui/* | tests/glcanon/* | tests/halrmt/* | \
+                tests/linuxcncrsh/* | tests/linuxcncrsh-tcp/* | \
+                tests/pyvcp/* | tests/tooldb/* | tests/tooledit/* | \
+                tests/ui-smoke/*)
                 continue
                 ;;
             esac

@@ -2,9 +2,10 @@
 
 ## Project scope
 
-- LinuxCNC's own GUIs and GUI tools are out of scope (see `README.md`). Do not
-  report review findings against them, fix them, test them, or extend patches
-  for them. `halui` is headless and stays in scope.
+- LinuxCNC's own GUIs and GUI tools, its older remote interfaces and tool
+  database programs are out of scope (see `README.md`). Do not
+  report review findings against them, fix them, test them, extend patches for
+  them, or write patches to remove them. `halui` is headless and stays in scope.
 
 ## Native formatting and linting
 
