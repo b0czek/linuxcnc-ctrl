@@ -485,11 +485,13 @@ class TrackedCommands {
                       CommandPriority priority = CommandPriority::Normal) {
     return submitted(coordinator.submit_with_context(
         [this, serial, task_queued](CommandContext& context) {
-          log.add(serial);
           detail::track_written_command(
               &tracker, context, serial, task_queued, timeout,
               [this] { ++completed_callbacks; },
               [this] { ++failed_callbacks; });
+          // Logged once tracked, so a status the test publishes after seeing
+          // this entry counts as newer than the write.
+          log.add(serial);
         },
         {}, priority));
   }
