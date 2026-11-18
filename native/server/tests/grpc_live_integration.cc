@@ -384,6 +384,7 @@ int main(int argc, char** argv) {
 
   verify_command_error_attribution(machine.get());
   verify_abort_handler_errors(machine.get());
+  verify_task_queued_command_ordering(machine.get());
 
   expect_command_error(machine.get(), ExecuteCommandRequest{},
                        grpc::StatusCode::INVALID_ARGUMENT);

@@ -19,6 +19,19 @@ namespace linuxcnc::server {
 // LinuxCNC's EMC_TASK_PLAN_OPEN::file is a LINELEN-sized C string.
 inline constexpr std::size_t kNmlProgramPathCapacity = 255;
 
+// Longest time later normal commands wait for a task-queued command when no
+// command completion timeout is configured. A configured timeout replaces it.
+inline constexpr std::chrono::seconds kNmlTaskQueuedHoldLimit{30};
+
+namespace detail {
+// LinuxCNC's RCS_STATUS and EMC_TASK_STATE values; nml_adapter.cc checks them
+// against the LinuxCNC headers.
+inline constexpr std::int32_t kNmlRcsStatusDone = 1;
+inline constexpr std::int32_t kNmlRcsStatusError = 3;
+inline constexpr std::int32_t kNmlTaskStateEstop = 1;
+inline constexpr std::int32_t kNmlTaskStateOff = 3;
+}  // namespace detail
+
 enum class NmlCommandKind {
   SetTaskMode,
   SetTaskState,
@@ -257,6 +270,102 @@ struct NmlCommand {
   std::function<void()> on_completed;
   std::function<void()> on_failed;
 };
+
+namespace detail {
+struct NmlCommandRouting {
+  CommandPriority priority = CommandPriority::Normal;
+  CommandHoldPolicy hold_policy = CommandHoldPolicy::Wait;
+  // LinuxCNC reports this command's result some cycles after reading it, and
+  // only until it reads another command.
+  bool task_queued = false;
+};
+
+// Later commands wait for a task-queued command because task reports one
+// result, for the command it read last. Safety commands go first regardless.
+// Resume, Step and SpindleOff keep their queue position but pass a hold: task
+// admits them during an availability operation, and a queued command cannot
+// finish while the program is paused until Resume or Step is delivered.
+inline NmlCommandRouting nml_command_routing(const NmlCommand& command) {
+  NmlCommandRouting routing;
+  switch (command.kind) {
+    case NmlCommandKind::StopProgram:
+    case NmlCommandKind::Pause:
+    case NmlCommandKind::AbortTask:
+      routing.priority = CommandPriority::Safety;
+      break;
+    case NmlCommandKind::SetTaskState:
+      if (command.integer == kNmlTaskStateEstop ||
+          command.integer == kNmlTaskStateOff)
+        routing.priority = CommandPriority::Safety;
+      break;
+    case NmlCommandKind::Resume:
+    case NmlCommandKind::Step:
+    case NmlCommandKind::SpindleOff:
+      routing.hold_policy = CommandHoldPolicy::Bypass;
+      break;
+    case NmlCommandKind::LoadToolTable:
+    case NmlCommandKind::SetTool:
+    case NmlCommandKind::DeleteTool:
+    case NmlCommandKind::SetJointAvailability:
+    case NmlCommandKind::SetSpindleAvailability:
+      routing.task_queued = true;
+      break;
+    default:
+      break;
+  }
+  return routing;
+}
+
+// Finishes a command already written to LinuxCNC: defers its ticket to the
+// tracker and, for a task-queued command, holds later normal commands until
+// the ticket resolves. Must run inside the command's coordinator action.
+inline void track_written_command(NmlCommandCompletionTracker* tracker,
+                                  CommandContext& context, int serial,
+                                  bool task_queued,
+                                  std::chrono::milliseconds completion_timeout,
+                                  std::function<void()> on_completed,
+                                  std::function<void()> on_failed) {
+  context.mark_accepted(static_cast<std::uint32_t>(serial));
+  context.defer_completion();
+  std::function<void()> release_hold = [] {};
+  if (task_queued) {
+    release_hold = context.hold_normal_commands(
+        completion_timeout > std::chrono::milliseconds::zero()
+            ? completion_timeout
+            : std::chrono::milliseconds(kNmlTaskQueuedHoldLimit));
+  }
+  tracker->track(
+      serial,
+      task_queued ? NmlCompletionRule::ExactEcho
+                  : NmlCompletionRule::EchoAdvance,
+      [completed = context.mark_completed, failed = context.mark_failed,
+       on_completed = std::move(on_completed), release_hold]() mutable {
+        try {
+          if (on_completed) on_completed();
+          completed();
+        } catch (const std::exception& error) {
+          failed(error.what());
+        } catch (...) {
+          failed("command completion callback failed");
+        }
+        release_hold();
+      },
+      [failed = context.mark_failed, on_failed = std::move(on_failed),
+       release_hold](std::string error) mutable {
+        try {
+          if (on_failed) on_failed();
+        } catch (const std::exception& rollback_error) {
+          error += "; rollback failed: ";
+          error += rollback_error.what();
+        } catch (...) {
+          error += "; rollback failed";
+        }
+        failed(std::move(error));
+        release_hold();
+      });
+}
+
+}  // namespace detail
 
 struct NmlStatusSnapshot {
   std::int32_t echo_serial_number = 0;

@@ -461,6 +461,168 @@ void verify_abort_handler_errors(linuxcnc::v1::MachineService::Stub* machine) {
   (void)errors->Finish();
 }
 
+void live_require(bool condition, const char* description) {
+  if (condition) return;
+  std::cerr << "live check failed: " << description << "\n";
+  std::abort();
+}
+
+namespace {
+
+bool tool_exists(linuxcnc::v1::MachineService::Stub* machine, int tool_no) {
+  const auto status = get_status_with_retry(machine);
+  for (const auto& tool : status.status().tool_table()) {
+    if (tool.tool_no() == tool_no) return true;
+  }
+  return false;
+}
+
+void create_live_tool(linuxcnc::v1::MachineService::Stub* machine, int tool_no,
+                      int pocket_no) {
+  ExecuteCommandRequest create;
+  auto* tool = create.mutable_set_tool()->mutable_tool();
+  tool->set_tool_no(tool_no);
+  tool->set_pocket_no(pocket_no);
+  (void)execute_completed(machine, std::move(create));
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!tool_exists(machine, tool_no) &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  live_require(tool_exists(machine, tool_no), "the live test tool is created");
+}
+
+// Issues a tool delete that LinuxCNC queues behind a running dwell, so that it
+// is still unresolved when the caller sends its next command.
+class QueuedToolDelete {
+ public:
+  QueuedToolDelete(linuxcnc::v1::MachineService::Stub* machine, int tool_no) {
+    ExecuteCommandRequest dwell;
+    dwell.mutable_mdi()->set_command("G4 P1");
+    (void)execute_accepted(machine, std::move(dwell));
+    worker_ = std::thread([this, machine, tool_no] {
+      ExecuteCommandRequest request;
+      request.set_wait_policy(linuxcnc::v1::WAIT_POLICY_COMPLETED);
+      request.mutable_delete_tool()->set_tool_no(tool_no);
+      grpc::ClientContext context;
+      context.set_deadline(std::chrono::system_clock::now() +
+                           std::chrono::seconds(10));
+      status_ = machine->ExecuteCommand(&context, request, &response_);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  }
+
+  const ExecuteCommandResponse& wait() {
+    worker_.join();
+    live_require(status_.ok(), "the queued tool delete RPC finishes");
+    return response_;
+  }
+
+ private:
+  std::thread worker_;
+  grpc::Status status_;
+  ExecuteCommandResponse response_;
+};
+
+}  // namespace
+
+void verify_task_queued_command_ordering(
+    linuxcnc::v1::MachineService::Stub* machine) {
+  constexpr int kMissingTool = 9999;
+  constexpr int kLiveTool = 78;
+  constexpr int kLivePocket = 44;
+
+  // The next command waits for the queued command, so a refusal is reported
+  // by the command that was refused.
+  {
+    QueuedToolDelete refused(machine, kMissingTool);
+    ExecuteCommandRequest next;
+    next.mutable_set_debug_level()->set_level(0);
+    const auto next_response = execute_completed(machine, std::move(next));
+    live_require(next_response.status() == linuxcnc::v1::RCS_STATUS_DONE,
+                 "the command after a refused command succeeds");
+    const auto& response = refused.wait();
+    live_require(response.status() == linuxcnc::v1::RCS_STATUS_ERROR,
+                 "the refused tool delete reports its own failure");
+    live_require(response.error().message() == "LinuxCNC rejected the command",
+                 "the refusal comes from LinuxCNC's result for that command");
+  }
+
+  // Abort passes the hold. It discards the queued delete, which must not be
+  // reported as done.
+  create_live_tool(machine, kLiveTool, kLivePocket);
+  {
+    QueuedToolDelete overtaken(machine, kLiveTool);
+    ExecuteCommandRequest abort;
+    abort.mutable_abort_task();
+    const auto started = std::chrono::steady_clock::now();
+    (void)execute_accepted(machine, std::move(abort));
+    live_require(std::chrono::steady_clock::now() - started <
+                     std::chrono::milliseconds(500),
+                 "abort is not delayed by the queued command");
+    const auto& response = overtaken.wait();
+    live_require(response.status() == linuxcnc::v1::RCS_STATUS_ERROR,
+                 "a delete discarded by abort is not reported as done");
+    live_require(tool_exists(machine, kLiveTool),
+                 "the discarded delete left the tool in place");
+  }
+
+  // E-stop passes the hold in the same way.
+  {
+    QueuedToolDelete overtaken(machine, kLiveTool);
+    ExecuteCommandRequest estop;
+    estop.mutable_set_state()->set_state(linuxcnc::v1::TASK_STATE_ESTOP);
+    const auto started = std::chrono::steady_clock::now();
+    (void)execute_accepted(machine, std::move(estop));
+    live_require(std::chrono::steady_clock::now() - started <
+                     std::chrono::milliseconds(500),
+                 "E-stop is not delayed by the queued command");
+    const auto& response = overtaken.wait();
+    live_require(response.status() == linuxcnc::v1::RCS_STATUS_ERROR,
+                 "a delete discarded by E-stop is not reported as done");
+    live_require(tool_exists(machine, kLiveTool),
+                 "the delete discarded by E-stop left the tool in place");
+  }
+  for (const auto state :
+       {linuxcnc::v1::TASK_STATE_ESTOP_RESET, linuxcnc::v1::TASK_STATE_ON}) {
+    ExecuteCommandRequest request;
+    request.mutable_set_state()->set_state(state);
+    (void)execute_completed(machine, std::move(request));
+  }
+  ExecuteCommandRequest mdi_mode;
+  mdi_mode.mutable_set_task_mode()->set_mode(linuxcnc::v1::TASK_MODE_MDI);
+  (void)execute_completed(machine, std::move(mdi_mode));
+
+  // A queued command cannot finish while the program is paused, so Resume has
+  // to pass the hold. The delete stays queued in LinuxCNC and runs afterwards,
+  // but Resume replaced its result, so its outcome is reported as unknown.
+  {
+    QueuedToolDelete paused(machine, kLiveTool);
+    ExecuteCommandRequest pause;
+    pause.mutable_pause_program();
+    (void)execute_accepted(machine, std::move(pause));
+    ExecuteCommandRequest resume;
+    resume.mutable_resume_program();
+    const auto started = std::chrono::steady_clock::now();
+    (void)execute_accepted(machine, std::move(resume));
+    live_require(std::chrono::steady_clock::now() - started <
+                     std::chrono::milliseconds(500),
+                 "Resume is not delayed by the queued command");
+    const auto& response = paused.wait();
+    live_require(response.status() == linuxcnc::v1::RCS_STATUS_ERROR,
+                 "a delete overtaken by Resume is not reported as done");
+  }
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (tool_exists(machine, kLiveTool) &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  live_require(!tool_exists(machine, kLiveTool),
+               "the delete still queued in LinuxCNC runs after Resume");
+}
+
 void verify_priority_admission(linuxcnc::v1::MachineService::Stub* machine) {
   constexpr int kSubmitters = 256;
   std::atomic<int> ready{0};

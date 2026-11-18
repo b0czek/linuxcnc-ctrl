@@ -1,5 +1,6 @@
 #include "linuxcnc_grpc/command_coordinator.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace linuxcnc::server {
@@ -84,7 +85,7 @@ CommandSubmission CommandCoordinator::submit(CommandAction action,
   if (queue.size() >= capacity) return {CommandSubmitStatus::QueueFull, {}};
   const auto sequence = next_sequence_++;
   state->result.sequence = sequence;
-  queue.push_back(Item{sequence, std::move(action), {}, state});
+  queue.push_back(Item{sequence, std::move(action), {}, state, false});
   lock.unlock();
   condition_.notify_one();
   return {CommandSubmitStatus::Submitted, CommandTicket(std::move(state))};
@@ -92,12 +93,13 @@ CommandSubmission CommandCoordinator::submit(CommandAction action,
 
 CommandSubmission CommandCoordinator::submit_with_context(
     ContextCommandAction action) {
-  return submit_with_context(std::move(action), {}, CommandPriority::Normal);
+  return submit_with_context(std::move(action), {}, CommandPriority::Normal,
+                             CommandHoldPolicy::Wait);
 }
 
 CommandSubmission CommandCoordinator::submit_with_context(
     ContextCommandAction action, const std::stop_token& stop_token,
-    CommandPriority priority) {
+    CommandPriority priority, CommandHoldPolicy hold_policy) {
   if (!action) throw std::invalid_argument("command action must not be empty");
   auto state = std::make_shared<CommandTicket::State>();
   std::unique_lock lock(mutex_);
@@ -115,7 +117,8 @@ CommandSubmission CommandCoordinator::submit_with_context(
              context.stop_token = stop_token;
              action(context);
            },
-           state});
+           state,
+           hold_policy == CommandHoldPolicy::Bypass});
   lock.unlock();
   condition_.notify_one();
   return {CommandSubmitStatus::Submitted, CommandTicket(std::move(state))};
@@ -136,18 +139,54 @@ std::size_t CommandCoordinator::queued() const {
   return queue_.size() + safety_queue_.size();
 }
 
+bool CommandCoordinator::take_next(Item* item) {
+  if (hold_active_ && std::chrono::steady_clock::now() >= hold_deadline_)
+    hold_active_ = false;
+  if (!safety_queue_.empty()) {
+    *item = std::move(safety_queue_.front());
+    safety_queue_.pop_front();
+    return true;
+  }
+  auto next = queue_.begin();
+  if (hold_active_ && !stopping_) {
+    next = std::find_if(queue_.begin(), queue_.end(),
+                        [](const Item& queued) { return queued.bypass_hold; });
+  }
+  if (next == queue_.end()) return false;
+  *item = std::move(*next);
+  queue_.erase(next);
+  return true;
+}
+
+std::function<void()> CommandCoordinator::hold_normal_commands(
+    std::chrono::milliseconds limit) {
+  std::lock_guard lock(mutex_);
+  hold_active_ = true;
+  hold_deadline_ = std::chrono::steady_clock::now() + limit;
+  return [this, generation = ++hold_generation_] { release_hold(generation); };
+}
+
+void CommandCoordinator::release_hold(std::uint64_t generation) {
+  {
+    std::lock_guard lock(mutex_);
+    if (!hold_active_ || hold_generation_ != generation) return;
+    hold_active_ = false;
+  }
+  condition_.notify_all();
+}
+
 void CommandCoordinator::run() {
   while (true) {
     Item item;
     {
       std::unique_lock lock(mutex_);
-      condition_.wait(lock, [this] {
-        return stopping_ || !safety_queue_.empty() || !queue_.empty();
-      });
-      if (queue_.empty() && safety_queue_.empty() && stopping_) return;
-      auto& next = safety_queue_.empty() ? queue_ : safety_queue_;
-      item = std::move(next.front());
-      next.pop_front();
+      while (!take_next(&item)) {
+        if (stopping_) return;
+        if (hold_active_)
+          condition_.wait_until(lock, hold_deadline_);
+        else
+          condition_.wait(lock);
+      }
     }
 
     const auto mark_accepted =
@@ -167,6 +206,9 @@ void CommandCoordinator::run() {
                                [state = item.state](std::string error) {
                                  transition(state, CommandState::Failed,
                                             std::move(error));
+                               },
+                               [this](std::chrono::milliseconds limit) {
+                                 return hold_normal_commands(limit);
                                }};
         item.context_action(context);
         if (!deferred) transition(item.state, CommandState::Completed);
