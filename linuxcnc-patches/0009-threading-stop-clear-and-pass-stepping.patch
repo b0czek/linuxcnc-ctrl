@@ -44,18 +44,23 @@ that adds in-flight stepping.
  src/emc/tp/tp_types.h                         |  16 +-
  tests/interp/compile/use-rs274.cc             |   5 +
  tests/resumable-stop/README                   |  16 +
- tests/resumable-stop/checkresult              |   2 +-
  .../resumable-stop/g33-followed-by-rapid.ngc  |   7 +
  tests/resumable-stop/g76-exit-taper.ngc       |   7 +
  tests/resumable-stop/g76-handoff.ngc          |   7 +
  tests/resumable-stop/g76-step.ngc             |   4 +
+ tests/resumable-stop/g76-step/checkresult     |   2 +-
+ tests/resumable-stop/g76-step/scenarios       |   4 +
+ tests/resumable-stop/g76-stop/checkresult     |   2 +-
+ tests/resumable-stop/g76-stop/scenarios       |   3 +
  .../resumable-stop/g76-tapered-exit-taper.ngc |   7 +
  tests/resumable-stop/g76-tapered-step.ngc     |   4 +
  tests/resumable-stop/g76-tapered.ngc          |   7 +
+ tests/resumable-stop/run-scenarios.sh         |  10 +
  tests/resumable-stop/test-ui.py               | 330 +++++++++++++++++-
  tests/resumable-stop/test.ini                 |   1 +
- tests/resumable-stop/test.sh                  |  13 +
- 35 files changed, 895 insertions(+), 57 deletions(-)
+ tests/resumable-stop/threading/checkresult    |   2 +-
+ tests/resumable-stop/threading/scenarios      |   1 +
+ 40 files changed, 902 insertions(+), 59 deletions(-)
  create mode 100644 tests/resumable-stop/g33-followed-by-rapid.ngc
  create mode 100644 tests/resumable-stop/g76-exit-taper.ngc
  create mode 100644 tests/resumable-stop/g76-handoff.ngc
@@ -1371,10 +1376,10 @@ index e30cc2f..6afd929 100644
  void CANON_ERROR(const char *fmt, ...) {}
  void UPDATE_TAG(const StateTag& tag) {}
 diff --git a/tests/resumable-stop/README b/tests/resumable-stop/README
-index 29da7fe..8750b87 100644
+index 137bc85..a322d37 100644
 --- a/tests/resumable-stop/README
 +++ b/tests/resumable-stop/README
-@@ -49,3 +49,19 @@ barrier, and queued-g33 drops and restores at-speed after Resume as a
+@@ -70,3 +70,19 @@ barrier, and queued-g33 drops and restores at-speed after Resume as a
  spindle would while spinning up.
  The spindle-state scenario checks that an S-word for a spindle stopped by M5
  leaves it stopped after a Stop and Resume of the other spindle.
@@ -1394,16 +1399,6 @@ index 29da7fe..8750b87 100644
 +also prove that a marked G76 retract endpoint is not trimmed by a following
 +rapid. The handoff stress case uses a slow synchronized feed and issues Stop at
 +least 20 task cycles before the cut endpoint.
-diff --git a/tests/resumable-stop/checkresult b/tests/resumable-stop/checkresult
-index 5586b64..631b3a4 100755
---- a/tests/resumable-stop/checkresult
-+++ b/tests/resumable-stop/checkresult
-@@ -1,4 +1,4 @@
- #!/bin/sh
- set -e
--test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 31
-+test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 39
- grep -q '^resumable stop scenarios complete$' "$1"
 diff --git a/tests/resumable-stop/g33-followed-by-rapid.ngc b/tests/resumable-stop/g33-followed-by-rapid.ngc
 new file mode 100644
 index 0000000..a12bcb3
@@ -1453,6 +1448,42 @@ index 0000000..c8ee28f
 +G1 X20 F600
 +M5
 +M2
+diff --git a/tests/resumable-stop/g76-step/checkresult b/tests/resumable-stop/g76-step/checkresult
+index 55a8859..92d147c 100755
+--- a/tests/resumable-stop/g76-step/checkresult
++++ b/tests/resumable-stop/g76-step/checkresult
+@@ -1,2 +1,2 @@
+ #!/bin/sh
+-exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 1
++exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 5
+diff --git a/tests/resumable-stop/g76-step/scenarios b/tests/resumable-stop/g76-step/scenarios
+index f0a4053..576921d 100644
+--- a/tests/resumable-stop/g76-step/scenarios
++++ b/tests/resumable-stop/g76-step/scenarios
+@@ -1 +1,5 @@
++g76-single-step
++g76-tapered-single-step
++g76-exit-taper
++g76-tapered-exit-taper
+ trapezoidal:fperrev
+diff --git a/tests/resumable-stop/g76-stop/checkresult b/tests/resumable-stop/g76-stop/checkresult
+index 30bd373..92d147c 100755
+--- a/tests/resumable-stop/g76-stop/checkresult
++++ b/tests/resumable-stop/g76-stop/checkresult
+@@ -1,2 +1,2 @@
+ #!/bin/sh
+-exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 2
++exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 5
+diff --git a/tests/resumable-stop/g76-stop/scenarios b/tests/resumable-stop/g76-stop/scenarios
+index bea05471..e39cc37 100644
+--- a/tests/resumable-stop/g76-stop/scenarios
++++ b/tests/resumable-stop/g76-stop/scenarios
+@@ -1,2 +1,5 @@
++g76-handoff-stress
+ g76
++g76-tapered
++g76-waiting-index
+ fperrev
 diff --git a/tests/resumable-stop/g76-tapered-exit-taper.ngc b/tests/resumable-stop/g76-tapered-exit-taper.ngc
 new file mode 100644
 index 0000000..488d2a9
@@ -1489,6 +1520,27 @@ index 0000000..b0eb997
 +G1 X20 F600
 +M5
 +M2
+diff --git a/tests/resumable-stop/run-scenarios.sh b/tests/resumable-stop/run-scenarios.sh
+index c756dd3..f572282 100755
+--- a/tests/resumable-stop/run-scenarios.sh
++++ b/tests/resumable-stop/run-scenarios.sh
+@@ -16,6 +16,16 @@ set -o pipefail
+ 
+ shared=$(cd "$(dirname "$0")" && pwd)
+ 
++if nm -D -u "$EMC2_HOME/rtlib/motmod.so" | grep -q '[[:space:]]tpStop$'; then
++    echo "motmod unexpectedly requires the nonstandard tpStop symbol" >&2
++    exit 1
++fi
++
++if nm -D -u "$EMC2_HOME/rtlib/motmod.so" | grep -q '[[:space:]]tpStep$'; then
++    echo "motmod unexpectedly requires the nonstandard tpStep symbol" >&2
++    exit 1
++fi
++
+ [ $# -eq 1 ] && [ -f "$1" ] || { echo "usage: run-scenarios.sh SCENARIO-FILE" >&2; exit 1; }
+ mapfile -t items < <(grep -v '^[[:space:]]*\(#\|$\)' "$1")
+ [ ${#items[@]} -gt 0 ] || { echo "run-scenarios.sh: no scenarios in $1" >&2; exit 1; }
 diff --git a/tests/resumable-stop/test-ui.py b/tests/resumable-stop/test-ui.py
 index 0b39992..d29f03f 100755
 --- a/tests/resumable-stop/test-ui.py
@@ -1885,43 +1937,21 @@ index a422788..96b5a38 100644
  DEFAULT_LINEAR_VELOCITY = 10
  MAX_LINEAR_VELOCITY = 50
  MAX_LINEAR_JERK = 5000
-diff --git a/tests/resumable-stop/test.sh b/tests/resumable-stop/test.sh
-index c70a720..4b7d7c2 100755
---- a/tests/resumable-stop/test.sh
-+++ b/tests/resumable-stop/test.sh
-@@ -7,6 +7,11 @@ if nm -D -u "$EMC2_HOME/rtlib/motmod.so" | grep -q '[[:space:]]tpStop$'; then
-     exit 1
- fi
- 
-+if nm -D -u "$EMC2_HOME/rtlib/motmod.so" | grep -q '[[:space:]]tpStep$'; then
-+    echo "motmod unexpectedly requires the nonstandard tpStep symbol" >&2
-+    exit 1
-+fi
-+
- scenarios=(
-     idle-rejected
-     ordinary
-@@ -17,8 +22,11 @@ scenarios=(
-     abort-empty
-     queued-g33
-     g33
-+    g33-no-following-rapid
-     fperrev
-     g76
-+    g76-waiting-index
-+    g76-tapered
-     rigid-tap
-     orientation
-     dwell
-@@ -35,6 +43,11 @@ scenarios=(
-     step-resume-stopping
-     g95-between-g33
-     spindle-state
-+    g76-single-step
-+    g76-tapered-single-step
-+    g76-exit-taper
-+    g76-tapered-exit-taper
-+    g76-handoff-stress
- )
- 
- # test.ini selects the jerk-limited planner. Repeat the scenarios whose
+diff --git a/tests/resumable-stop/threading/checkresult b/tests/resumable-stop/threading/checkresult
+index e619f41..0201d4f 100755
+--- a/tests/resumable-stop/threading/checkresult
++++ b/tests/resumable-stop/threading/checkresult
+@@ -1,2 +1,2 @@
+ #!/bin/sh
+-exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 8
++exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 9
+diff --git a/tests/resumable-stop/threading/scenarios b/tests/resumable-stop/threading/scenarios
+index 9fdbe0c..0f41046 100644
+--- a/tests/resumable-stop/threading/scenarios
++++ b/tests/resumable-stop/threading/scenarios
+@@ -5,4 +5,5 @@ g33-chain
+ trapezoidal:g33-chain
+ step-resume-stopping
+ g95-between-g33
++g33-no-following-rapid
+ command-after-sync

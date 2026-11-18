@@ -39,7 +39,7 @@ homing ends as it does during G28.2.
  tests/availability-mcodes/no-force.ini.in     |   6 +
  tests/availability-mcodes/ordered.ngc         |   6 +
  tests/availability-mcodes/test-ui.py          | 205 ++++++++++++++++++
- tests/availability-mcodes/test.ini            |   1 +
+ tests/availability-mcodes/test.ini.in         |   3 +
  tests/availability-mcodes/test.sh             |   5 +
  tests/availability-mcodes/timeout.ngc         |   4 +
  tests/availability-mcodes/tool.tbl            |   1 +
@@ -74,7 +74,7 @@ homing ends as it does during G28.2.
  tests/interp/availability-mcodes/test.sh      |  80 +++++++
  .../availability-mcodes/valid-joint.ngc       |   3 +
  .../availability-mcodes/valid-spindle.ngc     |   3 +
- 65 files changed, 703 insertions(+), 7 deletions(-)
+ 65 files changed, 705 insertions(+), 7 deletions(-)
  create mode 100644 tests/availability-mcodes-regressions/.gitignore
  create mode 100644 tests/availability-mcodes-regressions/README
  create mode 100755 tests/availability-mcodes-regressions/checkresult
@@ -90,7 +90,7 @@ homing ends as it does during G28.2.
  create mode 100644 tests/availability-mcodes/no-force.ini.in
  create mode 100644 tests/availability-mcodes/ordered.ngc
  create mode 100755 tests/availability-mcodes/test-ui.py
- create mode 120000 tests/availability-mcodes/test.ini
+ create mode 100644 tests/availability-mcodes/test.ini.in
  create mode 100755 tests/availability-mcodes/test.sh
  create mode 100644 tests/availability-mcodes/timeout.ngc
  create mode 120000 tests/availability-mcodes/tool.tbl
@@ -938,14 +938,15 @@ index 0000000..0f3d8df
 +wait(lambda: s.spindle[0]['availability_fault'] != 0, 'timeout propagation')
 +assert abs(s.joint_position[0]-6)<.001, 'continued after failed acquisition'
 +print('availability M-code scenarios ok')
-diff --git a/tests/availability-mcodes/test.ini b/tests/availability-mcodes/test.ini
-new file mode 120000
-index 0000000..800b1b7
+diff --git a/tests/availability-mcodes/test.ini.in b/tests/availability-mcodes/test.ini.in
+new file mode 100644
+index 0000000..fe357c0
 --- /dev/null
-+++ b/tests/availability-mcodes/test.ini
-@@ -0,0 +1 @@
-+../runtime-availability/base.ini
-\ No newline at end of file
++++ b/tests/availability-mcodes/test.ini.in
+@@ -0,0 +1,3 @@
++# Uses the shared base unchanged.
++[FIXTURE]
++BASE = ../runtime-availability/base.ini
 diff --git a/tests/availability-mcodes/test.sh b/tests/availability-mcodes/test.sh
 new file mode 100755
 index 0000000..882b151

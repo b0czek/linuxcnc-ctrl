@@ -16,58 +16,32 @@ feature and its program.
  src/emc/task/emctaskmain.cc                |  48 +++--
  src/emc/tp/tp.c                            |  80 +++++--
  src/emc/tp/tp_types.h                      |   6 +-
- tests/resumable-stop/README                |  33 +++
+ tests/resumable-stop/README                |  12 ++
  tests/resumable-stop/after-tap-m5.ngc      |   2 +-
  tests/resumable-stop/after-thread-m5.ngc   |   2 +-
  tests/resumable-stop/after-thread-m9.ngc   |   2 +-
  tests/resumable-stop/after-thread-s.ngc    |   2 +-
- tests/resumable-stop/check-result.sh       |  15 ++
- tests/resumable-stop/checkresult           |   4 -
  tests/resumable-stop/css.ngc               |   2 +-
- tests/resumable-stop/g76-step/checkresult  |   2 +
- tests/resumable-stop/g76-step/scenarios    |   6 +
- tests/resumable-stop/g76-step/test.sh      |   3 +
- tests/resumable-stop/g76-stop/checkresult  |   2 +
- tests/resumable-stop/g76-stop/scenarios    |   5 +
- tests/resumable-stop/g76-stop/test.sh      |   3 +
- tests/resumable-stop/general/checkresult   |   2 +
- tests/resumable-stop/general/scenarios     |  24 +++
- tests/resumable-stop/general/test.sh       |   3 +
+ tests/resumable-stop/g76-step/checkresult  |   2 +-
+ tests/resumable-stop/g76-step/scenarios    |   1 +
+ tests/resumable-stop/general/checkresult   |   2 +-
+ tests/resumable-stop/general/scenarios     |   4 +
  tests/resumable-stop/inflight-step.ngc     |   7 +
  tests/resumable-stop/multi-spindle.ngc     |   2 +-
  tests/resumable-stop/orient.ngc            |   2 +-
  tests/resumable-stop/rapid-then-feed.ngc   |   2 +-
  tests/resumable-stop/resume-s0.ngc         |   7 +
- tests/resumable-stop/run-scenarios.sh      |  61 ++++++
  tests/resumable-stop/tap.ngc               |   6 +-
  tests/resumable-stop/test-ui.py            | 237 +++++++++++++++++++++
  tests/resumable-stop/test.ngc              |   2 +-
- tests/resumable-stop/test.sh               |  87 --------
  tests/resumable-stop/thread-g95-thread.ngc |   2 +-
  tests/resumable-stop/thread-then-steps.ngc |   4 +-
  tests/resumable-stop/thread.ngc            |   6 +-
- tests/resumable-stop/threading/checkresult |   2 +
- tests/resumable-stop/threading/scenarios   |  11 +
- tests/resumable-stop/threading/test.sh     |   3 +
- 38 files changed, 560 insertions(+), 160 deletions(-)
- create mode 100755 tests/resumable-stop/check-result.sh
- delete mode 100755 tests/resumable-stop/checkresult
- create mode 100755 tests/resumable-stop/g76-step/checkresult
- create mode 100644 tests/resumable-stop/g76-step/scenarios
- create mode 100755 tests/resumable-stop/g76-step/test.sh
- create mode 100755 tests/resumable-stop/g76-stop/checkresult
- create mode 100644 tests/resumable-stop/g76-stop/scenarios
- create mode 100755 tests/resumable-stop/g76-stop/test.sh
- create mode 100755 tests/resumable-stop/general/checkresult
- create mode 100644 tests/resumable-stop/general/scenarios
- create mode 100755 tests/resumable-stop/general/test.sh
+ tests/resumable-stop/threading/checkresult |   2 +-
+ tests/resumable-stop/threading/scenarios   |   2 +
+ 28 files changed, 407 insertions(+), 72 deletions(-)
  create mode 100644 tests/resumable-stop/inflight-step.ngc
  create mode 100644 tests/resumable-stop/resume-s0.ngc
- create mode 100755 tests/resumable-stop/run-scenarios.sh
- delete mode 100755 tests/resumable-stop/test.sh
- create mode 100755 tests/resumable-stop/threading/checkresult
- create mode 100644 tests/resumable-stop/threading/scenarios
- create mode 100755 tests/resumable-stop/threading/test.sh
 
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
 index a8e8ae3..ff48890 100644
@@ -460,38 +434,10 @@ index 2963bcc..819f508 100644
  } TP_STRUCT;
  
 diff --git a/tests/resumable-stop/README b/tests/resumable-stop/README
-index 8750b87..6274c79 100644
+index a322d37..6c8eb25 100644
 --- a/tests/resumable-stop/README
 +++ b/tests/resumable-stop/README
-@@ -1,6 +1,27 @@
- Verify resumable Stop preserves an active AUTO program and resumes or
- single-steps it.
- 
-+This directory holds the shared configuration (test.ini, core_sim.hal,
-+tool.tbl), the G-code programs and test-ui.py, which runs one scenario per
-+LinuxCNC session (selected by RESUMABLE_STOP_SCENARIO). The runtests tests
-+are its subdirectories, which run in parallel under ci/test-sharded.sh:
-+
-+  g76-stop   G76 Stop and clearance, the G76 cut/retract handoff stress test,
-+             fperrev
-+  g76-step   G76 Single Step (fresh, after Stop, in flight), exit tapers, and
-+             the trapezoidal re-run of fperrev
-+  threading  G33, G33.1 and G95 Stop cases, commands queued behind them, and
-+             the trapezoidal re-run of g33-chain
-+  general    everything else, including the at-speed, dwell, orientation and
-+             homing scenarios and the trapezoidal re-runs of ordinary and
-+             single-step
-+
-+Each group lists its scenarios in its "scenarios" file. Its test.sh runs them
-+through run-scenarios.sh, which starts each from a fresh LinuxCNC session in a
-+private copy of the configuration, so groups never share files LinuxCNC
-+writes. Its checkresult (check-result.sh) fails unless every listed scenario
-+reported success and the count matches the number given in checkresult.
-+
- This regression test exercises the task-level Stop operation directly through
- the Python command API. It checks that an active feed move stops without
- aborting queued AUTO state, that spindle and coolant outputs are disabled
-@@ -47,6 +68,12 @@ Resume waits for at-speed, rapid-no-atspeed checks that an interrupted rapid
+@@ -68,6 +68,12 @@ Resume waits for at-speed, rapid-no-atspeed checks that an interrupted rapid
  also waits and that the feed after it still waits for the program's M3
  barrier, and queued-g33 drops and restores at-speed after Resume as a
  spindle would while spinning up.
@@ -504,7 +450,7 @@ index 8750b87..6274c79 100644
  The spindle-state scenario checks that an S-word for a spindle stopped by M5
  leaves it stopped after a Stop and Resume of the other spindle.
  The G76 scenarios check that Stop executes only the
-@@ -61,6 +88,12 @@ step. It also starts G76 in normal AUTO_RUN, stops after the first pass with
+@@ -82,6 +88,12 @@ step. It also starts G76 in normal AUTO_RUN, stops after the first pass with
  later passes already queued, and verifies that each following AUTO_STEP
  reaches exactly one cylindrical or tapered safe approach endpoint, and the
  next AUTO_STEP completes that pass's infeed, thread, and clearance.
@@ -561,37 +507,6 @@ index 336d6be..6e468d1 100644
 -G1 X5 F60
 +G1 X5 F300
  M2
-diff --git a/tests/resumable-stop/check-result.sh b/tests/resumable-stop/check-result.sh
-new file mode 100755
-index 0000000..7e07466
---- /dev/null
-+++ b/tests/resumable-stop/check-result.sh
-@@ -0,0 +1,15 @@
-+#!/bin/sh
-+# Shared checkresult for the tests/resumable-stop/<group> tests.
-+# Usage: check-result.sh RESULT SCENARIO-FILE COUNT
-+# Passes only if the group ran exactly COUNT scenarios, COUNT is the number
-+# of entries in SCENARIO-FILE, and every entry reported success.
-+set -e
-+result=$1 list=$2 count=$3
-+entries=$(grep -cv '^[[:space:]]*\(#\|$\)' "$list")
-+test "$entries" -eq "$count"
-+test "$(grep -c '^resumable stop scenario ok:' "$result")" -eq "$count"
-+test "$(grep -c '^resumable stop scenario passed:' "$result")" -eq "$count"
-+grep -v '^[[:space:]]*\(#\|$\)' "$list" | while read -r item; do
-+    grep -qxF "resumable stop scenario passed: $item" "$result"
-+done
-+grep -q '^resumable stop scenarios complete$' "$result"
-diff --git a/tests/resumable-stop/checkresult b/tests/resumable-stop/checkresult
-deleted file mode 100755
-index 631b3a4..0000000
---- a/tests/resumable-stop/checkresult
-+++ /dev/null
-@@ -1,4 +0,0 @@
--#!/bin/sh
--set -e
--test "$(grep -c '^resumable stop scenario ok:' "$1")" -eq 39
--grep -q '^resumable stop scenarios complete$' "$1"
 diff --git a/tests/resumable-stop/css.ngc b/tests/resumable-stop/css.ngc
 index 382aaff..8a70da2 100644
 --- a/tests/resumable-stop/css.ngc
@@ -605,109 +520,51 @@ index 382aaff..8a70da2 100644
  M5
  M2
 diff --git a/tests/resumable-stop/g76-step/checkresult b/tests/resumable-stop/g76-step/checkresult
-new file mode 100755
-index 0000000..0562404
---- /dev/null
+index 92d147c..0562404 100755
+--- a/tests/resumable-stop/g76-step/checkresult
 +++ b/tests/resumable-stop/g76-step/checkresult
-@@ -0,0 +1,2 @@
-+#!/bin/sh
+@@ -1,2 +1,2 @@
+ #!/bin/sh
+-exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 5
 +exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 6
 diff --git a/tests/resumable-stop/g76-step/scenarios b/tests/resumable-stop/g76-step/scenarios
-new file mode 100644
-index 0000000..df2a2ab
---- /dev/null
+index 576921d..df2a2ab 100644
+--- a/tests/resumable-stop/g76-step/scenarios
 +++ b/tests/resumable-stop/g76-step/scenarios
-@@ -0,0 +1,6 @@
-+g76-single-step
-+g76-tapered-single-step
+@@ -1,5 +1,6 @@
+ g76-single-step
+ g76-tapered-single-step
 +g76-inflight-single-step
-+g76-exit-taper
-+g76-tapered-exit-taper
-+trapezoidal:fperrev
-diff --git a/tests/resumable-stop/g76-step/test.sh b/tests/resumable-stop/g76-step/test.sh
-new file mode 100755
-index 0000000..713f576
---- /dev/null
-+++ b/tests/resumable-stop/g76-step/test.sh
-@@ -0,0 +1,3 @@
-+#!/bin/bash
-+# Runs the resumable-stop scenarios listed in ./scenarios (see ../README).
-+exec bash ../run-scenarios.sh scenarios
-diff --git a/tests/resumable-stop/g76-stop/checkresult b/tests/resumable-stop/g76-stop/checkresult
-new file mode 100755
-index 0000000..92d147c
---- /dev/null
-+++ b/tests/resumable-stop/g76-stop/checkresult
-@@ -0,0 +1,2 @@
-+#!/bin/sh
-+exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 5
-diff --git a/tests/resumable-stop/g76-stop/scenarios b/tests/resumable-stop/g76-stop/scenarios
-new file mode 100644
-index 0000000..e39cc37
---- /dev/null
-+++ b/tests/resumable-stop/g76-stop/scenarios
-@@ -0,0 +1,5 @@
-+g76-handoff-stress
-+g76
-+g76-tapered
-+g76-waiting-index
-+fperrev
-diff --git a/tests/resumable-stop/g76-stop/test.sh b/tests/resumable-stop/g76-stop/test.sh
-new file mode 100755
-index 0000000..713f576
---- /dev/null
-+++ b/tests/resumable-stop/g76-stop/test.sh
-@@ -0,0 +1,3 @@
-+#!/bin/bash
-+# Runs the resumable-stop scenarios listed in ./scenarios (see ../README).
-+exec bash ../run-scenarios.sh scenarios
+ g76-exit-taper
+ g76-tapered-exit-taper
+ trapezoidal:fperrev
 diff --git a/tests/resumable-stop/general/checkresult b/tests/resumable-stop/general/checkresult
-new file mode 100755
-index 0000000..362de54
---- /dev/null
+index 2d7e132..362de54 100755
+--- a/tests/resumable-stop/general/checkresult
 +++ b/tests/resumable-stop/general/checkresult
-@@ -0,0 +1,2 @@
-+#!/bin/sh
+@@ -1,2 +1,2 @@
+ #!/bin/sh
+-exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 20
 +exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 24
 diff --git a/tests/resumable-stop/general/scenarios b/tests/resumable-stop/general/scenarios
-new file mode 100644
-index 0000000..d8e2870
---- /dev/null
+index f3792d2..d8e2870 100644
+--- a/tests/resumable-stop/general/scenarios
 +++ b/tests/resumable-stop/general/scenarios
-@@ -0,0 +1,24 @@
-+idle-rejected
-+ordinary
-+trapezoidal:ordinary
-+single-step
-+trapezoidal:single-step
+@@ -3,6 +3,7 @@ ordinary
+ trapezoidal:ordinary
+ single-step
+ trapezoidal:single-step
 +inflight-single-step
-+rapid-no-atspeed
-+paused-resume
-+paused-run
-+abort-empty
-+orientation
-+dwell
-+dwell-atspeed
-+multi-spindle
-+css
-+homing
-+homing-interrupted
-+speed-change-atspeed
-+queued-feed-atspeed
-+spindle-state
-+resume-atspeed
+ rapid-no-atspeed
+ paused-resume
+ paused-run
+@@ -18,3 +19,6 @@ speed-change-atspeed
+ queued-feed-atspeed
+ spindle-state
+ resume-atspeed
 +pause-starting
 +resume-s0
 +pause-inflight-step
-diff --git a/tests/resumable-stop/general/test.sh b/tests/resumable-stop/general/test.sh
-new file mode 100755
-index 0000000..713f576
---- /dev/null
-+++ b/tests/resumable-stop/general/test.sh
-@@ -0,0 +1,3 @@
-+#!/bin/bash
-+# Runs the resumable-stop scenarios listed in ./scenarios (see ../README).
-+exec bash ../run-scenarios.sh scenarios
 diff --git a/tests/resumable-stop/inflight-step.ngc b/tests/resumable-stop/inflight-step.ngc
 new file mode 100644
 index 0000000..1f72544
@@ -767,73 +624,6 @@ index 0000000..69d6ce7
 +G1 X4
 +M5
 +M2
-diff --git a/tests/resumable-stop/run-scenarios.sh b/tests/resumable-stop/run-scenarios.sh
-new file mode 100755
-index 0000000..f572282
---- /dev/null
-+++ b/tests/resumable-stop/run-scenarios.sh
-@@ -0,0 +1,61 @@
-+#!/bin/bash -e
-+# Shared driver for the tests/resumable-stop/<group> runtests tests.
-+#
-+# Usage, from a group's test.sh:  exec ../run-scenarios.sh scenarios
-+# where the file "scenarios" lists one scenario of test-ui.py per line. An
-+# entry trapezoidal:NAME runs NAME with PLANNER_TYPE = 0 instead of the
-+# jerk-limited planner test.ini selects. The group's checkresult
-+# (check-result.sh) requires every entry to report success.
-+#
-+# Every scenario runs in a fresh LinuxCNC session started from a private copy
-+# of the shared configuration, so groups can run in parallel (also in one
-+# directory tree) without sharing sim.var or other files LinuxCNC writes next
-+# to its INI file.
-+
-+set -o pipefail
-+
-+shared=$(cd "$(dirname "$0")" && pwd)
-+
-+if nm -D -u "$EMC2_HOME/rtlib/motmod.so" | grep -q '[[:space:]]tpStop$'; then
-+    echo "motmod unexpectedly requires the nonstandard tpStop symbol" >&2
-+    exit 1
-+fi
-+
-+if nm -D -u "$EMC2_HOME/rtlib/motmod.so" | grep -q '[[:space:]]tpStep$'; then
-+    echo "motmod unexpectedly requires the nonstandard tpStep symbol" >&2
-+    exit 1
-+fi
-+
-+[ $# -eq 1 ] && [ -f "$1" ] || { echo "usage: run-scenarios.sh SCENARIO-FILE" >&2; exit 1; }
-+mapfile -t items < <(grep -v '^[[:space:]]*\(#\|$\)' "$1")
-+[ ${#items[@]} -gt 0 ] || { echo "run-scenarios.sh: no scenarios in $1" >&2; exit 1; }
-+
-+config=$(mktemp -d)
-+scenario_log=$(mktemp)
-+trap 'rm -rf "$config" "$scenario_log"' EXIT
-+cp "$shared"/test-ui.py "$shared"/test.ini "$shared"/core_sim.hal \
-+    "$shared"/tool.tbl "$shared"/*.ngc "$config"/
-+sed 's/^PLANNER_TYPE = 1$/PLANNER_TYPE = 0/' "$config/test.ini" \
-+    > "$config/test-trapezoidal.ini"
-+grep -q '^PLANNER_TYPE = 0$' "$config/test-trapezoidal.ini"
-+
-+for item in "${items[@]}"; do
-+    case "$item" in
-+        trapezoidal:*) ini=test-trapezoidal.ini; scenario=${item#trapezoidal:} ;;
-+        *) ini=test.ini; scenario=$item ;;
-+    esac
-+    echo "Running resumable-stop scenario: $scenario ($ini)"
-+    : > "$scenario_log"
-+    (cd "$config" && RESUMABLE_STOP_SCENARIO="$scenario" linuxcnc -r "$ini") 2>&1 |
-+        tee "$scenario_log"
-+    if grep -Eq 'ruckig_plan_(position|velocity): invalid limits|Ruckig (velocity control )?planning failed' "$scenario_log"; then
-+        echo "$scenario emitted a Ruckig invalid-limit or planning failure" >&2
-+        exit 1
-+    fi
-+    if ! grep -qxF "resumable stop scenario ok: $scenario" "$scenario_log"; then
-+        echo "$item did not report success" >&2
-+        exit 1
-+    fi
-+    echo "resumable stop scenario passed: $item"
-+done
-+echo "resumable stop scenarios complete"
 diff --git a/tests/resumable-stop/tap.ngc b/tests/resumable-stop/tap.ngc
 index 3060ac4..2182f18 100644
 --- a/tests/resumable-stop/tap.ngc
@@ -1144,99 +934,6 @@ index 416044b..c44a2cd 100644
  S300 M3
  M8
  G1 X10
-diff --git a/tests/resumable-stop/test.sh b/tests/resumable-stop/test.sh
-deleted file mode 100755
-index 4b7d7c2..0000000
---- a/tests/resumable-stop/test.sh
-+++ /dev/null
-@@ -1,87 +0,0 @@
--#!/bin/bash -e
--
--set -o pipefail
--
--if nm -D -u "$EMC2_HOME/rtlib/motmod.so" | grep -q '[[:space:]]tpStop$'; then
--    echo "motmod unexpectedly requires the nonstandard tpStop symbol" >&2
--    exit 1
--fi
--
--if nm -D -u "$EMC2_HOME/rtlib/motmod.so" | grep -q '[[:space:]]tpStep$'; then
--    echo "motmod unexpectedly requires the nonstandard tpStep symbol" >&2
--    exit 1
--fi
--
--scenarios=(
--    idle-rejected
--    ordinary
--    single-step
--    rapid-no-atspeed
--    paused-resume
--    paused-run
--    abort-empty
--    queued-g33
--    g33
--    g33-no-following-rapid
--    fperrev
--    g76
--    g76-waiting-index
--    g76-tapered
--    rigid-tap
--    orientation
--    dwell
--    dwell-atspeed
--    command-after-sync
--    resume-atspeed
--    multi-spindle
--    css
--    homing
--    homing-interrupted
--    speed-change-atspeed
--    queued-feed-atspeed
--    g33-chain
--    step-resume-stopping
--    g95-between-g33
--    spindle-state
--    g76-single-step
--    g76-tapered-single-step
--    g76-exit-taper
--    g76-tapered-exit-taper
--    g76-handoff-stress
--)
--
--# test.ini selects the jerk-limited planner. Repeat the scenarios whose
--# unsynchronized motion is most planner dependent, and g33-chain (which ends
--# in a blend arc only with this planner), with the default trapezoidal planner.
--trapezoidal_scenarios=(
--    ordinary
--    single-step
--    fperrev
--    g33-chain
--)
--
--scenario_log=$(mktemp)
--trapezoidal_ini=test-trapezoidal.ini
--trap 'rm -f "$scenario_log" "$trapezoidal_ini"' EXIT
--sed 's/^PLANNER_TYPE = 1$/PLANNER_TYPE = 0/' test.ini > "$trapezoidal_ini"
--grep -q '^PLANNER_TYPE = 0$' "$trapezoidal_ini"
--
--run_scenario() {
--    local ini=$1 scenario=$2
--    echo "Running resumable-stop scenario: $scenario ($ini)"
--    : > "$scenario_log"
--    RESUMABLE_STOP_SCENARIO="$scenario" linuxcnc -r "$ini" 2>&1 |
--        tee "$scenario_log"
--    if grep -Eq 'ruckig_plan_(position|velocity): invalid limits|Ruckig (velocity control )?planning failed' "$scenario_log"; then
--        echo "$scenario emitted a Ruckig invalid-limit or planning failure" >&2
--        exit 1
--    fi
--}
--
--for scenario in "${scenarios[@]}"; do
--    run_scenario test.ini "$scenario"
--done
--for scenario in "${trapezoidal_scenarios[@]}"; do
--    run_scenario "$trapezoidal_ini" "$scenario"
--done
--echo "resumable stop scenarios complete"
 diff --git a/tests/resumable-stop/thread-g95-thread.ngc b/tests/resumable-stop/thread-g95-thread.ngc
 index d6630aa..2bc7489 100644
 --- a/tests/resumable-stop/thread-g95-thread.ngc
@@ -1279,36 +976,20 @@ index 5976979..c3ec6d0 100644
  M5
  M2
 diff --git a/tests/resumable-stop/threading/checkresult b/tests/resumable-stop/threading/checkresult
-new file mode 100755
-index 0000000..664eed8
---- /dev/null
+index 0201d4f..664eed8 100755
+--- a/tests/resumable-stop/threading/checkresult
 +++ b/tests/resumable-stop/threading/checkresult
-@@ -0,0 +1,2 @@
-+#!/bin/sh
+@@ -1,2 +1,2 @@
+ #!/bin/sh
+-exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 9
 +exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 11
 diff --git a/tests/resumable-stop/threading/scenarios b/tests/resumable-stop/threading/scenarios
-new file mode 100644
-index 0000000..a4410d4
---- /dev/null
+index 0f41046..a4410d4 100644
+--- a/tests/resumable-stop/threading/scenarios
 +++ b/tests/resumable-stop/threading/scenarios
-@@ -0,0 +1,11 @@
-+rigid-tap
-+g33
-+queued-g33
-+g33-chain
-+trapezoidal:g33-chain
-+step-resume-stopping
-+g95-between-g33
-+g33-no-following-rapid
-+command-after-sync
+@@ -7,3 +7,5 @@ step-resume-stopping
+ g95-between-g33
+ g33-no-following-rapid
+ command-after-sync
 +pause-latched-resume
 +stop-latched-resume
-diff --git a/tests/resumable-stop/threading/test.sh b/tests/resumable-stop/threading/test.sh
-new file mode 100755
-index 0000000..713f576
---- /dev/null
-+++ b/tests/resumable-stop/threading/test.sh
-@@ -0,0 +1,3 @@
-+#!/bin/bash
-+# Runs the resumable-stop scenarios listed in ./scenarios (see ../README).
-+exec bash ../run-scenarios.sh scenarios
