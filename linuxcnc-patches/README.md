@@ -23,9 +23,11 @@ Changes under `linuxcnc-patches/` trigger the
 [`LinuxCNC patch tests`](../.github/workflows/linuxcnc-patches.yml) workflow on
 pushes and pull requests. The workflow materializes the complete series on the
 pinned revision, builds a headless LinuxCNC in run-in-place mode, and runs the LinuxCNC regression suite with failure output enabled,
-leaving out the tests for LinuxCNC's GUIs and GUI tools, which are out of scope
-for this repository (`tests/build/ui`, `tests/glcanon`, `tests/pyvcp`,
-`tests/tooledit` and `tests/ui-smoke`).
+leaving out tests for features that are out of scope for this repository: GUIs
+and GUI tools (`tests/build/ui`, `tests/glcanon`, `tests/pyvcp`,
+`tests/tooledit`, `tests/ui-smoke`), older remote interfaces (`tests/halrmt`,
+`tests/linuxcncrsh`, `tests/linuxcncrsh-tcp`) and tool database programs
+(`tests/tooldb`).
 
 ## Applying the series
 
