@@ -1763,7 +1763,7 @@ index 0000000..8d6ef70
 +sys.exit(0)
 diff --git a/tests/tool-crud-refusal/test.sh b/tests/tool-crud-refusal/test.sh
 new file mode 100755
-index 0000000..c9a8d42
+index 0000000..bad1a01
 --- /dev/null
 +++ b/tests/tool-crud-refusal/test.sh
 @@ -0,0 +1,12 @@
@@ -1777,7 +1777,7 @@ index 0000000..c9a8d42
 +    -lnml -llinuxcnc -o tool-cmd
 +printf 'T1 P1 Z+1.000000\nT2 P2 Z+2.000000\nT3 P3 Z+3.000000\n' > tool.tbl
 +rm -f sim.var
-+cp ../tool-table-load/test.ini run.ini
++../tool-wear-common/make-ini.sh run.ini
 +linuxcnc -r run.ini
 diff --git a/tests/tool-crud-refusal/tool-cmd.cc b/tests/tool-crud-refusal/tool-cmd.cc
 new file mode 100644
