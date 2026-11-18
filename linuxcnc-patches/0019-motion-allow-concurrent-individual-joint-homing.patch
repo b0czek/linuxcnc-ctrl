@@ -36,7 +36,7 @@ so the new concurrency checks never refuse it.
  create mode 100644 tests/homing-concurrent/tool.tbl
 
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index e24a9d2..dd99fd8 100644
+index 9d6fb2c..e8a68ce 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
 @@ -1753,10 +1753,29 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
@@ -72,10 +72,10 @@ index e24a9d2..dd99fd8 100644
  		break;
  	    }
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index ff24751..ca7d5cd 100644
+index 31c4284..babce73 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
-@@ -2728,18 +2728,13 @@ static void update_status(void)
+@@ -2735,18 +2735,13 @@ static void update_status(void)
  	}
  #endif
  	joint_status->flag = joint->flag;
@@ -405,10 +405,10 @@ index a2b6c9b..9f36e71 100644
  EXPORT_SYMBOL(read_homing_in_pins);
  EXPORT_SYMBOL(do_home_joint);
 diff --git a/src/emc/motion/homing.h b/src/emc/motion/homing.h
-index b6a51c4..4d518b9 100644
+index af883eb..feea75c 100644
 --- a/src/emc/motion/homing.h
 +++ b/src/emc/motion/homing.h
-@@ -96,6 +96,9 @@ bool get_allhomed(void);
+@@ -98,6 +98,9 @@ bool get_allhomed(void);
  // get_homing_is_active(): true while any homing sequence or per-joint
  // homing state machine is in progress.
  bool get_homing_is_active(void);
@@ -418,7 +418,7 @@ index b6a51c4..4d518b9 100644
  
  // per-joint information:
  int  get_home_sequence(int jno); //return s
-@@ -109,6 +112,10 @@ bool get_index_enable(int jno);
+@@ -111,6 +114,10 @@ bool get_index_enable(int jno);
  // get_home_needs_unlock_first(): joint jno has HOME_UNLOCK_FIRST set
  // (rotary axis must be unlocked before homing).
  bool get_home_needs_unlock_first(int jno);

@@ -32,18 +32,20 @@ tests/remap/mdi-remap-abort interrupts a waiting NGC and a waiting Python
 remap with each of E-stop, machine off, interpreter re-init and a mode
 change, and checks that milltask survives and MDI works afterwards.
 ---
+ src/emc/nml_intf/interpl.cc             |  14 ++
+ src/emc/nml_intf/interpl.hh             |   2 +
  src/emc/task/emctask.cc                 |   4 +
- src/emc/task/emctaskmain.cc             |   7 +-
+ src/emc/task/emctaskmain.cc             |  46 +++-
  src/emc/task/task.hh                    |   1 +
- tests/remap/mdi-remap-abort/README      |  17 +++
+ tests/remap/mdi-remap-abort/README      |  22 ++
  tests/remap/mdi-remap-abort/checkresult |   2 +
  tests/remap/mdi-remap-abort/m400.ngc    |   5 +
- tests/remap/mdi-remap-abort/remap.py    |   9 ++
- tests/remap/mdi-remap-abort/test-ui.py  | 186 ++++++++++++++++++++++++
- tests/remap/mdi-remap-abort/test.ini    | 101 +++++++++++++
+ tests/remap/mdi-remap-abort/remap.py    |   9 +
+ tests/remap/mdi-remap-abort/test-ui.py  | 290 ++++++++++++++++++++++++
+ tests/remap/mdi-remap-abort/test.ini    | 101 +++++++++
  tests/remap/mdi-remap-abort/test.sh     |   2 +
  tests/remap/mdi-remap-abort/toplevel.py |   1 +
- 11 files changed, 334 insertions(+), 1 deletion(-)
+ 13 files changed, 491 insertions(+), 8 deletions(-)
  create mode 100644 tests/remap/mdi-remap-abort/README
  create mode 100755 tests/remap/mdi-remap-abort/checkresult
  create mode 100644 tests/remap/mdi-remap-abort/m400.ngc
@@ -53,6 +55,44 @@ change, and checks that milltask survives and MDI works afterwards.
  create mode 100755 tests/remap/mdi-remap-abort/test.sh
  create mode 100644 tests/remap/mdi-remap-abort/toplevel.py
 
+diff --git a/src/emc/nml_intf/interpl.cc b/src/emc/nml_intf/interpl.cc
+index 415f873..1c36637 100644
+--- a/src/emc/nml_intf/interpl.cc
++++ b/src/emc/nml_intf/interpl.cc
+@@ -109,6 +109,20 @@ void NML_INTERP_LIST::clear()
+     pass_group = 0;
+ }
+ 
++int NML_INTERP_LIST::remove_type(int type)
++{
++    int removed = 0;
++    for (auto it = linked_list.begin(); it != linked_list.end();) {
++        if (it->command->_type == type) {
++            it = linked_list.erase(it);
++            removed++;
++        } else {
++            ++it;
++        }
++    }
++    return removed;
++}
++
+ void NML_INTERP_LIST::print()
+ {
+     rcs_print("NML_INTERP_LIST::print(): list size=%lu\n", linked_list.size());
+diff --git a/src/emc/nml_intf/interpl.hh b/src/emc/nml_intf/interpl.hh
+index 52c338e..86ae5ab 100644
+--- a/src/emc/nml_intf/interpl.hh
++++ b/src/emc/nml_intf/interpl.hh
+@@ -42,6 +42,8 @@ public:
+     int append(std::unique_ptr<NMLmsg>&& command);
+     std::unique_ptr<NMLmsg> get();
+     void clear();
++    // removes every queued command of this type, returns how many
++    int remove_type(int type);
+     void print();
+     int len();
+     // the most recently appended command still on the list whose type is
 diff --git a/src/emc/task/emctask.cc b/src/emc/task/emctask.cc
 index 5a1e60e..67edc9b 100644
 --- a/src/emc/task/emctask.cc
@@ -69,30 +109,83 @@ index 5a1e60e..67edc9b 100644
  }
  
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index f0d4ab8..7726feb 100644
+index 9097f40..7176809 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -796,7 +796,7 @@ interpret_again:
+@@ -798,10 +798,18 @@ interpret_again:
  		}		// if interp len is less than max
  }
  
 -static void mdi_execute_abort(void)
-+void mdi_execute_abort(void)
++static void mdi_execute_drop_queue(void)
  {
-     int queued_mdi_commands;
+-    int queued_mdi_commands;
++    int queued_mdi_commands = mdi_execute_queue.len();
++    if (queued_mdi_commands > 0) {
++        rcs_print("mdi_execute_abort: dropping %d queued MDI commands\n", queued_mdi_commands);
++    }
++    mdi_execute_queue.clear();
++    emcStatus->task.queuedMDIcommands = 0;
++}
  
-@@ -3193,6 +3193,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
++void mdi_execute_abort(void)
++{
+     // XXX: Reset needed?
+     if (mdi_execute_wait || mdi_execute_next)
+         emcTaskPlanReset();
+@@ -809,16 +817,22 @@ static void mdi_execute_abort(void)
+     mdi_execute_wait = 0;
+     mdi_execute_next = 0;
+ 
+-    queued_mdi_commands = mdi_execute_queue.len();
+-    if (queued_mdi_commands > 0) {
+-        rcs_print("mdi_execute_abort: dropping %d queued MDI commands\n", queued_mdi_commands);
+-    }
+-    mdi_execute_queue.clear();
+-    emcStatus->task.queuedMDIcommands = 0;
++    mdi_execute_drop_queue();
+ 
+     emcStatus->task.interpState = EMC_TASK_INTERP::IDLE;
+ }
+ 
++// Drop every MDI command the interpreter has not read yet: the queue, and
++// what mdi_execute_hook() already moved from it towards execution.
++static void mdi_execute_drop_unread(void)
++{
++    mdi_execute_drop_queue();
++    interp_list.remove_type(EMC_TASK_PLAN_EXECUTE_TYPE);
++    if (emcTaskCommand && emcTaskCommand->_type == EMC_TASK_PLAN_EXECUTE_TYPE) {
++        emcTaskCommand = NULL;
++    }
++}
++
+ static void mdi_execute_hook(void)
+ {
+     if (mdi_execute_wait && emcTaskPlanIsWait()) {
+@@ -3196,7 +3210,23 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	break;
  
      case EMC_TASK_PLAN_INIT_TYPE:
-+	// re-initializing the interpreter drops any call an interrupted MDI
-+	// command is still inside of; an ordinary MDI move keeps running and
-+	// keeps its interpreter state
-+	if (mdi_execute_wait || mdi_execute_next || mdi_execute_level >= 0)
++	// MDI commands not read yet were written for the modal state this
++	// discards, so they never run.
++	mdi_execute_drop_unread();
++	// Re-initializing the interpreter drops any call an interrupted MDI
++	// command is still inside of. A command already read keeps running and
++	// keeps its interpreter state, including one that returned
++	// INTERP_EXECUTE_FINISH outside a call (G38.n, M66, M6, G28.2).
++	if (mdi_execute_next || mdi_execute_level >= 0) {
 +	    mdi_execute_abort();
++	    emcStatus->task.command[0] = 0;
++	}
  	retval = emcTaskPlanInit();
++	// emcTaskPlanInit() clears the wait; mdi_execute_hook() needs it to see
++	// that command finish
++	if (mdi_execute_wait) {
++	    emcTaskPlanSetWait();
++	}
  	if (retval > INTERP_MIN_ERROR) {
  	    retval = -1;
+ 	}
 diff --git a/src/emc/task/task.hh b/src/emc/task/task.hh
 index 223886e..1a7a999 100644
 --- a/src/emc/task/task.hh
@@ -107,10 +200,10 @@ index 223886e..1a7a999 100644
  int emcTaskSetState(EMC_TASK_STATE state);
 diff --git a/tests/remap/mdi-remap-abort/README b/tests/remap/mdi-remap-abort/README
 new file mode 100644
-index 0000000..213678e9
+index 0000000..cdb34f9
 --- /dev/null
 +++ b/tests/remap/mdi-remap-abort/README
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,22 @@
 +Interrupt an MDI command whose remap is mid-execution with an E-stop, a
 +machine off, an interpreter re-init (EMC_TASK_PLAN_INIT) and a mode change
 +to AUTO and back, instead of an operator abort, then bring the machine back
@@ -128,6 +221,11 @@ index 0000000..213678e9
 +dropped by each interrupt, never run. Finally, an interpreter re-init during
 +an ordinary MDI G1 move, with no interrupted call, must leave the move
 +running and the interpreter state non-idle until the move ends.
++
++Commands queued behind an ordinary move are dropped by the re-init too: they
++were written for the modal state it discards. M66 and G38.3 return
++INTERP_EXECUTE_FINISH without entering a call, so a re-init while they run
++leaves them active (not IDLE, still the current command) until they finish.
 diff --git a/tests/remap/mdi-remap-abort/checkresult b/tests/remap/mdi-remap-abort/checkresult
 new file mode 100755
 index 0000000..24dc9aa
@@ -164,10 +262,10 @@ index 0000000..b616b52
 +        yield INTERP_EXECUTE_FINISH
 diff --git a/tests/remap/mdi-remap-abort/test-ui.py b/tests/remap/mdi-remap-abort/test-ui.py
 new file mode 100755
-index 0000000..b88dda9
+index 0000000..b6c86ff
 --- /dev/null
 +++ b/tests/remap/mdi-remap-abort/test-ui.py
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,290 @@
 +#!/usr/bin/env python3
 +#
 +# Interrupt an MDI command whose remap is mid-execution in every way that
@@ -252,6 +350,14 @@ index 0000000..b88dda9
 +    c.wait_complete()
 +
 +
++def plan_init_received():
++    # for a command that keeps task busy: wait_complete() would wait it out
++    c.reset_interpreter()
++    serial = c.serial
++    wait_for(lambda: s.echo_serial_number >= serial,
++             "interpreter re-init to be received")
++
++
 +def mode_auto():
 +    set_mode(linuxcnc.MODE_AUTO)
 +    set_mode(linuxcnc.MODE_MDI)
@@ -293,12 +399,16 @@ index 0000000..b88dda9
 +    wait_for(lambda: s.queued_mdi_commands == 1,
 +             "%s: G0 X5 to be queued behind %s" % (name, code))
 +    interrupt()
-+    set_mode(linuxcnc.MODE_MDI)
-+    time.sleep(0.5)
++    # Check before set_mode: selecting a mode clears the queue by itself.
 +    s.poll()
 +    if s.queued_mdi_commands != 0:
 +        fail("%s: %d queued MDI commands survived"
 +             % (name, s.queued_mdi_commands))
++    if s.command != "":
++        fail("%s: interrupted command still reported: %r" % (name, s.command))
++    set_mode(linuxcnc.MODE_MDI)
++    time.sleep(0.5)
++    s.poll()
 +    if abs(s.position[0] - target[0]) > 1e-6:
 +        fail("%s: queued G0 X5 ran (X=%.4f)" % (name, s.position[0]))
 +    check_mdi_works(name)
@@ -338,6 +448,92 @@ index 0000000..b88dda9
 +    print("plain move interpreter re-init: ok")
 +
 +
++def queued_reset(name, during_move):
++    # A command is queued only while task is busy with an earlier one; the
++    # block below keeps its move on the interp list behind the dwell. What is
++    # queued was written for the modal state the re-init discards (here G91),
++    # so none of it may run after the re-init. Once the move is issued the
++    # first queued command is already task's pending command.
++    set_mode(linuxcnc.MODE_MDI)
++    end = target[0] + 4.0
++    c.mdi("G91")
++    c.wait_complete()
++    c.mdi("G4 P0.5 G1 X4 F120")
++    wait_for(lambda: s.exec_state == linuxcnc.EXEC_WAITING_FOR_DELAY,
++             "%s: dwell to start" % name)
++    c.mdi("G0 X1")
++    c.mdi("G0 X1")
++    wait_for(lambda: s.queued_mdi_commands == 2,
++             "%s: G0 X1 to be queued" % name)
++    if during_move:
++        wait_for(lambda: s.current_vel > 0.0 and s.queued_mdi_commands == 1,
++                 "%s: move to start" % name)
++    plan_init_received()
++    s.poll()
++    if s.queued_mdi_commands != 0:
++        fail("%s: %d queued MDI commands survived"
++             % (name, s.queued_mdi_commands))
++    start = time.time()
++    while abs(s.position[0] - end) > 1e-6:
++        if time.time() - start > 10.0:
++            fail("%s: move did not reach X%.1f (X=%.4f)"
++                 % (name, end, s.position[0]))
++        if s.interp_state == linuxcnc.INTERP_IDLE:
++            fail("%s: IDLE while moving (X=%.4f)" % (name, s.position[0]))
++        time.sleep(0.02)
++        s.poll()
++    wait_for(lambda: s.interp_state == linuxcnc.INTERP_IDLE
++             and s.exec_state == linuxcnc.EXEC_DONE,
++             "%s: move to finish" % name)
++    time.sleep(0.5)
++    s.poll()
++    if abs(s.position[0] - end) > 1e-6:
++        fail("%s: a dropped command ran (X=%.4f, expected %.4f)"
++             % (name, s.position[0], end))
++    target[0] = end
++    check_mdi_works(name)
++    print("%s: ok" % name, flush=True)
++
++
++def execute_finish_reset(name, code, busy_for, end=None):
++    # These commands return INTERP_EXECUTE_FINISH without entering a call. A
++    # re-init leaves them running: still reported, not IDLE, and finished
++    # normally, with what was queued behind them dropped.
++    set_mode(linuxcnc.MODE_MDI)
++    c.mdi(code)
++    wait_for(lambda: s.interp_state != linuxcnc.INTERP_IDLE,
++             "%s: to start" % name)
++    time.sleep(0.2)
++    c.mdi("G0 X5")
++    wait_for(lambda: s.queued_mdi_commands == 1,
++             "%s: G0 X5 to be queued" % name)
++    plan_init_received()
++    s.poll()
++    if s.queued_mdi_commands != 0:
++        fail("%s: %d queued MDI commands survived"
++             % (name, s.queued_mdi_commands))
++    start = time.time()
++    while time.time() - start < busy_for:
++        s.poll()
++        if s.interp_state == linuxcnc.INTERP_IDLE:
++            fail("%s: reported IDLE while running" % name)
++        if s.command != code:
++            fail("%s: active command is %r" % (name, s.command))
++        time.sleep(0.02)
++    wait_for(lambda: s.interp_state == linuxcnc.INTERP_IDLE
++             and s.exec_state == linuxcnc.EXEC_DONE,
++             "%s: to finish" % name)
++    wait_for(lambda: s.command == "", "%s: active command to clear" % name)
++    if end is not None:
++        target[0] = end
++    time.sleep(0.3)
++    s.poll()
++    if abs(s.position[0] - target[0]) > 1e-6:
++        fail("%s: X=%.4f, expected %.4f" % (name, s.position[0], target[0]))
++    check_mdi_works(name)
++    print("%s: ok" % name, flush=True)
++
++
 +wait_for(lambda: s.task_state == linuxcnc.STATE_ESTOP, "task to start")
 +machine_on()
 +set_mode(linuxcnc.MODE_MDI)
@@ -350,6 +546,12 @@ index 0000000..b88dda9
 +    scenario("%s mode change" % code, code, mode_auto)
 +
 +plain_move_reset()
++queued_reset("queue re-init during dwell", False)
++queued_reset("queue re-init during move", True)
++execute_finish_reset("M66 interpreter re-init", "M66 P0 L3 Q2", 0.8)
++probe_end = target[0] + 3.0
++execute_finish_reset("G38.3 interpreter re-init",
++                     "G38.3 X%.1f F120" % probe_end, 0.5, probe_end)
 +
 +print("all scenarios passed")
 +set_state(linuxcnc.STATE_ESTOP)

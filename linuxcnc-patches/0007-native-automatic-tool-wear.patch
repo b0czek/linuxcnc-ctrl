@@ -131,12 +131,12 @@ Fixes from review of the port:
  tests/t0/random-with-t0/expected-gcode-output |   2 +-
  .../random-without-t0/expected-gcode-output   |   2 +-
  tests/tlo/test-ui.py                          |   7 +-
- tests/tool-line-length-save/.gitignore        |   4 +
+ tests/tool-line-length-save/.gitignore        |   5 +
  tests/tool-line-length-save/checkresult       |   2 +
  tests/tool-line-length-save/lathe.ini         |  85 +++++
  tests/tool-line-length-save/make-table.py     |  13 +
  tests/tool-line-length-save/random-ui.py      |  62 +++
- tests/tool-line-length-save/test-ui.py        |  86 +++++
+ tests/tool-line-length-save/test-ui.py        | 116 ++++++
  tests/tool-line-length-save/test.sh           |  12 +
  tests/tool-wear-abort/.gitignore              |   3 +
  tests/tool-wear-abort/change-move.ngc         |   5 +
@@ -186,7 +186,7 @@ Fixes from review of the port:
  tests/tooldb/db-line-length/test-ui.py        |  18 +
  tests/tooldb/db-line-length/test.ini          |   5 +
  tests/tooldb/db-line-length/test.sh           |  14 +
- 129 files changed, 2906 insertions(+), 294 deletions(-)
+ 129 files changed, 2937 insertions(+), 294 deletions(-)
  create mode 100644 tests/interp/tool-line-length/expected
  create mode 100644 tests/interp/tool-line-length/missing-t2.ngc
  create mode 100644 tests/interp/tool-line-length/missing-t3.ngc
@@ -1706,7 +1706,7 @@ index 15aac38..6025a96 100644
  
  	    emcAbortCleanup(EMC_ABORT::MOTION_OR_IO_RCS_ERROR);
 diff --git a/src/emc/task/taskclass.cc b/src/emc/task/taskclass.cc
-index 6694667..72b698b4 100644
+index 6694667..0d076c8 100644
 --- a/src/emc/task/taskclass.cc
 +++ b/src/emc/task/taskclass.cc
 @@ -114,12 +114,44 @@ int emcToolPrepare(int tool) { return task_methods->emcToolPrepare(tool); }
@@ -1911,8 +1911,8 @@ index 6694667..72b698b4 100644
 +        if (tooldata_put(previous,idx) != IDX_OK) {
              UNEXPECTED_MSG;
          }
-+        rcs_print_error("tool %d: offsets not stored, tool table unchanged\n", toolno);
-+        emcioStatus.status = RCS_STATUS::ERROR;
++        emcOperatorError("tool %d: offsets not stored, tool table unchanged", toolno);
++        return -1;
      }
  
      return 0;
@@ -3292,14 +3292,15 @@ index 42fe939..2814fe0 100755
 -
 diff --git a/tests/tool-line-length-save/.gitignore b/tests/tool-line-length-save/.gitignore
 new file mode 100644
-index 0000000..abf8040
+index 0000000..ed7a35c
 --- /dev/null
 +++ b/tests/tool-line-length-save/.gitignore
-@@ -0,0 +1,4 @@
+@@ -0,0 +1,5 @@
 +sim.var
 +sim.var.bak
 +tool.tbl
 +random.ini
++g10.ngc
 diff --git a/tests/tool-line-length-save/checkresult b/tests/tool-line-length-save/checkresult
 new file mode 100755
 index 0000000..24dc9aa
@@ -3488,10 +3489,10 @@ index 0000000..35b3c18
 +sys.exit(0)
 diff --git a/tests/tool-line-length-save/test-ui.py b/tests/tool-line-length-save/test-ui.py
 new file mode 100755
-index 0000000..9840cd3
+index 0000000..08ce5ff
 --- /dev/null
 +++ b/tests/tool-line-length-save/test-ui.py
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,116 @@
 +#!/usr/bin/env python3
 +"""A tool table with a line refused on load (too long) is not saved: the
 +save would delete the user's line. A G10 edit is refused, the file is kept
@@ -3542,6 +3543,19 @@ index 0000000..9840cd3
 +        return f.read()
 +
 +
++def wait_error(text, timeout=10):
++    start = time.time()
++    while time.time() - start < timeout:
++        err = e.poll()
++        if err is None:
++            time.sleep(0.01)
++            continue
++        print("(error channel: %s)" % (err[1],))
++        if err[0] in (linuxcnc.OPERATOR_ERROR, linuxcnc.NML_ERROR) and text in err[1]:
++            return
++    fail("no error containing '%s'" % text)
++
++
 +l.wait_for_linuxcnc_startup()
 +c.state(linuxcnc.STATE_ESTOP_RESET)
 +c.state(linuxcnc.STATE_ON)
@@ -3556,12 +3570,29 @@ index 0000000..9840cd3
 +print("*** a G10 edit is refused: file and memory unchanged")
 +before = table()
 +c.mdi("g10 l3 p1 x0.1")
-+c.wait_complete()
++result = c.wait_complete()
++if result != linuxcnc.RCS_ERROR:
++    fail("MDI G10 with a refused save finished with status %d" % result)
++wait_error("offsets not stored")
 +if table() != before:
 +    fail("the table file was rewritten:\n" + table())
 +print("tool.tbl unchanged, T3's line kept")
 +check("T1 wxoffset after the refused save", tools()[1].wxoffset, 0.2)
 +check("toolinfo(1) wxoffset after the refused save", s.toolinfo(1)["wxoffset"], 0.2)
++
++print("*** a program with a G10 that cannot be saved stops and says why")
++with open("g10.ngc", "w") as f:
++    f.write("g10 l3 p1 x0.1\ng4 p30\nm2\n")
++c.mode(linuxcnc.MODE_AUTO)
++c.wait_complete()
++c.program_open(os.path.abspath("g10.ngc"))
++c.wait_complete()
++c.auto(linuxcnc.AUTO_RUN, 0)
++wait_error("offsets not stored")
++wait_for(lambda: s.interp_state == linuxcnc.INTERP_IDLE, "the program to stop")
++check("T1 wxoffset after the program", tools()[1].wxoffset, 0.2)
++c.mode(linuxcnc.MODE_MDI)
++c.wait_complete()
 +
 +print("*** with T3's line fixed and the table reloaded, saving works")
 +with open("tool.tbl", "w") as f:

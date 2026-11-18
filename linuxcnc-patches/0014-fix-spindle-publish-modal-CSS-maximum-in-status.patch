@@ -40,7 +40,7 @@ index 513c932..d6e8437 100644
  
  template <class MSG=EMC_SPINDLE_ON>
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 269facc..7a81049 100644
+index bb43b9c..ee88562 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -1035,7 +1035,7 @@ static void emcTaskStopProgress()
