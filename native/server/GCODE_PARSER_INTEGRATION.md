@@ -7,8 +7,8 @@ and gRPC. Add these sources to the daemon's native target:
 native/server/src/gcode/parser.cc
 native/server/src/gcode/canon_preview.cc
 native/server/src/gcode/python_modules.cc
-<linuxcnc>/src/emc/rs274ngc/recordingcanon.cc
-<linuxcnc>/src/emc/rs274ngc/recordingcanon.hh
+native/server/src/gcode/recording_canon.cc
+native/server/src/gcode/recording_canon.hpp
 native/server/include/linuxcnc_grpc/gcode/parser.hpp
 native/server/include/linuxcnc_grpc/gcode/canon_preview.hpp
 native/server/include/linuxcnc_grpc/gcode/operation_types.hpp
@@ -41,8 +41,8 @@ Add the Python development include directory reported by
 `emccanon` built-ins for remap support. Python is not part of the preview
 backend.
 
-LinuxCNC's `recordingcanon.cc` is a separate link-selected implementation of
-the global CANON API, like `gcodemodule.cc` (Axis) and `saicanon.cc`
+`recording_canon.cc` is a separate link-selected implementation of LinuxCNC's
+global CANON API, like `gcodemodule.cc` (Axis) and `saicanon.cc`
 (standalone interpretation). A parse-scoped `recording::Session` owns a queue
 of transport-neutral events. The daemon drains that queue only after an
 interpreter step and translates the events into its native operation model.

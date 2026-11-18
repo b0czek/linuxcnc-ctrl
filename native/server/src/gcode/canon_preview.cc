@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <utility>
 
-#include "recordingcanon.hh"
+#include "recording_canon.hpp"
 
 namespace linuxcnc::server::gcode {
 namespace {

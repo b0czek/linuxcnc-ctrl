@@ -12,7 +12,7 @@
 #include "interp_return.hh"
 #include "linuxcnc_grpc/gcode/canon_preview.hpp"
 #include "linuxcnc_grpc/linuxcnc/active_ini.hpp"
-#include "recordingcanon.hh"
+#include "recording_canon.hpp"
 #include "rs274ngc_interp.hh"
 #include "tooldata.hh"
 
