@@ -22,9 +22,10 @@ complete series.
 Changes under `linuxcnc-patches/` trigger the
 [`LinuxCNC patch tests`](../.github/workflows/linuxcnc-patches.yml) workflow on
 pushes and pull requests. The workflow materializes the complete series on the
-pinned revision, builds LinuxCNC in run-in-place mode with its upstream CI
-tooling, and runs the full LinuxCNC regression suite with failure output
-enabled.
+pinned revision, builds a headless LinuxCNC in run-in-place mode, and runs the LinuxCNC regression suite with failure output enabled,
+leaving out the tests for LinuxCNC's GUIs and GUI tools, which are out of scope
+for this repository (`tests/build/ui`, `tests/glcanon`, `tests/pyvcp`,
+`tests/tooledit` and `tests/ui-smoke`).
 
 ## Applying the series
 
