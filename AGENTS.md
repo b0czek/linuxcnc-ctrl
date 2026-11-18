@@ -1,5 +1,11 @@
 # LinuxCNC Ctrl Agent Guidance
 
+## Project scope
+
+- LinuxCNC's own GUIs and GUI tools are out of scope (see `README.md`). Do not
+  report review findings against them, fix them, test them, or extend patches
+  for them. `halui` is headless and stays in scope.
+
 ## Native formatting and linting
 
 - Treat native formatting and linting as part of completing every change under

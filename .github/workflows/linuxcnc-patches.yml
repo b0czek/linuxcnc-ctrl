@@ -73,7 +73,17 @@ jobs:
 
       - name: Install LinuxCNC build and test dependencies
         working-directory: ${{ runner.temp }}/linuxcnc
-        run: .github/scripts/install-deps.sh
+        run: |
+          set -euo pipefail
+
+          .github/scripts/use-main-ubuntu-mirror.sh
+          sudo apt-get --quiet update
+          sudo apt-get install --yes --no-install-recommends build-essential dpkg-dev
+          export DEB_BUILD_PROFILES="pkg.linuxcnc.headless nodoc"
+          debian/configure no-docs
+          sudo env DEB_BUILD_PROFILES="${DEB_BUILD_PROFILES}" \
+            apt-get -P "pkg.linuxcnc.headless,nodoc" build-dep --yes \
+            --no-install-recommends .
 
       - name: Build patched LinuxCNC
         working-directory: ${{ runner.temp }}/linuxcnc
@@ -81,7 +91,10 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/rtlib-a" "${RUNNER_TEMP}/rtlib-b"
           .github/scripts/build-rip.sh \
             --with-realtime=uspace \
-            --with-extra-rtlib-dirs="${RUNNER_TEMP}/rtlib-a:${RUNNER_TEMP}/rtlib-b"
+            --with-extra-rtlib-dirs="${RUNNER_TEMP}/rtlib-a:${RUNNER_TEMP}/rtlib-b" \
+            --disable-gui \
+            --disable-build-documentation \
+            --disable-manpages
 
       - name: Run LinuxCNC regression suite shard
         working-directory: ${{ runner.temp }}/linuxcnc
@@ -97,6 +110,13 @@ jobs:
           shard_tests=()
           resumable_index=0
           while IFS= read -r -d '' test_path; do
+            # LinuxCNC's GUIs are out of scope for this repository.
+            case "${test_path}" in
+              tests/build/ui/* | tests/glcanon/* | tests/pyvcp/* | \
+                tests/tooledit/* | tests/ui-smoke/*)
+                continue
+                ;;
+            esac
             if [[ "${test_path}" == tests/resumable-stop/* ]]; then
               test_shard=$((resumable_index % SHARD_COUNT))
               resumable_index=$((resumable_index + 1))
