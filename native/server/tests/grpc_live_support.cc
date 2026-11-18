@@ -320,10 +320,12 @@ void create_live_tool(linuxcnc::v1::MachineService::Stub* machine, int tool_no,
 // is still unresolved when the caller sends its next command.
 class QueuedToolDelete {
  public:
-  QueuedToolDelete(linuxcnc::v1::MachineService::Stub* machine, int tool_no) {
+  QueuedToolDelete(linuxcnc::v1::MachineService::Stub* machine, int tool_no,
+                   const std::function<void()>& before_delete = {}) {
     ExecuteCommandRequest dwell;
     dwell.mutable_mdi()->set_command("G4 P1");
     (void)execute_accepted(machine, std::move(dwell));
+    if (before_delete) before_delete();
     worker_ = std::thread([this, machine, tool_no] {
       ExecuteCommandRequest request;
       request.set_wait_policy(linuxcnc::v1::WAIT_POLICY_COMPLETED);
@@ -417,14 +419,15 @@ void verify_task_queued_command_ordering(
   mdi_mode.mutable_set_task_mode()->set_mode(linuxcnc::v1::TASK_MODE_MDI);
   (void)execute_completed(machine, std::move(mdi_mode));
 
-  // A queued command cannot finish while the program is paused, so Resume has
+  // A command queued during a pause cannot finish until Resume, so Resume has
   // to pass the hold. The delete stays queued in LinuxCNC and runs afterwards,
   // but Resume replaced its result, so its outcome is reported as unknown.
   {
-    QueuedToolDelete paused(machine, kLiveTool);
-    ExecuteCommandRequest pause;
-    pause.mutable_pause_program();
-    (void)execute_accepted(machine, std::move(pause));
+    QueuedToolDelete paused(machine, kLiveTool, [machine] {
+      ExecuteCommandRequest pause;
+      pause.mutable_pause_program();
+      (void)execute_accepted(machine, std::move(pause));
+    });
     ExecuteCommandRequest resume;
     resume.mutable_resume_program();
     const auto started = std::chrono::steady_clock::now();
