@@ -218,6 +218,10 @@ fi
 
 start_server "$root/server.log"
 
+# Lets the HAL acceptance test link pins and create aliases, which the gRPC API
+# does not offer.
+export LINUXCNC_GRPC_LIVE_HALCMD="$linuxcnc_root/scripts/rip-environment halcmd"
+
 if ! timeout 60s "$integration" "127.0.0.1:${grpc_port}" \
     "$fixture_dir/simple_linear.ngc" "127.0.0.1:${telemetry_port}" \
     --batch-size=8; then
