@@ -103,45 +103,4 @@ jobs:
         env:
           SHARD_COUNT: ${{ strategy.job-total }}
           SHARD_INDEX: ${{ matrix.shard }}
-        run: |
-          set -euo pipefail
-
-          # Upstream tests run from the LinuxCNC tree, the patches' own tests
-          # from linuxcnc-tests/ in this repository.
-          #
-          # linuxcnc-tests/resumable-stop/* are the longest tests (about
-          # 2.5 minutes each); spread them one per shard. Everything else is
-          # hashed across all shards.
-          shard_tests=()
-          resumable_index=0
-          while IFS= read -r -d '' test_path; do
-            relative_path="${test_path#"${GITHUB_WORKSPACE}/"}"
-            # LinuxCNC features that are out of scope for this repository.
-            case "${relative_path}" in
-              tests/build/ui/* | tests/glcanon/* | tests/halrmt/* | \
-                tests/linuxcncrsh/* | tests/linuxcncrsh-tcp/* | \
-                tests/pyvcp/* | tests/tooldb/* | tests/tooledit/* | \
-                tests/ui-smoke/*)
-                continue
-                ;;
-            esac
-            if [[ "${relative_path}" == linuxcnc-tests/resumable-stop/* ]]; then
-              test_shard=$((resumable_index % SHARD_COUNT))
-              resumable_index=$((resumable_index + 1))
-            else
-              checksum="$(printf '%s' "${relative_path}" | cksum)"
-              checksum="${checksum%% *}"
-              test_shard=$((checksum % SHARD_COUNT))
-            fi
-            if (( test_shard == SHARD_INDEX )); then
-              shard_tests+=("${test_path}")
-            fi
-          done < <(
-            find tests "${GITHUB_WORKSPACE}/linuxcnc-tests" \
-              \( -name test -o -name test.sh -o -name test.hal \) \
-              -print0 | sort -z
-          )
-
-          ((${#shard_tests[@]} > 0))
-          echo "Running ${#shard_tests[@]} tests in shard $((SHARD_INDEX + 1))/${SHARD_COUNT}"
-          scripts/rip-environment runtests -p "${shard_tests[@]}"
+        run: '"${GITHUB_WORKSPACE}/linuxcnc-tests/run.sh" . -p'
