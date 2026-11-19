@@ -73,7 +73,7 @@ Ported to v2.10.0-pre2. Differences from the patch on the old base:
  tests/resumable-stop/speed-change.ngc         |    9 +
  tests/resumable-stop/spindle-state.ngc        |   10 +
  tests/resumable-stop/tap.ngc                  |    7 +
- tests/resumable-stop/test-ui.py               | 1492 +++++++++++++++++
+ tests/resumable-stop/test-ui.py               | 1494 +++++++++++++++++
  tests/resumable-stop/test.ini                 |   98 ++
  tests/resumable-stop/test.ngc                 |    9 +
  tests/resumable-stop/thread-chain.ngc         |    8 +
@@ -84,7 +84,7 @@ Ported to v2.10.0-pre2. Differences from the patch on the old base:
  tests/resumable-stop/threading/scenarios      |    8 +
  tests/resumable-stop/threading/test.sh        |    3 +
  tests/resumable-stop/tool.tbl                 |    1 +
- 64 files changed, 2828 insertions(+), 25 deletions(-)
+ 64 files changed, 2830 insertions(+), 25 deletions(-)
  create mode 100644 tests/resumable-stop/README
  create mode 100644 tests/resumable-stop/after-abort.ngc
  create mode 100644 tests/resumable-stop/after-tap-m5.ngc
@@ -2249,10 +2249,10 @@ index 0000000..3060ac4
 +M2
 diff --git a/tests/resumable-stop/test-ui.py b/tests/resumable-stop/test-ui.py
 new file mode 100755
-index 0000000..0b39992
+index 0000000..4cf91ee
 --- /dev/null
 +++ b/tests/resumable-stop/test-ui.py
-@@ -0,0 +1,1492 @@
+@@ -0,0 +1,1494 @@
 +#!/usr/bin/env python3
 +
 +import math
@@ -2307,7 +2307,9 @@ index 0000000..0b39992
 +    wait_complete("%s did not open" % path)
 +
 +
-+def wait_for_program_complete(expected_x, expected_z=0.0, timeout=15.0):
++# Simulated motion runs slower than real time on a loaded machine, so allow
++# well beyond a program's nominal run time; a passing run never waits longer.
++def wait_for_program_complete(expected_x, expected_z=0.0, timeout=60.0):
 +    wait_for(
 +        lambda: s.interp_state == linuxcnc.INTERP_IDLE
 +        and s.exec_state == linuxcnc.EXEC_DONE

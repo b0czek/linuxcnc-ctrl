@@ -640,10 +640,10 @@ index 3060ac4..2182f18 100644
  M5
  M2
 diff --git a/tests/resumable-stop/test-ui.py b/tests/resumable-stop/test-ui.py
-index d29f03f..9d8a771 100755
+index 83dfcc5..ec9e072 100755
 --- a/tests/resumable-stop/test-ui.py
 +++ b/tests/resumable-stop/test-ui.py
-@@ -261,6 +261,74 @@ def run_stop_single_step_test():
+@@ -263,6 +263,74 @@ def run_stop_single_step_test():
      wait_for_program_complete(20.0)
      assert_outputs_stopped_after_program()
  
@@ -718,7 +718,7 @@ index d29f03f..9d8a771 100755
  
  def run_rapid_resume_without_at_speed_test():
      hal.set_p("spindle.0.at-speed", "false")
-@@ -790,6 +858,48 @@ def run_tapered_g76_single_step_test():
+@@ -792,6 +860,48 @@ def run_tapered_g76_single_step_test():
          "tapered-drive G76",
      )
  
@@ -767,7 +767,7 @@ index d29f03f..9d8a771 100755
  
  def run_g76_exit_taper_stop_test(program, expected_clear_x, label):
      open_auto_program(program)
-@@ -1286,6 +1396,124 @@ def run_resume_atspeed_wait_test():
+@@ -1288,6 +1398,124 @@ def run_resume_atspeed_wait_test():
          fail("Abort while waiting: the feed moved")
  
  
@@ -892,7 +892,7 @@ index d29f03f..9d8a771 100755
  def run_multi_spindle_stop_resume_test():
      open_auto_program("multi-spindle.ngc")
      c.spindle(linuxcnc.SPINDLE_FORWARD, 120.0, 0)
-@@ -1769,6 +1997,7 @@ SCENARIOS = {
+@@ -1771,6 +1999,7 @@ SCENARIOS = {
      "idle-rejected": run_idle_program_stop_rejected_test,
      "ordinary": run_ordinary_stop_resume_test,
      "single-step": run_stop_single_step_test,
@@ -900,7 +900,7 @@ index d29f03f..9d8a771 100755
      "rapid-no-atspeed": run_rapid_resume_without_at_speed_test,
      "paused-resume": lambda: run_stop_while_program_paused_test(False),
      "paused-run": lambda: run_stop_while_program_paused_test(True),
-@@ -1782,6 +2011,7 @@ SCENARIOS = {
+@@ -1784,6 +2013,7 @@ SCENARIOS = {
      "g76-tapered": run_tapered_g76_stop_resume_test,
      "g76-single-step": run_g76_single_step_test,
      "g76-tapered-single-step": run_tapered_g76_single_step_test,
@@ -908,7 +908,7 @@ index d29f03f..9d8a771 100755
      "g76-exit-taper": run_cylindrical_g76_exit_taper_stop_test,
      "g76-tapered-exit-taper": run_tapered_g76_exit_taper_stop_test,
      "g76-handoff-stress": run_g76_cut_retract_handoff_stress_test,
-@@ -1791,6 +2021,13 @@ SCENARIOS = {
+@@ -1793,6 +2023,13 @@ SCENARIOS = {
      "dwell-atspeed": run_dwell_atspeed_barrier_test,
      "command-after-sync": run_command_after_sync_motion_test,
      "resume-atspeed": run_resume_atspeed_wait_test,
