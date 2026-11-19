@@ -70,10 +70,10 @@ that adds in-flight stepping.
  create mode 100644 tests/resumable-stop/g76-tapered.ngc
 
 diff --git a/docs/src/gcode/g-code.adoc b/docs/src/gcode/g-code.adoc
-index 39cbf04..67dd545 100644
+index 6f196b6..3b3d18c 100644
 --- a/docs/src/gcode/g-code.adoc
 +++ b/docs/src/gcode/g-code.adoc
-@@ -2307,6 +2307,21 @@ pass, so a relief groove will be required at the entry unless the
+@@ -2309,6 +2309,21 @@ pass, so a relief groove will be required at the entry unless the
  beginning of the thread is past the end of the material or an entry
  taper is used.
  
@@ -474,11 +474,11 @@ index 91d4b7b..109cf46 100644
  void PALLET_SHUTTLE() {}
  void SELECT_TOOL(int tool) {parse_state.selected_tool = tool;}
 diff --git a/src/emc/rs274ngc/interp_convert.cc b/src/emc/rs274ngc/interp_convert.cc
-index 7b19bf8..0183299 100644
+index 560748a..47f2509 100644
 --- a/src/emc/rs274ngc/interp_convert.cc
 +++ b/src/emc/rs274ngc/interp_convert.cc
-@@ -5943,11 +5943,13 @@ threading_pass(setup_pointer settings, block_pointer block,
- 	       double start_y, double start_z, double zoff, double taper_dist,
+@@ -5944,11 +5944,13 @@ threading_pass(setup_pointer settings, block_pointer block,
+ 	       double taper_dist,
  	       int entry_taper, int exit_taper, double taper_pitch,
  	       double pitch, double full_threadheight, double target_z) {
 +    FINISH_G76_APPROACH();
@@ -491,7 +491,7 @@ index 7b19bf8..0183299 100644
  	DISABLE_FEED_OVERRIDE();
  	START_SPEED_FEED_SYNCH(settings->active_spindle, taper_pitch, 0);
  	STRAIGHT_FEED(block->line_number, boring?
-@@ -5958,6 +5960,7 @@ threading_pass(setup_pointer settings, block_pointer block,
+@@ -5959,6 +5961,7 @@ threading_pass(setup_pointer settings, block_pointer block,
  		      start_y, start_z - zoff - taper_dist, AABBCC);
  	START_SPEED_FEED_SYNCH(settings->active_spindle, pitch, 0);
      } else {
@@ -499,21 +499,21 @@ index 7b19bf8..0183299 100644
  	STRAIGHT_TRAVERSE(block->line_number, boring? safe_x + depth: safe_x - depth,
  			  start_y, start_z - zoff, AABBCC); //in
  	DISABLE_FEED_OVERRIDE();
-@@ -5977,11 +5980,13 @@ threading_pass(setup_pointer settings, block_pointer block,
- 		      start_y, target_z - zoff, AABBCC); //over
+@@ -5978,11 +5981,13 @@ threading_pass(setup_pointer settings, block_pointer block,
+ 		      start_y, target_z - end_zoff, AABBCC); //over
      }
      STOP_SPEED_FEED_SYNCH();
 +    START_G76_CLEARANCE();
      STRAIGHT_TRAVERSE(block->line_number, boring?
  		      safe_x + depth - end_depth:
  		      safe_x - depth + end_depth,
- 		      start_y, target_z - zoff, AABBCC); //out
+ 		      start_y, target_z - end_zoff, AABBCC); //out
      ENABLE_FEED_OVERRIDE();
 +    FINISH_G76_PASS(block->line_number);
  }
  
  // Geometry of one threading pass along a tapered XZ drive line.  X coordinates
-@@ -6054,10 +6059,12 @@ tapered_pass(int boring, double start_x, double start_z,
+@@ -6056,10 +6061,12 @@ tapered_pass(int boring, double start_x, double start_z,
  static void
  tapered_threading_pass(setup_pointer settings, block_pointer block,
  		       const tapered_pass_geometry &g, double start_y) {
@@ -526,7 +526,7 @@ index 7b19bf8..0183299 100644
  	DISABLE_FEED_OVERRIDE();
  	START_SPEED_FEED_SYNCH(settings->active_spindle, g.entry_pitch, 0);
  	STRAIGHT_FEED(block->line_number, g.crest_start_x,
-@@ -6066,6 +6073,7 @@ tapered_threading_pass(setup_pointer settings, block_pointer block,
+@@ -6068,6 +6075,7 @@ tapered_threading_pass(setup_pointer settings, block_pointer block,
  		      start_y, g.entry_end_z, AABBCC); // angled in
  	START_SPEED_FEED_SYNCH(settings->active_spindle, g.drive_pitch, 0);
      } else {
@@ -534,7 +534,7 @@ index 7b19bf8..0183299 100644
  	STRAIGHT_TRAVERSE(block->line_number, g.cut_start_x,
  			  start_y, g.pass_start_z, AABBCC); // in
  	DISABLE_FEED_OVERRIDE();
-@@ -6083,9 +6091,11 @@ tapered_threading_pass(setup_pointer settings, block_pointer block,
+@@ -6085,9 +6093,11 @@ tapered_threading_pass(setup_pointer settings, block_pointer block,
  		      start_y, g.pass_end_z, AABBCC); // over
      }
      STOP_SPEED_FEED_SYNCH();
@@ -546,7 +546,7 @@ index 7b19bf8..0183299 100644
  }
  
  int Interp::check_tapered_threading_pass(setup_pointer settings,
-@@ -6272,9 +6282,13 @@ int Interp::convert_threading_cycle(block_pointer block,
+@@ -6283,9 +6293,13 @@ int Interp::convert_threading_cycle(block_pointer block,
  	}
      }
  

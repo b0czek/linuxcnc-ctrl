@@ -316,7 +316,7 @@ index c65a3b2..219a007 100644
        int p_value = round_to_int(block->p_number);
        CHKS(((motion == G_2 || motion == G_3 || (block->m_modes[7] == 19)) &&
 diff --git a/src/emc/rs274ngc/interp_convert.cc b/src/emc/rs274ngc/interp_convert.cc
-index 3c676b6..624903f 100644
+index a02c025..cb7f482 100644
 --- a/src/emc/rs274ngc/interp_convert.cc
 +++ b/src/emc/rs274ngc/interp_convert.cc
 @@ -4443,6 +4443,17 @@ if ((block->m_modes[9] == 53)  && ONCE_M(9)){

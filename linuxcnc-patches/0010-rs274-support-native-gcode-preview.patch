@@ -24,7 +24,7 @@ keeps upstream's record of the mapping descriptor (8c8e048).
  11 files changed, 160 insertions(+)
 
 diff --git a/src/emc/rs274ngc/interp_convert.cc b/src/emc/rs274ngc/interp_convert.cc
-index 0183299..3c676b6 100644
+index 47f2509..a02c025 100644
 --- a/src/emc/rs274ngc/interp_convert.cc
 +++ b/src/emc/rs274ngc/interp_convert.cc
 @@ -2528,6 +2528,7 @@ Called by: convert_cutter_compensation
