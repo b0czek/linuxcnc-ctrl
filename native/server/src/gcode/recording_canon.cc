@@ -22,6 +22,7 @@ struct Session::Impl {
   EmcPose position{};
   EmcPose probe_position{};
   CANON_UNITS units = CANON_UNITS_INCHES;
+  int axis_mask = 0x7;
   std::vector<CANON_TOOL_TABLE> tools;
   std::size_t max_events = 0;
   std::size_t max_bytes = 0;
@@ -174,6 +175,7 @@ Session::Session(SessionConfig config) : impl(std::make_unique<Impl>()) {
   assert(!active_session && "recording canon Sessions may not overlap");
   active_session = impl.get();
   impl->units = config.units;
+  impl->axis_mask = config.axis_mask;
   impl->tools = std::move(config.tools);
   impl->max_events = config.max_events;
   impl->max_bytes = config.max_bytes;
@@ -594,7 +596,7 @@ int GET_EXTERNAL_DIGITAL_INPUT(int, int default_value) { return default_value; }
 double GET_EXTERNAL_ANALOG_INPUT(int, double default_value) {
   return default_value;
 }
-int GET_EXTERNAL_AXIS_MASK() { return 7; }
+int GET_EXTERNAL_AXIS_MASK() { return recording::active().axis_mask; }
 
 int USER_DEFINED_FUNCTION_ADD(USER_DEFINED_FUNCTION_TYPE function, int index) {
   if (index < 0 || index >= USER_DEFINED_FUNCTION_NUM) return -1;
