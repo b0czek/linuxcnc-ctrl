@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+test "$(grep -c '^native power jog scenarios ok$' "$1")" = 2
+grep -q '^nonlathe pins absent$' "$1"

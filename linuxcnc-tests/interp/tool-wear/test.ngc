@@ -1,0 +1,46 @@
+; The standalone interpreter's canon does not copy the new tool into
+; pocket 0 on a tool change, so the stored offsets (5401-5409 geometry,
+; 5430-5438 wear) are read here only after G10, which updates pocket 0
+; itself. The task path is covered by ../../tool-wear-task.
+g20
+t7 m6
+(debug,auto applied #5081-#5089: #5081 #5082 #5083 #5084 #5085 #5086 #5087 #5088 #5089)
+
+g10 l3 p7 x0 y-0.2 z0.03 a-0.4 b0.05 c-0.06
+(debug,applied unchanged: #5081 #5082 #5083 #5084 #5085 #5086 #5087 #5088 #5089)
+(debug,geometry unchanged: #5401 #5402 #5403 #5404 #5405 #5406 #5407 #5408 #5409)
+(debug,edited wear: #5430 #5431 #5432 #5433 #5434 #5435 #5436 #5437 #5438)
+
+g43 h7
+(debug,composed #5081-#5089: #5081 #5082 #5083 #5084 #5085 #5086 #5087 #5088 #5089)
+g43 h7
+(debug,idempotent #5081-#5089: #5081 #5082 #5083 #5084 #5085 #5086 #5087 #5088 #5089)
+g43.2 x1 y2 z3 a4 b5 c6
+(debug,additive #5081-#5089: #5081 #5082 #5083 #5084 #5085 #5086 #5087 #5088 #5089)
+g49
+(debug,cancelled #5081-#5089: #5081 #5082 #5083 #5084 #5085 #5086 #5087 #5088 #5089)
+(debug,stored after g49: #5401 #5403 / #5430 #5431 #5432 #5433 #5434 #5435 #5436 #5437 #5438)
+g43.4
+(debug,g43.4 composed #5081-#5089: #5081 #5082 #5083 #5084 #5085 #5086 #5087 #5088 #5089)
+g49
+
+g21
+g10 l3 p7 x25.4 z-2.54
+(debug,metric edit in machine units: #5430 #5431 #5432 #5433 #5434 #5435 #5436 #5437 #5438)
+g43 h7
+(debug,metric composition in machine units: #5081 #5082 #5083 #5084 #5085 #5086 #5087 #5088 #5089)
+g20
+g7 g10 l3 p7 x2
+(debug,g7 diameter x interpretation: #5430)
+g8 g10 l3 p7 x2
+(debug,g8 radius x interpretation: #5430)
+
+m61 q8
+(debug,m61 auto #5081-#5089: #5081 #5082 #5083 #5084 #5085 #5086 #5087 #5088 #5089)
+m61 q9
+(debug,long complete record: #5081 #5082 #5083 #5084 #5085 #5086 #5087 #5088 #5089)
+m61 q7 g49
+(debug,same-block g49: #5081 #5082 #5083 #5084 #5085 #5086 #5087 #5088 #5089)
+t0 m6
+(debug,t0 m6 applied: #5081 #5082 #5083 #5084 #5085 #5086 #5087 #5088 #5089)
+m2

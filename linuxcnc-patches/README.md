@@ -19,7 +19,7 @@ complete series.
 
 ## Continuous integration
 
-Changes under `linuxcnc-patches/` trigger the
+Changes under `linuxcnc-patches/` or `linuxcnc-tests/` trigger the
 [`LinuxCNC patch tests`](../.github/workflows/linuxcnc-patches.yml) workflow on
 pushes and pull requests. The workflow materializes the complete series on the
 pinned revision, builds a headless LinuxCNC in run-in-place mode, and runs the LinuxCNC regression suite with failure output enabled,
@@ -28,6 +28,23 @@ and GUI tools (`tests/build/ui`, `tests/glcanon`, `tests/pyvcp`,
 `tests/tooledit`, `tests/ui-smoke`), older remote interfaces (`tests/halrmt`,
 `tests/linuxcncrsh`, `tests/linuxcncrsh-tcp`) and tool database programs
 (`tests/tooldb`).
+
+## Tests
+
+The regression tests for the patches live in
+[`linuxcnc-tests/`](../linuxcnc-tests), not in the patches. Its layout mirrors
+LinuxCNC's `tests/` directory. The patches only change upstream tests whose
+expected output or setup they affect, and add `skip` files to upstream tests
+for features this build refuses. Run both sets with the patched LinuxCNC's
+`runtests`:
+
+```sh
+cd /path/to/linuxcnc
+scripts/runtests tests /path/to/linuxcnc-ctrl/linuxcnc-tests
+```
+
+Tests that need files from the LinuxCNC tree find it through `$EMC2_HOME`,
+which a run-in-place build sets to the LinuxCNC checkout.
 
 ## Applying the series
 
@@ -225,7 +242,7 @@ for a fresh index after Resume instead of catching up the revolutions turned
 during the Stop. Stop's spindle-off and spindle-on leave the at-speed and
 spindle-state bookkeeping of later spindle commands untouched.
 
-The `tests/resumable-stop` LinuxCNC regressions run as four tests
+The `linuxcnc-tests/resumable-stop` LinuxCNC regressions run as four tests
 (`general`, `threading`, `g76-stop`, `g76-step`) that share one driver, so they
 run in parallel. With patches 0009 and 0011 they hold 42 scenarios with the
 jerk-limited planner and four re-runs with the trapezoidal planner. They cover
@@ -310,7 +327,7 @@ M61; if that save fails, the change is reported as an error ("tool table ...
 not saved after the tool change") and the program aborts. The tools stay
 swapped in memory, as they are on the machine, and the new tool's offset is
 applied, but the file is unchanged and must be corrected before it is reloaded.
-`tests/tool-line-length-save` covers this. The G-code preview applies the same geometry-plus-wear offset
+`linuxcnc-tests/tool-line-length-save` covers this. The G-code preview applies the same geometry-plus-wear offset
 as the machine.
 
 ### 0008 — Tapered G76 drive lines and alternating infeed
@@ -431,7 +448,7 @@ refused file still matches that table, saves continue. Pocket numbers above the
 changer limit are refused only on a random changer, where they address slots. On
 a random changer a reload is also refused unless pocket 0 holds the tool in the
 spindle, so a file left stale by a failed save cannot replace the real layout. CRLF line endings, whitespace-only lines and comment-only lines count as
-blank. `tests/tool-table-load` covers this.
+blank. `linuxcnc-tests/tool-table-load` covers this.
 
 A save replaces the table atomically and follows symbolic links, so a linked
 table stays linked. LinuxCNC remembers the bytes it last loaded from or saved to
@@ -443,7 +460,7 @@ the spindle tool and `iocontrol.0.tool-number` from pocket 0.
 
 A refused tool update or delete tells the operator why and fails only that
 command: spindle, coolant and an open program are unaffected.
-`tests/tool-crud-refusal` covers this.
+`linuxcnc-tests/tool-crud-refusal` covers this.
 
 Tool-table reload now preserves the live table when opening, parsing, or
 validation fails. Read-only mmap clients detect inode replacement after a
@@ -482,7 +499,7 @@ G97 clears it. Spindle `enabled` is now derived from the motion controller's
 explicit on/off state instead of commanded speed, so a stopped spindle with a
 nonzero CSS limit remains disabled and is not restarted by resumable Stop.
 
-The `tests/css-status` regression covers G96 while stopped, persistence across
+The `linuxcnc-tests/css-status` regression covers G96 while stopped, persistence across
 M5, clearing on G97, and stopped-spindle enabled state. The patch exposes
 `css_maximum` through Python spindle status; the canonical protobuf schema
 already carries it, so no transport-contract change is required.
@@ -497,7 +514,7 @@ retains responsibility for validating the spindle values it supports.
 When `^` requires a positive spindle speed, `$` selects which spindle is
 checked and supplied as `s`; omitting `$` preserves the spindle 0 default.
 
-The `tests/remap/dollar-argspec` regression covers omitted, numbered, and
+The `linuxcnc-tests/remap/dollar-argspec` regression covers omitted, numbered, and
 all-spindle selectors through Python, named NGC, and positional NGC remaps,
 plus selected-spindle behavior for `^`.
 
@@ -514,7 +531,7 @@ than planner, interpolator, compensation, jog, homing, and probing internals.
 This patch exposes no availability controls and builds independently of the
 runtime feature.
 
-`tests/motion-target-preparation` compiles the production target-preparation
+`linuxcnc-tests/motion-target-preparation` compiles the production target-preparation
 function with deterministic kinematics and the real cubic implementation. It
 covers late invalid targets, interpolation failure, and no partial commitment.
 
@@ -554,7 +571,7 @@ Acquisition homing uses the home cycle LinuxCNC provides for `G28.2`: task
 queues the joint home, waits in its homing state with the usual start timeout
 (motion publishes the command number of the last home it started, so a home
 that begins and ends between two task status reads counts as run; this also
-applies to `G28.2` and is covered by `tests/interp/g28.2/instant-home`),
+applies to `G28.2` and is covered by `linuxcnc-tests/interp/g28.2/instant-home`),
 and restores the task mode afterwards. Abort, E-stop and Machine Off cancel it
 as they cancel a `G28.2`, and a resumable Stop (patch 0004) during it is
 accepted and stays `STOPPING` until homing ends. Stop or Pause before the
@@ -725,7 +742,7 @@ hanging. Commands queued behind it also survived and ran after the machine was
 re-enabled; they are now dropped.
 
 `emcTaskAbort()` now runs `mdi_execute_abort()` after its interpreter reset.
-`tests/remap/mdi-remap-abort` interrupts a waiting NGC and Python remap with
+`linuxcnc-tests/remap/mdi-remap-abort` interrupts a waiting NGC and Python remap with
 each of these and with an abort followed by an `EMC_TASK_PLAN_INIT` once idle,
 and checks that an MDI command queued behind it never runs and that MDI still
 works.
@@ -748,7 +765,7 @@ the command, so no client can start work between the check and the reset.
 Abort first, wait for the machine to stop, then reset. Right after startup task
 is busy for a few cycles, and a reset sent then is refused too.
 
-`tests/task/interp-reset-requires-idle` checks that resets are refused during
+`linuxcnc-tests/task/interp-reset-requires-idle` checks that resets are refused during
 an MDI move, a dwell and a jog without changing the modes, and accepted again
 once the machine is idle. The native server additionally refuses a reset while
 a command it wrote earlier is still in progress, because task may not have

@@ -1,0 +1,14 @@
+Verify that optional G76 X endpoints produce tapered XZ drive lines while
+preserving axial P pitch.  The canonical trace covers absolute and incremental
+endpoints, radius and diameter mode, internal and external threads, both drive
+line slopes, entry/exit taper in both Z directions, compound infeed, and spring
+passes. Compound-infeed coverage verifies fixed-direction G76 and
+alternating-flank G76.1 on tapered and cylindrical drive lines, plus centered Q0
+paths, and that no G76.1 pass, mirrored ones included, feeds past either end
+of the programmed Z range (alternating-z-range.ngc). Every cycle runs inside the spindle override hold (LOCK_SPEED_OVERRIDE
+before the first pass, ENABLE_SPEED_OVERRIDE after the last). Negative tests
+verify, by message, that G76 rejects a Y endpoint, a tapered drive line with no
+Z length, a D word, and G76 together with G76.1 in one block.
+
+The pitch check against the axis velocity limits needs a machine and is tested
+in ../../g76-tapered-pitch.

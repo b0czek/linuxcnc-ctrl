@@ -1,0 +1,6 @@
+Verify CSS maximum spindle speed status follows the active G96/G97 mode.
+
+The regression enters G96 while the spindle is stopped, checks that the D
+word is published through spindle status, verifies M5 does not discard that
+modal limit, and checks that G97 clears it. It also verifies that spindle
+`enabled` follows the explicit on/off state rather than a nonzero CSS limit.

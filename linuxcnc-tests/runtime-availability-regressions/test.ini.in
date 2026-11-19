@@ -1,0 +1,3 @@
+# Case-specific overrides; unspecified values come from FIXTURE.BASE.
+[FIXTURE]
+BASE = base.ini

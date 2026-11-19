@@ -1,0 +1,4 @@
+Period statistics use fixed short suffixes. A 41-character thread name is the
+longest that holds them within HAL_NAME_LEN; a longer valid name still creates
+its thread, without statistics. The sample counter is a 64-bit decimal HAL
+parameter and advances after the thread starts.

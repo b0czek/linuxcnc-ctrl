@@ -30,6 +30,11 @@ validation into the ordinary edit-build-test loop.
   backup, and deterministic-ID checks are guarantees, not optional ceremony.
 - LinuxCNC tests must work with its userspace simulator under ordinary POSIX
   scheduling. Do not require hard real-time privileges or timing.
+- New tests for a patch go in this repository's `linuxcnc-tests/`, laid out
+  like LinuxCNC's `tests/`, not in the patch. Patches only change existing
+  upstream tests. Reach the LinuxCNC tree from a test through `$EMC2_HOME`.
+  Run them with `scripts/runtests <path into linuxcnc-tests>` from the
+  LinuxCNC checkout.
 
 ## Phase 1: fast development loop
 
