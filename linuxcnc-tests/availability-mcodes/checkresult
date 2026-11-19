@@ -1,0 +1,4 @@
+#!/bin/sh
+set -e
+grep -q "^availability M-code scenarios ok$" "$1"
+grep -q "^availability without forced homing ok$" "$1"

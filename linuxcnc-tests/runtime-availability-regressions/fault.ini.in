@@ -1,0 +1,13 @@
+# Case-specific overrides; unspecified values come from FIXTURE.BASE.
+[FIXTURE]
+BASE = base.ini
+
+[RS274NGC]
+SUBROUTINE_PATH = .
+ON_ABORT_COMMAND = O<record_abort> call
+
+[JOINT_0]
+AVAILABILITY_CONTROL = 0
+
+[JOINT_1]
+AVAILABILITY_CONTROL = 0

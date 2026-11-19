@@ -4,20 +4,12 @@ Date: Thu, 17 Sep 2026 17:40:12 +0200
 Subject: [PATCH] motion-joint-target-preparation
 
 ---
- src/emc/motion/axis.c                    |   7 +-
- src/emc/motion/control.c                 | 166 ++++++++++++++---------
- src/emc/motion/mot_priv.h                |   9 ++
- src/emc/motion/simple_tp.c               |  11 ++
- src/emc/motion/simple_tp.h               |   2 +
- tests/motion-target-preparation/README   |   1 +
- tests/motion-target-preparation/expected |   0
- tests/motion-target-preparation/test.py  |  90 ++++++++++++
- tests/motion-target-preparation/test.sh  |   3 +
- 9 files changed, 219 insertions(+), 70 deletions(-)
- create mode 100644 tests/motion-target-preparation/README
- create mode 100644 tests/motion-target-preparation/expected
- create mode 100644 tests/motion-target-preparation/test.py
- create mode 100755 tests/motion-target-preparation/test.sh
+ src/emc/motion/axis.c      |   7 +-
+ src/emc/motion/control.c   | 166 ++++++++++++++++++++++---------------
+ src/emc/motion/mot_priv.h  |   9 ++
+ src/emc/motion/simple_tp.c |  11 +++
+ src/emc/motion/simple_tp.h |   2 +
+ 5 files changed, 125 insertions(+), 70 deletions(-)
 
 diff --git a/src/emc/motion/axis.c b/src/emc/motion/axis.c
 index 4cc5503..e814320 100644
@@ -286,118 +278,3 @@ index 26f1a64..c4b10cd 100644
  extern void simple_tp_update(simple_tp_t *tp, double period);
  extern void simple_tp_update_normal(simple_tp_t *tp, double period);
  extern void simple_scurve_tp_update(simple_tp_t *tp, double period);
-diff --git a/tests/motion-target-preparation/README b/tests/motion-target-preparation/README
-new file mode 100644
-index 0000000..99955ca
---- /dev/null
-+++ b/tests/motion-target-preparation/README
-@@ -0,0 +1 @@
-+Compiles production target preparation with deterministic inverse-kinematics doubles and the real cubic implementation. Checks that inverse-kinematics and interpolation failures cannot partially update the joint command vector. No runtime or realtime privileges are required.
-diff --git a/tests/motion-target-preparation/expected b/tests/motion-target-preparation/expected
-new file mode 100644
-index 0000000..e69de29
-diff --git a/tests/motion-target-preparation/test.py b/tests/motion-target-preparation/test.py
-new file mode 100644
-index 0000000..1fa2553
---- /dev/null
-+++ b/tests/motion-target-preparation/test.py
-@@ -0,0 +1,90 @@
-+import os
-+import re
-+from pathlib import Path
-+import subprocess
-+import tempfile
-+root = Path(__file__).resolve().parents[2]
-+source = (root / 'src/emc/motion/control.c').read_text()
-+def function(name, source=source):
-+    start = re.search(r'^(?:static )?(?:int|void) ' + name + r'\(', source, re.M).start()
-+    brace = source.index('{', start)
-+    depth = 1
-+    end = brace + 1
-+    while depth:
-+        depth += (source[end] == '{') - (source[end] == '}')
-+        end += 1
-+    return source[start:end]
-+preamble = r"""
-+#include <assert.h>
-+#include <math.h>
-+#include <string.h>
-+#include "cubic.h"
-+#define _(s) s
-+#define reportError(...) ((void)0)
-+#define NO_OF_KINS_JOINTS 3
-+typedef struct { double x; } EmcPose;
-+typedef struct {
-+    double coarse_pos;
-+    CUBIC_STRUCT cubic;
-+} emcmot_joint_t;
-+static emcmot_joint_t joints[3];
-+typedef int KINEMATICS_FORWARD_FLAGS;
-+static int iflags, fflags;
-+static int ik_result;
-+static double solution[3];
-+static int kinematicsInverse(const EmcPose *p, double *out, int *i, int *f) {
-+    *f = *f + 1;
-+    memcpy(out, solution, sizeof(solution)); return ik_result;
-+}
-+"""
-+# The second patch supplies additional lifecycle/held-reference test fixtures.
-+extension = Path(__file__).with_name('availability-fixture.h')
-+if extension.exists(): preamble += extension.read_text()
-+main = r"""
-+int main(void) {
-+    double positions[3]; CUBIC_STRUCT staged[3]; EmcPose pose = {0};
-+    for (int n=0; n<3; n++) {
-+        cubicInit(&joints[n].cubic);
-+        cubicSetSegmentTime(&joints[n].cubic, .004);
-+        cubicSetInterpolationRate(&joints[n].cubic, 4);
-+        joints[n].coarse_pos = 20+n;
-+        solution[n] = n;
-+    }
-+    unsigned char before[sizeof(joints)]; memcpy(before, joints, sizeof(joints));
-+    fflags = 10;
-+    ik_result = -1;
-+    assert(prepare_joint_targets(&pose, positions, staged) != 0);
-+    assert(fflags == 10);
-+    ik_result = 0;
-+    solution[2] = NAN;
-+    assert(prepare_joint_targets(&pose, positions, staged) != 0);
-+    assert(memcmp(before, joints, sizeof(joints)) == 0);
-+    assert(fflags == 10);
-+    solution[2] = 2;
-+    assert(prepare_joint_targets(&pose, positions, staged) == 0);
-+    assert(memcmp(before, joints, sizeof(joints)) == 0);
-+    assert(fflags == 11);
-+    assert(positions[0] == 0 && positions[1] == 1 && positions[2] == 2);
-+    joints[2].cubic.configured = 0;
-+    memcpy(before, joints, sizeof(joints));
-+    assert(prepare_joint_targets(&pose, positions, staged) != 0);
-+    assert(memcmp(before, joints, sizeof(joints)) == 0);
-+    assert(fflags == 11);
-+    joints[2].cubic.configured = joints[0].cubic.configured;
-+#ifdef TEST_AVAILABILITY
-+    test_availability(&pose, positions, staged);
-+#endif
-+}
-+"""
-+with tempfile.TemporaryDirectory() as tmp:
-+    tmp = Path(tmp)
-+    # Only the math header is shimmed; cubic.c is compiled unchanged.
-+    (tmp/'rtapi_math.h').write_text('#include <math.h>\n')
-+    text = preamble + '\n' + function('prepare_joint_targets')
-+    extra = Path(__file__).with_name('availability-cases.h')
-+    if extra.exists(): text += '\n' + extra.read_text()
-+    (tmp/'test.c').write_text(text + '\n' + main)
-+    subprocess.run([os.environ.get('CC', 'cc'), '-std=c99', '-I'+str(tmp),
-+                    '-I'+str(root/'src/emc/kinematics'), '-I'+str(root/'src/emc/motion'), str(tmp/'test.c'),
-+                    str(root/'src/emc/kinematics/cubic.c'), '-lm', '-o', str(tmp/'test')], check=True)
-+    subprocess.run([str(tmp/'test')], check=True)
-diff --git a/tests/motion-target-preparation/test.sh b/tests/motion-target-preparation/test.sh
-new file mode 100755
-index 0000000..0cd44bb
---- /dev/null
-+++ b/tests/motion-target-preparation/test.sh
-@@ -0,0 +1,3 @@
-+#!/bin/sh
-+set -eu
-+python3 test.py

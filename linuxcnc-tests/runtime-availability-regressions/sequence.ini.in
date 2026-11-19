@@ -1,0 +1,6 @@
+# Availability-controlled joints are referenced only by individual acquisition.
+[FIXTURE]
+BASE = base.ini
+
+[JOINT_1]
+HOME_SEQUENCE = 1

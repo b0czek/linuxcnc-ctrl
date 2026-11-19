@@ -1,0 +1,18 @@
+Interrupt an MDI command whose remap is mid-execution with an E-stop, a
+machine off, a mode change to AUTO and back, and an abort followed by an
+interpreter re-init (EMC_TASK_PLAN_INIT) once idle, then bring the machine back
+and check that milltask is still alive and MDI still works.
+
+Each of these resets the interpreter, which unwinds the remap's call frame.
+Task used to keep its MDI continuation state (mdi_execute_next/_wait/_level)
+and resumed the unwound call once the machine was back in MDI, which
+crashed milltask in Interp::execute_call() for a Python remap.
+
+M400 is an NGC remap that waits on M66; M401 is a Python generator remap
+that keeps yielding INTERP_EXECUTE_FINISH.
+
+An MDI G0 X5 sent while the remap waits is queued behind it and must be
+dropped by each interrupt, never run.
+
+A re-init of a busy machine is not covered: it is only valid when idle, and
+the native server refuses it otherwise.

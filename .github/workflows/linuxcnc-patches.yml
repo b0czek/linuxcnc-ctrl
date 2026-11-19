@@ -4,10 +4,12 @@ on:
   push:
     paths:
       - "linuxcnc-patches/**"
+      - "linuxcnc-tests/**"
       - ".github/workflows/linuxcnc-patches.yml"
   pull_request:
     paths:
       - "linuxcnc-patches/**"
+      - "linuxcnc-tests/**"
       - ".github/workflows/linuxcnc-patches.yml"
   workflow_dispatch:
 
@@ -104,14 +106,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          # tests/resumable-stop/* are the longest tests (about 2.5 minutes
-          # each); spread them one per shard. Everything else is hashed
-          # across all shards.
+          # Upstream tests run from the LinuxCNC tree, the patches' own tests
+          # from linuxcnc-tests/ in this repository.
+          #
+          # linuxcnc-tests/resumable-stop/* are the longest tests (about
+          # 2.5 minutes each); spread them one per shard. Everything else is
+          # hashed across all shards.
           shard_tests=()
           resumable_index=0
           while IFS= read -r -d '' test_path; do
+            relative_path="${test_path#"${GITHUB_WORKSPACE}/"}"
             # LinuxCNC features that are out of scope for this repository.
-            case "${test_path}" in
+            case "${relative_path}" in
               tests/build/ui/* | tests/glcanon/* | tests/halrmt/* | \
                 tests/linuxcncrsh/* | tests/linuxcncrsh-tcp/* | \
                 tests/pyvcp/* | tests/tooldb/* | tests/tooledit/* | \
@@ -119,11 +125,11 @@ jobs:
                 continue
                 ;;
             esac
-            if [[ "${test_path}" == tests/resumable-stop/* ]]; then
+            if [[ "${relative_path}" == linuxcnc-tests/resumable-stop/* ]]; then
               test_shard=$((resumable_index % SHARD_COUNT))
               resumable_index=$((resumable_index + 1))
             else
-              checksum="$(printf '%s' "${test_path}" | cksum)"
+              checksum="$(printf '%s' "${relative_path}" | cksum)"
               checksum="${checksum%% *}"
               test_shard=$((checksum % SHARD_COUNT))
             fi
@@ -131,7 +137,8 @@ jobs:
               shard_tests+=("${test_path}")
             fi
           done < <(
-            find tests \( -name test -o -name test.sh -o -name test.hal \) \
+            find tests "${GITHUB_WORKSPACE}/linuxcnc-tests" \
+              \( -name test -o -name test.sh -o -name test.hal \) \
               -print0 | sort -z
           )
 

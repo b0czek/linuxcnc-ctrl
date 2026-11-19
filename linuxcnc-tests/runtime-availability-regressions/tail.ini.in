@@ -1,0 +1,7 @@
+# TELEOP release: latch the real servo-cycle tail and upstream INPOS during it.
+[FIXTURE]
+BASE = base.ini
+[HAL]
+HALFILE = tail.hal
+[JOINT_1]
+BACKLASH = 0.4

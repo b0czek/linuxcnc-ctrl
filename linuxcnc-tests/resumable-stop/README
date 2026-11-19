@@ -1,0 +1,100 @@
+Verify resumable Stop preserves an active AUTO program and resumes or
+single-steps it.
+
+This directory holds the shared configuration (test.ini, core_sim.hal,
+tool.tbl), the G-code programs and test-ui.py, which runs one scenario per
+LinuxCNC session (selected by RESUMABLE_STOP_SCENARIO). The runtests tests
+are its subdirectories, which can run in parallel:
+
+  g76-stop   G76 Stop and clearance, the G76 cut/retract handoff stress test,
+             fperrev
+  g76-step   G76 Single Step (fresh, after Stop, in flight), exit tapers, and
+             the trapezoidal re-run of fperrev
+  threading  G33, G33.1 and G95 Stop cases, commands queued behind them, and
+             the trapezoidal re-run of g33-chain
+  general    everything else, including the at-speed, dwell, orientation and
+             homing scenarios and the trapezoidal re-runs of ordinary and
+             single-step
+
+Each group lists its scenarios in its "scenarios" file. Its test.sh runs them
+through run-scenarios.sh, which starts each from a fresh LinuxCNC session in a
+private copy of the configuration, so groups never share files LinuxCNC
+writes. Its checkresult (check-result.sh) fails unless every listed scenario
+reported success and the count matches the number given in checkresult.
+
+This regression test exercises the task-level Stop operation directly through
+the Python command API. It checks that an active feed move stops without
+aborting queued AUTO state, that spindle and coolant outputs are disabled
+while stopped, and that Resume restores them before continuing the same
+program to completion. test.ini selects the jerk-limited trajectory planner
+(PLANNER_TYPE = 1) for every scenario, although position-synchronized moves
+(G33, G76, G33.1) always use the trapezoidal planner; the ordinary,
+single-step, fperrev and g33-chain scenarios run a second time with the
+default trapezoidal planner (PLANNER_TYPE = 0), which joins the end of a G33
+to the following feed with a blend arc. Every run rejects zero-limit Ruckig
+fallback errors, which the G95 scenario could provoke while spindle feedback
+recovers after Resume. The dwell-atspeed scenario checks that a
+spindle at-speed barrier armed before Stop still holds the next feed after
+Resume. The homing scenario issues Stop during a queued G28.2
+and checks that the homing cycle completes before the program holds in
+STOPPED.
+The homing-interrupted scenario ends a queued G28.2 early by Abort, E-stop,
+machine off, a mode change, and Stop followed at once by Abort and AUTO (from
+homing-long.ngc, whose 8 s final homing move leaves time for that), and
+checks that a later program runs, that Stop is rejected for an MDI command
+and that it still reaches STOPPED in a new AUTO program.
+The speed-change-atspeed scenario checks that an S-word after two Stop and
+Resume cycles still makes the next feed wait for spindle at-speed.
+The queued-feed-atspeed scenario stops while a queued feed waits for spindle
+at-speed and checks that the feed still waits for at-speed after Resume.
+The g33-chain scenario stops during the first of two consecutive G33 moves
+and checks that Stop lets both finish before STOPPED, and that after Resume
+Z stays put and nothing moves faster than the following feed.
+The step-resume-stopping scenario sends Step and then Resume while Stop waits
+for G33 and checks that the program then runs on without single-stepping.
+The g95-between-g33 scenario stops during a G95 move between two G33 moves
+and checks that the second G33 waits for a fresh spindle index after Resume.
+The command-after-sync scenario stops during a G33 followed by M5, an S-word
+or M9, and during a rigid tap followed by M5, and checks that the command
+takes effect after Resume, in program order.
+The resume-atspeed scenario checks that Resume, and Single Step from STOPPED,
+wait in STARTING until the restored spindle reports at-speed before motion
+continues: not at all while spindle.0.at-speed has never read false with the
+spindle on (tied true), until at-speed goes true when it was false while
+stopped, and, when at-speed stayed true through the Stop, until it has
+dropped after the restore and come back. It also checks that a second Stop
+returns to STOPPED and that Abort ends the program while waiting. Since
+Resume waits for at-speed, rapid-no-atspeed checks that an interrupted rapid
+also waits and that the feed after it still waits for the program's M3
+barrier, and queued-g33 drops and restores at-speed after Resume as a
+spindle would while spinning up.
+The pause-starting scenario pauses while Resume waits in STARTING and checks
+that the program returns to STOPPED with the spindle off and stays there when
+at-speed arrives, then resumes normally; pause-latched-resume pauses after a
+Resume latched while Stop waits for G33 and checks that the program stays
+STOPPED once G33 ends. The resume-s0 scenario checks that Resume does not
+wait for at-speed for a spindle restored at S0.
+The spindle-state scenario checks that an S-word for a spindle stopped by M5
+leaves it stopped after a Stop and Resume of the other spindle.
+The G76 scenarios check that Stop executes only the
+explicitly marked post-cut rapid retract, leaving the tool clear of the
+finished thread rather than stopped at cutting depth. Coverage includes
+cylindrical and tapered drive lines, synchronized exit tapers, repeated Stop
+requests across the cut/retract handoff, and a negative G33 test proving that
+an unrelated following rapid is not executed. Single Step coverage enters the
+first G76 pass directly and verifies every cylindrical and tapered safe
+approach step followed by its combined infeed, synchronized-cut, and clearance
+step. It also starts G76 in normal AUTO_RUN, stops after the first pass with
+later passes already queued, and verifies that each following AUTO_STEP
+reaches exactly one cylindrical or tapered safe approach endpoint, and the
+next AUTO_STEP completes that pass's infeed, thread, and clearance.
+In-flight Single Step coverage arms during an ordinary source block with three
+later motion blocks already queued and during an active G76 cut with later
+passes queued. It verifies that the active block or thread-plus-clearance unit
+finishes normally and motion remains at its boundary until Resume. While the
+step is armed and the active unit is still moving, both task and motion report
+unpaused; they change to paused only when motion reaches the latched boundary.
+Arc blending is enabled for all scenarios, so the exact-clearance assertions
+also prove that a marked G76 retract endpoint is not trimmed by a following
+rapid. The handoff stress case uses a slow synchronized feed and issues Stop at
+least 20 task cycles before the cut endpoint.

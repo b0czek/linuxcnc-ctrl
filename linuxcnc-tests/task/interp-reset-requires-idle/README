@@ -1,0 +1,5 @@
+An interpreter re-init (EMC_TASK_PLAN_INIT, reset_interpreter() in Python)
+restores the startup modes, so task refuses it unless the machine is at
+rest. The test checks that a reset during an MDI move, a dwell and a
+continuous jog is refused with an operator error and leaves the modes alone,
+and that the same reset succeeds once the machine is idle again.

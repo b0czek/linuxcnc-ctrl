@@ -1,0 +1,4 @@
+#!/bin/sh
+set -e
+grep -q "^runtime availability scenarios ok$" "$1"
+grep -q "^initial availability scenarios ok$" "$1"

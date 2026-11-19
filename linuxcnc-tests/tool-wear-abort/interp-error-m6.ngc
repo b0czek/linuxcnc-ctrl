@@ -1,0 +1,7 @@
+; The M6 block queues the change and its offset, then fails on G1 with no
+; feed rate; the queued commands are discarded by the error path.
+G21 G90 G94
+F0
+G0 X1
+T2 M6 G1 X10
+M2
