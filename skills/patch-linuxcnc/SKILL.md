@@ -33,7 +33,8 @@ validation into the ordinary edit-build-test loop.
 - New tests for a patch go in this repository's `linuxcnc-tests/`, laid out
   like LinuxCNC's `tests/`, not in the patch. Patches only change existing
   upstream tests. Reach the LinuxCNC tree from a test through `$EMC2_HOME`.
-  Run them with `scripts/runtests <path into linuxcnc-tests>` from the
+  Run the suite with `linuxcnc-tests/run.sh <linuxcnc dir>`, or one test with
+  `scripts/runtests <path into linuxcnc-tests>` from the
   LinuxCNC checkout.
 
 ## Phase 1: fast development loop

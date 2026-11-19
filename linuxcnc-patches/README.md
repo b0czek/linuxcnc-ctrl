@@ -22,8 +22,9 @@ complete series.
 Changes under `linuxcnc-patches/` or `linuxcnc-tests/` trigger the
 [`LinuxCNC patch tests`](../.github/workflows/linuxcnc-patches.yml) workflow on
 pushes and pull requests. The workflow materializes the complete series on the
-pinned revision, builds a headless LinuxCNC in run-in-place mode, and runs the LinuxCNC regression suite with failure output enabled,
-leaving out tests for features that are out of scope for this repository: GUIs
+pinned revision, builds a headless LinuxCNC in run-in-place mode, and runs the
+regression suite with [`linuxcnc-tests/run.sh`](../linuxcnc-tests/run.sh),
+which leaves out tests for features that are out of scope for this repository: GUIs
 and GUI tools (`tests/build/ui`, `tests/glcanon`, `tests/pyvcp`,
 `tests/tooledit`, `tests/ui-smoke`), older remote interfaces (`tests/halrmt`,
 `tests/linuxcncrsh`, `tests/linuxcncrsh-tcp`) and tool database programs
@@ -35,13 +36,16 @@ The regression tests for the patches live in
 [`linuxcnc-tests/`](../linuxcnc-tests), not in the patches. Its layout mirrors
 LinuxCNC's `tests/` directory. The patches only change upstream tests whose
 expected output or setup they affect, and add `skip` files to upstream tests
-for features this build refuses. Run both sets with the patched LinuxCNC's
-`runtests`:
+for features this build refuses. Run both sets, without the out-of-scope
+tests, against a run-in-place build of the patched LinuxCNC:
 
 ```sh
-cd /path/to/linuxcnc
-scripts/runtests tests /path/to/linuxcnc-ctrl/linuxcnc-tests
+./linuxcnc-tests/run.sh /path/to/linuxcnc
 ```
+
+Extra arguments go to LinuxCNC's `runtests`, for example `-p` to print the
+output of failing tests. A single test still runs directly with
+`scripts/runtests <test directory>` from the LinuxCNC checkout.
 
 Tests that need files from the LinuxCNC tree find it through `$EMC2_HOME`,
 which a run-in-place build sets to the LinuxCNC checkout.
