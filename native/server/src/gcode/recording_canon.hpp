@@ -13,6 +13,9 @@ namespace linuxcnc::recording {
 
 struct SessionConfig {
   CANON_UNITS units = CANON_UNITS_INCHES;
+  // Configured axes, bit 0 = X through bit 8 = W, as task derives them from
+  // [TRAJ]COORDINATES. The interpreter rejects words for any other axis.
+  int axis_mask = 0x7;
   std::vector<CANON_TOOL_TABLE> tools;
   std::size_t max_events = 100000;
   std::size_t max_bytes = std::size_t{8} * 1024U * 1024U;

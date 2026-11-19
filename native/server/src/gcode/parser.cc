@@ -6,7 +6,10 @@
 #include <cctype>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 
 #include "interp_base.hh"
 #include "interp_return.hh"
@@ -27,8 +30,24 @@ bool result_ok(const int result) {
 
 struct IniPreviewState {
   CANON_UNITS units = CANON_UNITS_INCHES;
+  int axis_mask = 0x7;
   std::string startup_code;
 };
+
+// The axis mask exactly as task builds it (src/emc/ini/initraj.cc): every
+// letter of XYZABCUVW named in [TRAJ]COORDINATES, in any case, and X, Y and Z
+// when COORDINATES is missing. Other characters, such as spaces, are ignored.
+int axis_mask_from_coordinates(const std::optional<std::string>& coordinates) {
+  if (!coordinates) return 0x7;
+  constexpr std::string_view axes = "XYZABCUVW";
+  int mask = 0;
+  for (const char character : *coordinates) {
+    const auto index = axes.find(
+        static_cast<char>(std::toupper(static_cast<unsigned char>(character))));
+    if (index != std::string_view::npos) mask |= 1 << index;
+  }
+  return mask;
+}
 
 IniPreviewState load_preview_state(const std::string& path) {
   const ActiveIni ini(path);
@@ -50,6 +69,8 @@ IniPreviewState load_preview_state(const std::string& path) {
     else
       throw std::runtime_error("unsupported [TRAJ]LINEAR_UNITS: " + *units);
   }
+  state.axis_mask =
+      axis_mask_from_coordinates(ini.find_string("TRAJ", "COORDINATES"));
   if (const auto startup = ini.find_string("RS274NGC", "RS274NGC_STARTUP_CODE"))
     state.startup_code = *startup;
   return state;
@@ -98,6 +119,7 @@ ParseResult SerializedRs274Parser::parse_file(const std::string& filepath,
   const auto preview_state = load_preview_state(options.ini_path);
   ::linuxcnc::recording::SessionConfig session_config;
   session_config.units = preview_state.units;
+  session_config.axis_mask = preview_state.axis_mask;
   session_config.tools.assign(CANON_POCKETS_MAX, tooldata_entry_init());
   if (tool_mmap_user() == 0) {
     for (int pocket = 0; pocket < CANON_POCKETS_MAX; ++pocket) {
