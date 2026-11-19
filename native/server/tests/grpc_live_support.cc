@@ -552,10 +552,23 @@ void verify_task_queued_command_ordering(
   }
 
   // Abort passes the hold. It discards the queued delete, which must not be
-  // reported as done.
+  // reported as done, and cancels the MDI command held behind it, which must
+  // not run after the abort.
   create_live_tool(machine, kLiveTool, kLivePocket);
   {
     QueuedToolDelete overtaken(machine, kLiveTool);
+    ExecuteCommandResponse held_response;
+    grpc::Status held_status;
+    std::thread held([&] {
+      ExecuteCommandRequest request;
+      request.set_wait_policy(linuxcnc::v1::WAIT_POLICY_COMPLETED);
+      request.mutable_mdi()->set_command("G4 P0.2");
+      grpc::ClientContext context;
+      context.set_deadline(std::chrono::system_clock::now() +
+                           std::chrono::seconds(10));
+      held_status = machine->ExecuteCommand(&context, request, &held_response);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
     ExecuteCommandRequest abort;
     abort.mutable_abort_task();
     const auto started = std::chrono::steady_clock::now();
@@ -568,6 +581,13 @@ void verify_task_queued_command_ordering(
                  "a delete discarded by abort is not reported as done");
     live_require(tool_exists(machine, kLiveTool),
                  "the discarded delete left the tool in place");
+    held.join();
+    live_require(held_status.ok(), "the held MDI command is answered");
+    live_require(
+        held_response.status() == linuxcnc::v1::RCS_STATUS_ERROR &&
+            held_response.error().message().find(
+                "cancelled before reaching LinuxCNC") != std::string::npos,
+        "abort cancels the command held behind the queued delete");
   }
 
   // E-stop passes the hold in the same way.
