@@ -10,6 +10,8 @@
 #include <thread>
 #include <utility>
 
+#include "linuxcnc_grpc/linuxcnc/command_completion_tracker.hpp"
+
 #ifdef LINUXCNC_GRPC_HAS_NML
 #include "cms.hh"
 #include "emc.hh"
@@ -24,6 +26,14 @@ static_assert(linuxcnc::server::NmlAdapter::kDigitalOutputLimit ==
               EMCMOT_MAX_DIO);
 static_assert(linuxcnc::server::NmlAdapter::kAnalogOutputLimit ==
               EMCMOT_MAX_AIO);
+static_assert(linuxcnc::server::detail::kNmlRcsStatusDone ==
+              static_cast<std::int32_t>(RCS_STATUS::DONE));
+static_assert(linuxcnc::server::detail::kNmlRcsStatusError ==
+              static_cast<std::int32_t>(RCS_STATUS::ERROR));
+static_assert(linuxcnc::server::detail::kNmlTaskStateEstop ==
+              static_cast<std::int32_t>(EMC_TASK_STATE::ESTOP));
+static_assert(linuxcnc::server::detail::kNmlTaskStateOff ==
+              static_cast<std::int32_t>(EMC_TASK_STATE::OFF));
 #endif
 
 namespace linuxcnc::server {
@@ -181,161 +191,6 @@ struct NmlAdapter::Impl {
     RetryState retry_;
   };
 
-  class CommandCompletionTracker {
-   public:
-    using Completion = std::function<void()>;
-    using Failure = std::function<void(std::string)>;
-
-    explicit CommandCompletionTracker(std::chrono::milliseconds timeout)
-        : timeout_(timeout) {}
-
-    void track(int serial, Completion completed, Failure failed) {
-      const auto now = std::chrono::steady_clock::now();
-      Pending pending{serial,
-                      timeout_ == std::chrono::milliseconds::zero()
-                          ? std::chrono::steady_clock::time_point::max()
-                          : now + timeout_,
-                      0, std::move(completed), std::move(failed)};
-      Resolution resolution = Resolution::Pending;
-      {
-        std::lock_guard lock(mutex_);
-        pending.after_observation = observation_sequence_;
-        if (!channel_healthy_) {
-          resolution = Resolution::Unavailable;
-        } else if (have_snapshot_) {
-          resolution =
-              resolve(pending, latest_, std::chrono::steady_clock::now(),
-                      observation_sequence_);
-        }
-        if (resolution == Resolution::Pending) {
-          pending_.push_back(std::move(pending));
-          return;
-        }
-      }
-      finish(pending, resolution);
-    }
-
-    void channel_failed() {
-      std::vector<Pending> failed;
-      {
-        std::lock_guard lock(mutex_);
-        channel_healthy_ = false;
-        failed.swap(pending_);
-      }
-      for (auto& pending : failed)
-        pending.failed("LinuxCNC NML status channel is unavailable");
-    }
-
-    void observe(const NmlStatusSnapshot& snapshot) {
-      std::vector<std::pair<Pending, Resolution>> ready;
-      {
-        std::lock_guard lock(mutex_);
-        latest_ = snapshot;
-        have_snapshot_ = true;
-        channel_healthy_ = true;
-        observed_at_ = std::chrono::steady_clock::now();
-        ++observation_sequence_;
-        collect_ready(observed_at_, &ready);
-      }
-      for (const auto& item : ready) finish(item.first, item.second);
-    }
-
-    void tick() {
-      std::vector<std::pair<Pending, Resolution>> ready;
-      {
-        std::lock_guard lock(mutex_);
-        collect_ready(std::chrono::steady_clock::now(), &ready);
-      }
-      for (const auto& item : ready) finish(item.first, item.second);
-    }
-
-    bool fresh() const {
-      std::lock_guard lock(mutex_);
-      return channel_healthy_ && have_snapshot_ &&
-             std::chrono::steady_clock::now() - observed_at_ <
-                 std::chrono::seconds(1);
-    }
-
-   private:
-    struct Pending {
-      int serial;
-      std::chrono::steady_clock::time_point deadline;
-      std::uint64_t after_observation;
-      Completion completed;
-      Failure failed;
-    };
-
-    enum class Resolution {
-      Pending,
-      Completed,
-      Rejected,
-      TimedOut,
-      Unavailable
-    };
-
-    static Resolution resolve(const Pending& pending,
-                              const NmlStatusSnapshot& snapshot,
-                              std::chrono::steady_clock::time_point now,
-                              std::uint64_t observation_sequence) {
-      if (observation_sequence <= pending.after_observation)
-        return now >= pending.deadline ? Resolution::TimedOut
-                                       : Resolution::Pending;
-      if (detail::nml_serial_after(snapshot.echo_serial_number, pending.serial))
-        return Resolution::Completed;
-      if (snapshot.echo_serial_number == pending.serial) {
-        if (snapshot.rcs_status == static_cast<std::int32_t>(RCS_STATUS::DONE))
-          return Resolution::Completed;
-        if (snapshot.rcs_status == static_cast<std::int32_t>(RCS_STATUS::ERROR))
-          return Resolution::Rejected;
-      }
-      return now >= pending.deadline ? Resolution::TimedOut
-                                     : Resolution::Pending;
-    }
-
-    void collect_ready(std::chrono::steady_clock::time_point now,
-                       std::vector<std::pair<Pending, Resolution>>* ready) {
-      auto pending = pending_.begin();
-      while (pending != pending_.end()) {
-        const auto resolution =
-            resolve(*pending, latest_, now, observation_sequence_);
-        if (resolution == Resolution::Pending) {
-          ++pending;
-          continue;
-        }
-        ready->emplace_back(std::move(*pending), resolution);
-        pending = pending_.erase(pending);
-      }
-    }
-
-    static void finish(const Pending& pending, Resolution resolution) {
-      switch (resolution) {
-        case Resolution::Completed:
-          pending.completed();
-          break;
-        case Resolution::Rejected:
-          pending.failed("LinuxCNC rejected the command");
-          break;
-        case Resolution::TimedOut:
-          pending.failed("timed out waiting for LinuxCNC command completion");
-          break;
-        case Resolution::Unavailable:
-          pending.failed("LinuxCNC NML status channel is unavailable");
-          break;
-        case Resolution::Pending:
-          break;
-      }
-    }
-
-    mutable std::mutex mutex_;
-    NmlStatusSnapshot latest_;
-    std::vector<Pending> pending_;
-    std::chrono::steady_clock::time_point observed_at_{};
-    bool have_snapshot_ = false;
-    bool channel_healthy_ = false;
-    std::uint64_t observation_sequence_ = 0;
-    std::chrono::milliseconds timeout_{};
-  };
-
   std::unique_ptr<RCS_CMD_CHANNEL> make_command_channel() const {
     if (nml_file.empty()) return {};
     return std::make_unique<RCS_CMD_CHANNEL>(emcFormat, "emcCommand", "xemc",
@@ -363,7 +218,7 @@ struct NmlAdapter::Impl {
   OwnedChannel<RCS_STAT_CHANNEL> status_channel;
   OwnedChannel<RCS_STAT_CHANNEL> position_status_channel;
   OwnedChannel<NML> error_channel;
-  CommandCompletionTracker completions{command_completion_timeout};
+  detail::CommandCompletionTracker completions{command_completion_timeout};
 
   void fail_status_channel() {
     status_channel.failed();
@@ -655,12 +510,14 @@ CommandSubmission NmlAdapter::submit(
     // NOLINTNEXTLINE(performance-unnecessary-value-param): see above.
     std::stop_token stop_token) {
 #ifdef LINUXCNC_GRPC_HAS_NML
-  const bool safety_command = command.kind == NmlCommandKind::StopProgram ||
-                              command.kind == NmlCommandKind::Pause ||
-                              command.kind == NmlCommandKind::AbortTask;
+  const auto routing = detail::nml_command_routing(command);
+  const bool safety_command = routing.priority != CommandPriority::Normal;
+  // A command cancelled by a later Interrupt never runs its action, so undo
+  // what was reserved for it here instead.
+  auto on_cancelled = command.on_failed;
   return impl_->commands.submit_with_context(
-      [this, command = std::move(command),
-       safety_command](CommandContext& context) mutable {
+      [this, command = std::move(command), safety_command,
+       routing](CommandContext& context) mutable {
         const auto rollback = [&command] {
           if (command.on_failed) command.on_failed();
         };
@@ -691,6 +548,14 @@ CommandSubmission NmlAdapter::submit(
               message = std::make_unique<EMC_TASK_PLAN_SYNCH>();
               break;
             case NmlCommandKind::ResetInterpreter:
+              // LinuxCNC refuses a reset unless the machine is idle. Commands
+              // this server wrote earlier may not have reached task yet, so
+              // refuse here too rather than let task judge a stale state.
+              // Checked after every earlier command was written.
+              if (impl_->completions.has_pending())
+                throw std::runtime_error(
+                    "interpreter reset refused: earlier commands are still "
+                    "in progress; wait for them or abort first");
               message = std::make_unique<EMC_TASK_PLAN_INIT>();
               break;
             case NmlCommandKind::ProgramOpen: {
@@ -1044,41 +909,17 @@ CommandSubmission NmlAdapter::submit(
             }
           }
           const int serial = command_message->serial_number;
-          context.mark_accepted(static_cast<std::uint32_t>(serial));
-          context.defer_completion();
-          impl_->completions.track(
-              serial,
-              [completed = context.mark_completed, failed = context.mark_failed,
-               on_completed = std::move(command.on_completed)]() mutable {
-                try {
-                  if (on_completed) on_completed();
-                  completed();
-                } catch (const std::exception& error) {
-                  failed(error.what());
-                } catch (...) {
-                  failed("command completion callback failed");
-                }
-              },
-              [failed = context.mark_failed,
-               on_failed =
-                   std::move(command.on_failed)](std::string error) mutable {
-                try {
-                  if (on_failed) on_failed();
-                } catch (const std::exception& rollback_error) {
-                  error += "; rollback failed: ";
-                  error += rollback_error.what();
-                } catch (...) {
-                  error += "; rollback failed";
-                }
-                failed(std::move(error));
-              });
+          detail::track_written_command(
+              &impl_->completions, context, serial, routing.task_queued,
+              impl_->command_completion_timeout,
+              std::move(command.on_completed), std::move(command.on_failed));
         } catch (...) {
           rollback();
           throw;
         }
       },
-      stop_token,
-      safety_command ? CommandPriority::Safety : CommandPriority::Normal);
+      stop_token, routing.priority, routing.hold_policy,
+      std::move(on_cancelled));
 #else
   (void)command;
   (void)stop_token;

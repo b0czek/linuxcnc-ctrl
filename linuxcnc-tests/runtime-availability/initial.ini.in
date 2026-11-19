@@ -1,0 +1,9 @@
+# Case-specific overrides; unspecified values come from FIXTURE.BASE.
+[FIXTURE]
+BASE = base.ini
+
+[DISPLAY]
+DISPLAY = ./initial-ui.py
+
+[SPINDLE_0]
+INITIAL_AVAILABILITY = 1

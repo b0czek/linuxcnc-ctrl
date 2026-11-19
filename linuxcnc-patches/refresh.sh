@@ -59,16 +59,21 @@ cleanup() {
 trap cleanup EXIT
 
 generated=()
+next_number=1
 for index in "${!commits[@]}"; do
-  number="$(printf '%04d' "$((index + 1))")"
   if [[ ${index} -lt ${#existing_patches[@]} ]]; then
     filename="$(basename -- "${existing_patches[index]}")"
-    [[ "${filename}" == "${number}-"*.patch ]] || \
-      fail "Patch filename ${filename} does not match its ordinal ${number}"
+    [[ "${filename}" =~ ^([0-9]{4})-.+\.patch$ ]] || \
+      fail "Patch filename ${filename} does not start with a four-digit sequence number"
+    number=$((10#${BASH_REMATCH[1]}))
+    ((number >= next_number)) || \
+      fail "Patch filename ${filename} does not continue the ascending sequence"
   else
+    number=${next_number}
     slug="$(git -C "${LINUXCNC_DIR}" show -s --format=%f "${commits[index]}")"
-    filename="${number}-${slug}.patch"
+    filename="$(printf '%04d' "${number}")-${slug}.patch"
   fi
+  next_number=$((number + 1))
 
   git -C "${LINUXCNC_DIR}" format-patch --zero-commit --no-signature \
     --stdout -1 "${commits[index]}" >"${OUTPUT_DIR}/${filename}"

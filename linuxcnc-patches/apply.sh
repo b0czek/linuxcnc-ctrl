@@ -92,11 +92,15 @@ git check-ref-format --branch "${branch_name}" >/dev/null 2>&1 || \
 shopt -s nullglob
 patches=("${PATCH_DIR}"/*.patch)
 [[ ${#patches[@]} -gt 0 ]] || fail "No LinuxCNC patches found in ${PATCH_DIR}"
-for index in "${!patches[@]}"; do
-  number="$(printf '%04d' "$((index + 1))")"
-  filename="$(basename -- "${patches[index]}")"
-  [[ "${filename}" == "${number}-"*.patch ]] || \
-    fail "Patch filename ${filename} does not match its ordinal ${number}"
+previous_number=0
+for patch in "${patches[@]}"; do
+  filename="$(basename -- "${patch}")"
+  [[ "${filename}" =~ ^([0-9]{4})-.+\.patch$ ]] || \
+    fail "Patch filename ${filename} does not start with a four-digit sequence number"
+  number=$((10#${BASH_REMATCH[1]}))
+  ((number > previous_number)) || \
+    fail "Patch filename ${filename} does not continue the ascending sequence"
+  previous_number=${number}
 done
 
 readonly TEMP_DIR="$(mktemp -d)"

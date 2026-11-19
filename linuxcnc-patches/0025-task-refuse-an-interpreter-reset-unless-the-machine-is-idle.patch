@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dariusz Majnert <dariusz.majnert@gmail.com>
+Date: Thu, 19 Nov 2026 08:33:55 +0100
+Subject: [PATCH] task: refuse an interpreter reset unless the machine is idle
+
+EMC_TASK_PLAN_INIT re-initialises the interpreter at once: it reloads the
+INI settings and runs RS274NGC_STARTUP_CODE, whatever task is doing. On a
+machine that is still running an MDI command, a dwell, queued motion or a
+jog, that silently swaps the modes underneath work in progress.
+
+Check in emcTaskPlan(), where task handles the command, that the
+interpreter, task, the MDI queue and motion are all at rest, and refuse the
+reset with an operator error otherwise. Because task is single threaded and
+owns this state, no other client can start work between the check and the
+reset.
+
+The new test tests/task/interp-reset-requires-idle checks that resets are
+refused during an MDI move, a dwell and a jog without touching the modes,
+and accepted again once the machine is idle.
+---
+ src/emc/task/emctaskmain.cc | 50 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 50 insertions(+)
+
+diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
+index 65846a8..968fb84 100644
+--- a/src/emc/task/emctaskmain.cc
++++ b/src/emc/task/emctaskmain.cc
+@@ -1216,6 +1216,45 @@ static void emcTaskStopProgress()
+     }
+ }
+ 
++// Why an interpreter reset must wait, or NULL when task, the interpreter
++// and motion are all at rest.
++static const char *interpreterResetBlocker()
++{
++    if (availability_pending.active) {
++        return "an availability change is in progress";
++    }
++    if (emcStatus->task.interpState != EMC_TASK_INTERP::IDLE ||
++            emcStatus->task.callLevel != 0 || emcTaskPlanIsWait()) {
++        return "the interpreter is running";
++    }
++    if (emcTaskCommand || interp_list.len() ||
++            emcStatus->task.execState != EMC_TASK_EXEC::DONE) {
++        return "task is executing a command";
++    }
++    if (mdi_execute_queue.len() || mdi_execute_wait || mdi_execute_next ||
++            mdi_execute_level >= 0) {
++        return "MDI commands are queued";
++    }
++    if (emcStatus->task.task_paused || emcStatus->motion.traj.paused ||
++            emcStatus->task.stopState != EMC_TASK_STOP_STATE::IDLE) {
++        return "the machine is paused or stopped mid-program";
++    }
++    if (emcStatus->motion.status != RCS_STATUS::DONE ||
++            emcStatus->io.status != RCS_STATUS::DONE ||
++            emcStatus->motion.traj.queue != 0 ||
++            emcStatus->motion.traj.activeQueue != 0 ||
++            !emcStatus->motion.traj.inpos ||
++            emcStatus->motion.traj.current_vel != 0.0) {
++        return "motion is in progress";
++    }
++    for (int j = 0; j < emcStatus->motion.traj.joints; j++) {
++        if (emcStatus->motion.joint[j].homing) {
++            return "a joint is homing";
++        }
++    }
++    return NULL;
++}
++
+ /*
+   emcTaskPlan()
+ 
+@@ -1273,6 +1312,17 @@ static int emcTaskPlan(void)
+         return retval;
+     }
+ 
++    if (type == EMC_TASK_PLAN_INIT_TYPE) {
++        // Re-initialising the interpreter restores the startup modes and
++        // drops its state, so it is only allowed on a machine at rest.
++        // Checking here, where task handles the command, leaves no window
++        // in which another client could start work after the check.
++        if (const char *busy = interpreterResetBlocker()) {
++            emcOperatorError(_("interpreter reset refused: %s; abort and wait for the machine to stop first"), busy);
++            return -1;
++        }
++    }
++
+     if (emcStatus->task.stopState != EMC_TASK_STOP_STATE::IDLE &&
+             (type == EMC_TASK_PLAN_RUN_TYPE ||
+              type == EMC_TASK_PLAN_RESUME_TYPE ||

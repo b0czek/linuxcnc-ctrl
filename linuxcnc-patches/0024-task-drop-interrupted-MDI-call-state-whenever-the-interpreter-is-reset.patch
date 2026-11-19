@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dariusz Majnert <dariusz.majnert@gmail.com>
+Date: Thu, 12 Nov 2026 14:09:33 +0100
+Subject: [PATCH] task: drop interrupted MDI call state whenever the
+ interpreter is reset
+
+An MDI command that runs a remap (or an O-word call) and has to wait for
+its queue to drain leaves task with continuation state: mdi_execute_level,
+mdi_execute_wait and mdi_execute_next, which make task call
+interp.execute(NULL) to resume the call once the queue is empty.
+mdi_execute_abort() clears that state, but only some abort paths call it.
+
+emcTaskAbort() closes and resets the interpreter, which unwinds the call
+stack, yet the callers in emctask.cc cannot reach the static
+mdi_execute_abort(): emcTaskSetState() for E-stop, machine off and E-stop
+reset, emcTaskSetMode() for MDI and AUTO, the ON to not-ON edge in
+emcTaskUpdate() and the error path of emcTaskPlanSynch(). In all of these
+the stale state survives, and when the machine is back on in MDI mode task
+resumes a call that no longer exists. For a Python remap that segfaults
+milltask in Interp::execute_call() (no executing remap); for an NGC remap
+the MDI command never finishes. Commands queued behind the interrupted one
+also survived and ran after the machine was re-enabled.
+
+Make mdi_execute_abort() visible to emctask.cc and call it at the end of
+emcTaskAbort(), right after the interpreter reset. The existing explicit
+calls next to emcTaskAbort() are left as they are; a second call is a
+no-op.
+
+tests/remap/mdi-remap-abort interrupts a waiting NGC and a waiting Python
+remap with each of E-stop, machine off, a mode change and an abort followed
+by an interpreter re-init once idle, and checks that milltask survives and
+MDI works afterwards.
+---
+ src/emc/task/emctask.cc     | 4 ++++
+ src/emc/task/emctaskmain.cc | 2 +-
+ src/emc/task/task.hh        | 1 +
+ 3 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/emc/task/emctask.cc b/src/emc/task/emctask.cc
+index 5a1e60e..67edc9b 100644
+--- a/src/emc/task/emctask.cc
++++ b/src/emc/task/emctask.cc
+@@ -282,6 +282,10 @@ int emcTaskAbort()
+ 	}
+     }
+ 
++    // the reset above unwound any call an interrupted MDI command was
++    // inside of, so its continuation and queued MDI commands go too
++    mdi_execute_abort();
++
+     return 0;
+ }
+ 
+diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
+index 9097f40..65846a8 100644
+--- a/src/emc/task/emctaskmain.cc
++++ b/src/emc/task/emctaskmain.cc
+@@ -798,7 +798,7 @@ interpret_again:
+ 		}		// if interp len is less than max
+ }
+ 
+-static void mdi_execute_abort(void)
++void mdi_execute_abort(void)
+ {
+     int queued_mdi_commands;
+ 
+diff --git a/src/emc/task/task.hh b/src/emc/task/task.hh
+index 223886e..1a7a999 100644
+--- a/src/emc/task/task.hh
++++ b/src/emc/task/task.hh
+@@ -34,6 +34,7 @@ int emcTaskInit();
+ int emcTaskHalt();
+ int emcTaskStateRestore();
+ int emcTaskAbort();
++void mdi_execute_abort(void);
+ void emcTaskCancelAvailability();
+ int emcTaskSetMode(EMC_TASK_MODE mode);
+ int emcTaskSetState(EMC_TASK_STATE state);

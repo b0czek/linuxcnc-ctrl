@@ -4,30 +4,12 @@ Date: Fri, 4 Sep 2026 15:26:24 +0200
 Subject: [PATCH] rs274ngc: pass spindle selectors to remaps
 
 ---
- docs/src/remap/remap.adoc              | 12 +++++++++--
- src/emc/rs274ngc/interp_remap.cc       | 15 +++++++++----
- tests/remap/dollar-argspec/README      |  1 +
- tests/remap/dollar-argspec/expected    | 29 ++++++++++++++++++++++++++
- tests/remap/dollar-argspec/m501.ngc    |  9 ++++++++
- tests/remap/dollar-argspec/m502.ngc    |  5 +++++
- tests/remap/dollar-argspec/remap.py    | 10 +++++++++
- tests/remap/dollar-argspec/test.ini    | 18 ++++++++++++++++
- tests/remap/dollar-argspec/test.ngc    | 11 ++++++++++
- tests/remap/dollar-argspec/test.sh     |  3 +++
- tests/remap/dollar-argspec/toplevel.py |  1 +
- 11 files changed, 108 insertions(+), 6 deletions(-)
- create mode 100644 tests/remap/dollar-argspec/README
- create mode 100644 tests/remap/dollar-argspec/expected
- create mode 100644 tests/remap/dollar-argspec/m501.ngc
- create mode 100644 tests/remap/dollar-argspec/m502.ngc
- create mode 100644 tests/remap/dollar-argspec/remap.py
- create mode 100644 tests/remap/dollar-argspec/test.ini
- create mode 100644 tests/remap/dollar-argspec/test.ngc
- create mode 100755 tests/remap/dollar-argspec/test.sh
- create mode 100644 tests/remap/dollar-argspec/toplevel.py
+ docs/src/remap/remap.adoc        | 12 ++++++++++--
+ src/emc/rs274ngc/interp_remap.cc | 15 +++++++++++----
+ 2 files changed, 21 insertions(+), 6 deletions(-)
 
 diff --git a/docs/src/remap/remap.adoc b/docs/src/remap/remap.adoc
-index b263f1e959..5bb208e611 100644
+index 410381a..6027d2b 100644
 --- a/docs/src/remap/remap.adoc
 +++ b/docs/src/remap/remap.adoc
 @@ -324,7 +324,7 @@ there is the somewhat easier way of <<remap:python-o-word-procs,calling Python f
@@ -59,10 +41,10 @@ index b263f1e959..5bb208e611 100644
  `>`::
    The `>` (greater-than) character specifies that the current feed must be greater than zero,
 diff --git a/src/emc/rs274ngc/interp_remap.cc b/src/emc/rs274ngc/interp_remap.cc
-index c33df5a316..b13bdc0a5e 100644
+index 286ee98..cf192c1 100644
 --- a/src/emc/rs274ngc/interp_remap.cc
 +++ b/src/emc/rs274ngc/interp_remap.cc
-@@ -206,6 +206,7 @@ int Interp::convert_remapped_code(block_pointer /*block*/,
+@@ -204,6 +204,7 @@ int Interp::convert_remapped_code(block_pointer /*block*/,
  // 4. handle '>' as to require a positive feed.
  // 5. handle '^' as to require a positive speed.
  // 6. handle 'N' as to add the line number.
@@ -70,7 +52,7 @@ index c33df5a316..b13bdc0a5e 100644
  //
  // return INTERP_ERROR and propagate appropriate message if any errors so far
  // else return INTERP_OK
-@@ -332,6 +333,10 @@ int Interp::add_parameters(setup_pointer settings,
+@@ -330,6 +331,10 @@ int Interp::add_parameters(setup_pointer settings,
  	case 'x' : PARAM('x',"x",block->x_flag,block->x_number); break;
  	case 'y' : PARAM('y',"y",block->y_flag,block->y_number); break;
  	case 'z' : PARAM('z',"z",block->z_flag,block->z_number); break;
@@ -81,7 +63,7 @@ index c33df5a316..b13bdc0a5e 100644
  	case '-' : break; // ignore - backwards compatibility
  	default: ;
  	}
-@@ -367,10 +372,12 @@ int Interp::add_parameters(setup_pointer settings,
+@@ -365,10 +370,12 @@ int Interp::add_parameters(setup_pointer settings,
      }
  
      // ^...require positive speed
@@ -97,7 +79,7 @@ index c33df5a316..b13bdc0a5e 100644
          }
          else {
              tail += "S>0,";
-@@ -461,7 +468,7 @@ int Interp::parse_remap(const char *inistring, int lineno)
+@@ -459,7 +466,7 @@ int Interp::parse_remap(const char *inistring, int lineno)
  	}
  	if (!strncasecmp(kw,"argspec",kwlen)) {
  	    size_t pos = strspn (arg,
@@ -106,144 +88,3 @@ index c33df5a316..b13bdc0a5e 100644
  	    if (pos != strlen(arg)) {
  		Error("argspec: illegal word '%c' - %d:REMAP = %s",
  		      arg[pos],lineno,inistring);
-diff --git a/tests/remap/dollar-argspec/README b/tests/remap/dollar-argspec/README
-new file mode 100644
-index 0000000000..3758b4fb8d
---- /dev/null
-+++ b/tests/remap/dollar-argspec/README
-@@ -0,0 +1 @@
-+Exercise passing the optional $ spindle selector to Python and NGC remaps.
-diff --git a/tests/remap/dollar-argspec/expected b/tests/remap/dollar-argspec/expected
-new file mode 100644
-index 0000000000..518d1fe2f7
---- /dev/null
-+++ b/tests/remap/dollar-argspec/expected
-@@ -0,0 +1,29 @@
-+
-+ N..... USE_LENGTH_UNITS(CANON_UNITS_MM)
-+ N..... SET_G5X_OFFSET(1, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... SET_G92_OFFSET(0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... SET_XY_ROTATION(0.0000)
-+ N..... SET_FEED_REFERENCE(CANON_XYZ)
-+ N..... ON_RESET()
-+ Python P=0 spindle=omitted
-+ Python P=1 spindle=1
-+ Python P=2 spindle=-1
-+ N..... MESSAGE(" NGC spindle omitted")
-+ N..... MESSAGE(" NGC spindle=2.000000")
-+ N..... MESSAGE(" positional n_args=2.000000 P=7.000000 spindle=1.000000")
-+ N..... SET_SPINDLE_SPEED(0, 1000.0000)
-+ N..... SET_SPINDLE_SPEED(1, 2000.0000)
-+ Python spindle=0 speed=1000
-+ Python spindle=1 speed=2000
-+ N..... SET_G5X_OFFSET(1, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... SET_XY_ROTATION(0.0000)
-+ N..... SET_FEED_MODE(0, 0)
-+ N..... SET_FEED_RATE(0.0000)
-+ N..... STOP_SPINDLE_TURNING(0)
-+ N..... SET_SPINDLE_MODE(0 0.0000)
-+ N..... STOP_SPINDLE_TURNING(1)
-+ N..... SET_SPINDLE_MODE(1 0.0000)
-+ N..... STOP_SPINDLE_TURNING(2)
-+ N..... SET_SPINDLE_MODE(2 0.0000)
-+ N..... PROGRAM_END()
-+ N..... ON_RESET()
-diff --git a/tests/remap/dollar-argspec/m501.ngc b/tests/remap/dollar-argspec/m501.ngc
-new file mode 100644
-index 0000000000..e5495df885
---- /dev/null
-+++ b/tests/remap/dollar-argspec/m501.ngc
-@@ -0,0 +1,9 @@
-+o<m501> sub
-+o100 if [EXISTS[#<spindle>]]
-+    (debug, NGC spindle=#<spindle>)
-+o100 else
-+    (debug, NGC spindle omitted)
-+o100 endif
-+o<m501> endsub
-+m2
-+%
-diff --git a/tests/remap/dollar-argspec/m502.ngc b/tests/remap/dollar-argspec/m502.ngc
-new file mode 100644
-index 0000000000..600c9a95f4
---- /dev/null
-+++ b/tests/remap/dollar-argspec/m502.ngc
-@@ -0,0 +1,5 @@
-+o<m502> sub
-+(debug, positional n_args=#<n_args> P=#1 spindle=#2)
-+o<m502> endsub
-+m2
-+%
-diff --git a/tests/remap/dollar-argspec/remap.py b/tests/remap/dollar-argspec/remap.py
-new file mode 100644
-index 0000000000..95f0e7b8e9
---- /dev/null
-+++ b/tests/remap/dollar-argspec/remap.py
-@@ -0,0 +1,10 @@
-+def m500(self, **words):
-+    spindle = words.get("spindle", "omitted")
-+    if spindle != "omitted":
-+        spindle = int(spindle)
-+    print("M500 Python P={} spindle={}".format(int(words["p"]), spindle))
-+
-+
-+def m503(self, **words):
-+    spindle = int(words.get("spindle", 0))
-+    print("M503 Python spindle={} speed={}".format(spindle, int(words["s"])))
-diff --git a/tests/remap/dollar-argspec/test.ini b/tests/remap/dollar-argspec/test.ini
-new file mode 100644
-index 0000000000..36abfcbc62
---- /dev/null
-+++ b/tests/remap/dollar-argspec/test.ini
-@@ -0,0 +1,18 @@
-+[EMC]
-+DEBUG=0
-+
-+[RS274NGC]
-+SUBROUTINE_PATH = .
-+LOG_LEVEL=0
-+OWORD_NARGS = 1
-+REMAP=M500 py=m500 modalgroup=10 argspec=P$
-+REMAP=M501 ngc=m501 modalgroup=10 argspec=$
-+REMAP=M502 ngc=m502 modalgroup=10 argspec=@P$
-+REMAP=M503 py=m503 modalgroup=10 argspec=^$
-+
-+[TRAJ]
-+SPINDLES=3
-+
-+[PYTHON]
-+PATH_PREPEND=.
-+TOPLEVEL=toplevel.py
-diff --git a/tests/remap/dollar-argspec/test.ngc b/tests/remap/dollar-argspec/test.ngc
-new file mode 100644
-index 0000000000..b47556494a
---- /dev/null
-+++ b/tests/remap/dollar-argspec/test.ngc
-@@ -0,0 +1,11 @@
-+M500 P0
-+M500 P1 $1
-+M500 P2 $-1
-+M501
-+M501 $2
-+M502 P7 $1
-+S1000
-+S2000 $1
-+M503
-+M503 $1
-+M2
-diff --git a/tests/remap/dollar-argspec/test.sh b/tests/remap/dollar-argspec/test.sh
-new file mode 100755
-index 0000000000..7a389520fa
---- /dev/null
-+++ b/tests/remap/dollar-argspec/test.sh
-@@ -0,0 +1,3 @@
-+#!/bin/bash
-+rs274 -i test.ini -n 0 -g test.ngc 2>&1 | awk '{$1=""; print}'
-+exit "${PIPESTATUS[0]}"
-diff --git a/tests/remap/dollar-argspec/toplevel.py b/tests/remap/dollar-argspec/toplevel.py
-new file mode 100644
-index 0000000000..0dc38fa2a6
---- /dev/null
-+++ b/tests/remap/dollar-argspec/toplevel.py
-@@ -0,0 +1 @@
-+import remap

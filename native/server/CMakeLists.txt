@@ -112,7 +112,7 @@ if(LINUXCNC_GRPC_ENABLE_NML AND
             src/gcode/parser.cc
             src/gcode/canon_preview.cc
             src/gcode/python_modules.cc
-            "${LINUXCNC_ROOT}/src/emc/rs274ngc/recordingcanon.cc")
+            src/gcode/recording_canon.cc)
         target_compile_definitions(linuxcnc-grpc-domain PUBLIC LINUXCNC_GRPC_HAS_RS274=1)
         set(LINUXCNC_GRPC_HAS_RS274 TRUE)
         target_compile_definitions(linuxcnc-grpc-domain PRIVATE ULAPI)
@@ -145,7 +145,7 @@ if(LINUXCNC_GRPC_ENABLE_NML AND
     endif()
 endif()
 
-if(LINUXCNC_GRPC_ENABLE_NML AND EXISTS "${LINUXCNC_ROOT}/src/hal/hal_priv.h")
+if(LINUXCNC_GRPC_ENABLE_NML AND EXISTS "${LINUXCNC_ROOT}/src/hal/hal.h")
     find_library(LINUXCNC_HAL_LIBRARY NAMES linuxcnchal PATHS "${LINUXCNC_ROOT}/lib" NO_DEFAULT_PATH)
     if(LINUXCNC_HAL_LIBRARY)
         target_sources(linuxcnc-grpc-domain PRIVATE
@@ -484,6 +484,25 @@ if(LINUXCNC_GRPC_BUILD_TESTS)
         add_test(NAME linuxcnc-grpc-gcode-parser-integration
             COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gcode_parser_integration.sh"
                     "$<TARGET_FILE:linuxcnc-grpc-gcode-parser-integration>")
+    endif()
+
+    if(LINUXCNC_GRPC_HAS_HAL)
+        add_executable(linuxcnc-grpc-hal-value-codec-tests
+            tests/hal_value_codec_tests.cc)
+        target_compile_features(linuxcnc-grpc-hal-value-codec-tests PRIVATE cxx_std_20)
+        target_link_libraries(linuxcnc-grpc-hal-value-codec-tests PRIVATE
+            linuxcnc-grpc-domain)
+        target_compile_definitions(linuxcnc-grpc-hal-value-codec-tests PRIVATE ULAPI)
+        target_include_directories(linuxcnc-grpc-hal-value-codec-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${LINUXCNC_ROOT}/include"
+            "${LINUXCNC_ROOT}/src"
+            "${LINUXCNC_ROOT}/src/hal"
+            "${LINUXCNC_ROOT}/src/rtapi")
+        target_compile_options(linuxcnc-grpc-hal-value-codec-tests PRIVATE
+            -Wall -Wextra -Wpedantic)
+        add_test(NAME linuxcnc-grpc-hal-value-codec-tests
+                 COMMAND linuxcnc-grpc-hal-value-codec-tests)
     endif()
 
     if(LINUXCNC_GRPC_HAS_SCOPE)

@@ -1,0 +1,67 @@
+(Test tapered G76 drive lines)
+
+g20 g18 g8
+s100 m3
+
+(basic external, decreasing X)
+g0 x1 z0
+g76 p.1 x.8 z-1 i-.1 j.09 k.1 h0 q0
+
+(basic external, increasing X)
+g0 x.8 z0
+g76 p.1 x1 z-1 i-.1 j.09 k.1 h0 q0
+
+(incremental endpoint)
+g0 x1 z0
+g91
+g76 p.1 x-.2 z-1 i-.1 j.09 k.1 h0 q0
+g90
+
+(diameter mode endpoint and depths)
+g7
+g0 x2 z0
+g76 p.1 x1.6 z-1 i-.2 j.18 k.2 h0 q0
+
+(radius mode endpoint and depths)
+g8
+g0 x1 z0
+g76 p.1 x.8 z-1 i-.1 j.09 k.1 h0 q0
+
+(internal thread)
+g0 x.5 z0
+g76 p.1 x.7 z-1 i.1 j.09 k.1 h0 q0
+
+(entry and exit taper)
+g0 x1 z0
+g76 p.1 x.8 z-1 i-.1 j.09 k.1 h0 q0 e.1 l3
+
+(positive Z entry and exit taper)
+g0 x1 z0
+g76 p.1 x.8 z1 i-.1 j.09 k.1 h0 q0 e.1 l3
+
+(fixed-direction compound infeed)
+g0 x1 z0
+g76 p.1 x.8 z-1 i-.1 j.09 k.1 h0 q30
+
+(alternating-flank compound infeed)
+g0 x1 z0
+g76.1 p.1 x.8 z-1 i-.1 j.03 k.1 r1 h2 q30
+
+(alternating mode with centered Q0 infeed)
+g0 x1 z0
+g76.1 p.1 z-1 i-.1 j.03 k.1 r1 h0 q0
+
+(cylindrical alternating-flank compound infeed)
+g0 x1 z0
+g76.1 p.1 z-1 i-.1 j.03 k.1 r1 h1 q30
+
+(G76 after G76.1 goes back to fixed-direction infeed)
+g0 x1 z0
+g76 p.1 x.8 z-1 i-.1 j.09 k.1 h0 q30
+
+(spring passes)
+g0 x1 z0
+g76 p.1 x.8 z-1 i-.1 j.09 k.1 h2 q0
+
+m5
+m2

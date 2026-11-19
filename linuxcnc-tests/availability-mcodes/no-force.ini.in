@@ -1,0 +1,6 @@
+# Case-specific overrides; unspecified values come from FIXTURE.BASE.
+[FIXTURE]
+BASE = ../runtime-availability/base.ini
+
+[TRAJ]
+NO_FORCE_HOMING = 1

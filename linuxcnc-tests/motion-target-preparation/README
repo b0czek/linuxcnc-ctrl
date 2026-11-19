@@ -1,0 +1,5 @@
+Compiles production target preparation with deterministic inverse-kinematics
+doubles and the real cubic implementation. Checks that inverse-kinematics,
+interpolation, and unavailable-joint target failures cannot partially update
+the joint command vector. Also checks the isolated legacy activation guard.
+No runtime or realtime privileges are required.

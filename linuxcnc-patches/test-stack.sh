@@ -162,4 +162,41 @@ if "${STACK}/refresh.sh" "${MERGED}" >/dev/null 2>&1; then
   fail "refresh accepted a merge commit"
 fi
 
+readonly GAP_STACK="${TEMP_DIR}/gap-stack"
+readonly GAP="${TEMP_DIR}/gap"
+readonly GAP_DUPLICATE="${TEMP_DIR}/gap-duplicate"
+mkdir -p "${GAP_STACK}"
+cp "${SOURCE_DIR}/apply.sh" "${SOURCE_DIR}/refresh.sh" \
+  "${STACK}/base-revision" "${GAP_STACK}/"
+cp "${STACK}/0001-first.patch" "${GAP_STACK}/0001-first.patch"
+cp "${STACK}/0002-second.patch" "${GAP_STACK}/0004-second.patch"
+
+git clone --quiet "${UPSTREAM}" "${GAP}"
+git -C "${GAP}" checkout --quiet --detach "${base_revision}"
+"${GAP_STACK}/apply.sh" "${GAP}" >/dev/null || \
+  fail "a gap left by a removed patch was rejected"
+[[ "$(git -C "${GAP}" rev-list --count "${base_revision}..HEAD")" == 2 ]] || \
+  fail "gapped series did not create one commit per patch"
+
+git -C "${GAP}" config user.name "Patch Stack Test"
+git -C "${GAP}" config user.email "patch-stack-test@example.invalid"
+printf 'appended\n' >"${GAP}/appended.txt"
+git -C "${GAP}" add appended.txt
+git -C "${GAP}" commit --quiet -m "fixture: appended patch"
+"${GAP_STACK}/refresh.sh" "${GAP}" >/dev/null
+[[ -f "${GAP_STACK}/0001-first.patch" && \
+  -f "${GAP_STACK}/0004-second.patch" ]] || \
+  fail "refresh renumbered a gapped series"
+[[ -f "${GAP_STACK}/0005-fixture-appended-patch.patch" ]] || \
+  fail "refresh did not number the appended patch after the highest number"
+[[ "$(find "${GAP_STACK}" -maxdepth 1 -name '*.patch' | wc -l)" == 3 ]] || \
+  fail "refresh of a gapped series produced unexpected patch files"
+
+cp "${GAP_STACK}/0001-first.patch" "${GAP_STACK}/0004-duplicate.patch"
+git clone --quiet "${UPSTREAM}" "${GAP_DUPLICATE}"
+git -C "${GAP_DUPLICATE}" checkout --quiet --detach "${base_revision}"
+if "${GAP_STACK}/apply.sh" --detach "${GAP_DUPLICATE}" >/dev/null 2>&1; then
+  fail "a duplicated sequence number was accepted"
+fi
+
 echo "patch-stack tests passed"

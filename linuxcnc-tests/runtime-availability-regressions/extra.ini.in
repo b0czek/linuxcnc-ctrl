@@ -1,0 +1,16 @@
+# Case-specific overrides; unspecified values come from FIXTURE.BASE.
+[FIXTURE]
+BASE = base.ini
+
+[HAL]
+HALFILE = extra.hal
+
+[TRAJ]
+COORDINATES = XY
+
+[KINS]
+KINEMATICS = trivkins coordinates=XY kinstype=B
+
+[JOINT_2]
+HOME_SEQUENCE = @unset
+AVAILABILITY_CONTROL = 1

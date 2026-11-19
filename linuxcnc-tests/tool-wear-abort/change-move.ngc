@@ -1,0 +1,5 @@
+; T2 M6, then a move; the test holds the change handshake open.
+G21 G90
+T2 M6
+G0 X0 Z0
+M2

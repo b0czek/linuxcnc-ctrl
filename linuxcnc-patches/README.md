@@ -9,7 +9,7 @@ The series is based on the LinuxCNC checkout currently used by this workspace:
 
 - Repository: <https://github.com/LinuxCNC/linuxcnc>
 - Revision: the commit recorded in [`base-revision`](./base-revision)
-- Version line: LinuxCNC 2.10 development
+- Version line: LinuxCNC 2.10, tag `v2.10.0-pre2`
 
 `base-revision` is the single source of truth used by the stack tooling and
 CI. Patch files remain the reviewable source of truth in this repository, but
@@ -19,12 +19,36 @@ complete series.
 
 ## Continuous integration
 
-Changes under `linuxcnc-patches/` trigger the
+Changes under `linuxcnc-patches/` or `linuxcnc-tests/` trigger the
 [`LinuxCNC patch tests`](../.github/workflows/linuxcnc-patches.yml) workflow on
 pushes and pull requests. The workflow materializes the complete series on the
-pinned revision, builds LinuxCNC in run-in-place mode with its upstream CI
-tooling, and runs the full LinuxCNC regression suite with failure output
-enabled.
+pinned revision, builds a headless LinuxCNC in run-in-place mode, and runs the
+regression suite with [`linuxcnc-tests/run.sh`](../linuxcnc-tests/run.sh),
+which leaves out tests for features that are out of scope for this repository: GUIs
+and GUI tools (`tests/build/ui`, `tests/glcanon`, `tests/pyvcp`,
+`tests/tooledit`, `tests/ui-smoke`), older remote interfaces (`tests/halrmt`,
+`tests/linuxcncrsh`, `tests/linuxcncrsh-tcp`) and tool database programs
+(`tests/tooldb`).
+
+## Tests
+
+The regression tests for the patches live in
+[`linuxcnc-tests/`](../linuxcnc-tests), not in the patches. Its layout mirrors
+LinuxCNC's `tests/` directory. The patches only change upstream tests whose
+expected output or setup they affect, and add `skip` files to upstream tests
+for features this build refuses. Run both sets, without the out-of-scope
+tests, against a run-in-place build of the patched LinuxCNC:
+
+```sh
+./linuxcnc-tests/run.sh /path/to/linuxcnc
+```
+
+Extra arguments go to LinuxCNC's `runtests`, for example `-p` to print the
+output of failing tests. A single test still runs directly with
+`scripts/runtests <test directory>` from the LinuxCNC checkout.
+
+Tests that need files from the LinuxCNC tree find it through `$EMC2_HOME`,
+which a run-in-place build sets to the LinuxCNC checkout.
 
 ## Applying the series
 
@@ -74,15 +98,23 @@ commit on the managed branch and export commits with the repository tooling:
 ```
 
 `refresh.sh` requires a linear history rooted at `base-revision`, preserves
-existing filenames by ordinal, names newly appended patches from their commit
+existing filenames by position, names newly appended patches from their commit
 subjects, and replays the generated series before replacing any patch file. It
 then normalizes the checked-out branch to those deterministic replayed commit
 IDs, retaining its prior tip under `linuxcnc-ctrl/backups/` when the IDs
 change. It refuses to remove patches implicitly.
 
-Patch filenames begin with a sequence number. New patches must use the next
-number so their application order remains explicit. The filename order and
-commit order must match.
+Patch filenames begin with a four-digit sequence number. The filename order
+and commit order must match. Numbers are permanent:
+
+- A patch keeps its number for its whole life. The series is never renumbered.
+- Removing a patch leaves a gap. Delete the patch file, and keep its entry in
+  the patch inventory below with the heading struck through and a note saying
+  when and why it was removed, so the inventory still records what was there.
+- A removed patch's number is never reused. New patches take the number after
+  the highest number the series has ever used, including removed patches.
+  `refresh.sh` numbers an appended patch after the highest existing file, so
+  check the inventory when the removed patch was the last one.
 
 ## Patch inventory
 
@@ -149,6 +181,11 @@ This patch:
   `settings->spindle_mode[s] = SPINDLE_MODE::CONSTANT_RPM` after calling
   `SET_SPINDLE_MODE(s, 0)`, keeping the interpreter model consistent with
   canon when a program ends.
+- Treats the interpreter's `css_maximum[s]` (the G96 `D` limit, which the
+  G33/G76 pitch check reads) the same way: initialized in `Interp::init()`,
+  preserved across `Interp::synch()`, and cleared by M2/M30. Canon keeps its
+  own CSS limit across a mode switch, so resetting only the interpreter's copy
+  would leave the two models disagreeing about the limit.
 
 No new `EMC_STAT` fields or public transport fields are added.
 
@@ -163,30 +200,88 @@ must issue `EMC_TASK_ABORT` explicitly when execution should be terminated.
 Abort, E-stop, faults, mode changes, M0/M1, and Pause retain their existing
 behavior.
 
+Motion that cannot be interrupted part way runs to completion before Stop
+reaches `STOPPED`:
+
+- A position-synchronized move (`G33`, `G33.1`), together with the
+  position-synchronized moves that follow it and continue the same spindle
+  synchronization. Halting at the start of the next `G33` would leave the axis
+  behind the turning spindle.
+- A homing cycle queued from G-code with `G28.2`. Stop is accepted during it
+  and stays in `STOPPING` until homing finishes.
+
+`STOPPED` is reported only once the axes are at rest. While stopping, the
+planner does not start a held move from rest, so a pending spindle at-speed
+wait or a `G33` index search is not consumed while Stop has the spindle off.
+
 The command is exposed as Python `command.program_stop()`, protobuf
 `stop_program`, and `halui.program.stop`. Stop progress is
 reported as `EMC_TASK_STOP_STATE` (`IDLE`, `STOPPING`, `STOPPED`, `STARTING`)
-through Python `stop_state` and the task-status protobuf. The patch adds a
-`tests/resumable-stop` LinuxCNC regression that verifies active AUTO
-Stop/Resume and Stop/Single-Step preserve the queued program, disable
-spindle/coolant while stopped, restore them without adding a task-level spindle-at-speed
-wait, preserves the normal next-feed at-speed wait after rapid motion,
-completes the same program, and waits for active `G33` threading and `G33.1`
-rigid-tap synchronized motion to finish before entering `STOPPED`.
+through Python `stop_state` and the task-status protobuf.
 
-### 0005 — Headless and documentation-free build options
+Resume, Run and Single Step from `STOPPED` restore spindle and coolant and
+then wait, in `STARTING`, until every spindle that Stop switched off reports
+at-speed before motion continues, so an interrupted feed or rapid never
+restarts on a spindle that is still spinning up. An at-speed signal left over
+from before the restore does not count: once the spindle has been seen not at
+speed with its output on, task requires `spindle.N.at-speed` to drop and rise
+again after the restore. A spindle whose at-speed has never read false (not
+connected, or tied true) does not hold Resume. A second Stop, Abort, E-stop or
+Machine Off end the wait. A next-feed at-speed wait that was pending before
+Stop still holds after Resume, and a later `S` word change still arms one.
+Resume or Run during a Stop leaves single-step mode entered by an earlier Step.
+A second Stop or a Pause while Resume is pending (in `STARTING`, or a Resume
+latched during `STOPPING`) cancels it: the program stays in or returns to
+`STOPPED` with the restored outputs off. A spindle restored at commanded speed 0 does not
+hold Resume; spindle override 0 still waits for at-speed.
 
-Adds the Autoconf-standard `--enable-headless` option for backend-only builds
-and the independent `--disable-build-manpages` option. Headless builds retain
-the controller, realtime/HAL stack, interpreters, remote interfaces, and core
-Python and Tcl APIs while omitting LinuxCNC-supplied GUIs, graphical probes,
-assets, samples, and desktop integration. The launcher requires an explicit
-INI path but continues to execute an external `[DISPLAY] DISPLAY` command.
+While Stop waits for motion to come to rest, task issues only commands that
+add to the motion queue. Spindle, coolant, I/O, dwell, tool-change and other
+commands read behind the stopping motion run once, in program order, after
+Resume, so an `M5` or `S` word after a thread is not undone by Resume's restore.
 
-The Debian build profiles `pkg.linuxcnc.headless` and `nodoc` select the
-corresponding configure options and packaging manifests. With no new options
-or profiles, the existing GUI, documentation, manpage, and packaging behavior
-is unchanged.
+`STOPPED` also clears the planner's record of the current spindle
+synchronization, so a `G33` that follows velocity-synchronized motion waits
+for a fresh index after Resume instead of catching up the revolutions turned
+during the Stop. Stop's spindle-off and spindle-on leave the at-speed and
+spindle-state bookkeeping of later spindle commands untouched.
+
+The `linuxcnc-tests/resumable-stop` LinuxCNC regressions run as four tests
+(`general`, `threading`, `g76-stop`, `g76-step`) that share one driver, so they
+run in parallel. With patches 0009 and 0011 they hold 42 scenarios with the
+jerk-limited planner and four re-runs with the trapezoidal planner. They cover
+Stop/Resume and Stop/Single-Step preserving the queued program, spindle and
+coolant handling, the at-speed wait on Resume including a stale at-speed
+signal, Stop and Pause while Resume is pending, Pause during an in-flight Step, Resume of a spindle restored at S0, commands queued behind a thread, `G33` threading including a chain of
+`G33` moves and `G33`/`G95`/`G33`, `G33.1` rigid tapping, Stop during and after
+an interrupted `G28.2`, and that `STOPPED` is never reported while moving.
+
+### 0005 — Headless backend-only builds on top of `--disable-gui`
+
+Upstream LinuxCNC provides the headless build itself through
+`--disable-gui` and `--disable-manpages`. This patch adds what a backend-only
+installation still needs on top of them. It no longer defines
+`--enable-headless` or `--disable-build-manpages`.
+
+- Without a GUI, Tcl is optional instead of skipped. When `tclConfig.sh` is
+  found, the Tcl HAL and LinuxCNC bindings are built without Tk or Xinerama,
+  and the Tcl runtime used by `haltcl`, `.tcl` HAL files, and `[HAL]TWOPASS` is
+  installed. Tk, X11, and GL are never needed.
+- Desktop menu entries are not installed.
+- The launcher requires an explicit INI path, keeps its output on stdout and
+  stderr when not attached to a terminal, and never runs `wish`. It still
+  executes an external `[DISPLAY] DISPLAY` command.
+- The Debian build profile `pkg.linuxcnc.headless` configures with
+  `--disable-gui`, uses a backend-only package manifest, and drops the GUI
+  build and runtime dependencies. The `nodoc` profile configures with
+  `--disable-build-documentation --disable-manpages` and no longer needs
+  `asciidoctor`.
+
+A headless `make install` follows upstream's install rules, so it also
+contains the sample configurations, `nc_files`, and some GUI-only helper
+scripts; the Debian headless package leaves those out. With no options or
+profiles, the existing GUI, documentation, manpage, and packaging behavior is
+unchanged.
 
 ### 0006 — Ordered realtime component search path
 
@@ -212,9 +307,32 @@ and M61 activate the resulting combined offset automatically; G49 still
 cancels compensation and same-block explicit G-codes take precedence.
 
 Stored wear is available in interpreter parameters `#5430–#5438`, Python tool
-status, and the interpreter Python tool object. The tool database protocol is
-v2.2 and the tool-entry line limit is 512 bytes. The protobuf contract exposes
-`ToolEntry.wearOffset`, including status deltas and partial `setTool` updates.
+status, and the interpreter Python tool object. On v2.10.0-pre2,
+`#5401–#5409` hold the loaded tool's stored geometry and `#5081–#5089` the
+applied offset (geometry plus wear), following upstream's split of those
+parameters. The protobuf contract exposes `ToolEntry.wearOffset`, including
+status deltas and partial `setTool` updates.
+
+The automatic offset takes effect together with the tool: it travels with the
+`EMC_TOOL_LOAD` or `EMC_TOOL_SET_NUMBER` message and task applies it when the
+change completes, so an abort or E-stop during a change never leaves one
+tool's offset applied with another tool loaded. M61 is refused under cutter
+radius compensation, as M6 is.
+
+The tool database protocol is v2.2. A tool-table line holds at most 510
+characters before its newline. Loading, database replies, formatting, saving
+and database notification refuse a longer line with an error instead of
+cutting it; a table loaded with a refused line is not saved over until it is
+reloaded without it, and an edit whose save or notification fails is rolled
+back in memory. A `G10` whose save fails reports "tool N: offsets not stored,
+tool table unchanged" and fails the command, so the program or MDI command
+aborts. On a random toolchanger the table is saved after every M6 and
+M61; if that save fails, the change is reported as an error ("tool table ...
+not saved after the tool change") and the program aborts. The tools stay
+swapped in memory, as they are on the machine, and the new tool's offset is
+applied, but the file is unchanged and must be corrected before it is reloaded.
+`linuxcnc-tests/tool-line-length-save` covers this. The G-code preview applies the same geometry-plus-wear offset
+as the machine.
 
 ### 0008 — Tapered G76 drive lines and alternating infeed
 
@@ -231,11 +349,20 @@ line, including their independently corrected synchronized leads. Interpreter
 regressions cover external and internal threads, both taper directions,
 absolute and incremental endpoints, radius and diameter modes, entry/exit
 tapers in both Z directions, compound infeed, spring passes, and rejection of
-Y endpoints. G76 also accepts `D0` for the existing fixed compound-infeed
-direction (the default) and `D1` to alternate roughing passes across the final
-thread line; full-depth and spring passes remain centered, and `Q0` keeps every
-pass on the centered line. Both cylindrical and tapered alternating paths are
+Y endpoints. `G76.1` takes the same words as G76 and alternates roughing passes
+across the final thread line; full-depth and spring passes remain centered, and
+`Q0` keeps every pass on the centered line. A mirrored pass keeps its offset at
+the start, which puts it on the other flank, but ends where the final pass ends,
+so no pass cuts past the programmed Z. Status reports it as `G76`. `D` is
+not accepted on either code, because upstream `master` uses it on G76 for a
+spindle start angle. Both cylindrical and tapered alternating paths are
 covered. No NML or public transport changes are required.
+
+On v2.10.0-pre2 a tapered cycle passes upstream's synchronized-feed check:
+every synchronized move of every pass (drive line, the feed in and angled move
+of an entry taper, the angled move of an exit taper) is checked at its own lead
+against the axis velocity limits, and in G96 at its own smallest radius.
+Upstream's spindle-override hold covers all passes.
 
 ### 0009 — Safe G76 Stop clearance and two-stage Single Step
 
@@ -265,13 +392,19 @@ arc-blend clearance endpoints, an unmarked post-G33 rapid, and repeated Stops
 with deterministic cut-side timing near the cut/retract handoff. The internal
 NML and motion fields add no public status or transport field.
 
-### 0010 — Recording canon backend for native G-code preview
+On v2.10.0-pre2 the spindle-override lock that upstream issues before the first
+G76 pass belongs to that pass's approach unit, so the first Single Step does
+not stop after the lock alone. A Stop during plain `G33` threading still
+finishes the synchronized run as patch 0004 describes; only G76 passes use the
+marked clearance target.
 
-Adds `recordingcanon.cc` and `recordingcanon.hh`, a separate link-selected
-implementation of LinuxCNC's global CANON API for native offline interpreters.
-It follows the same backend boundary already used by task (`emccanon.cc`), Axis
-(`gcodemodule.cc`), and the standalone interpreter (`saicanon.cc`), leaving
-those existing implementations untouched.
+### 0010 — Support for the native G-code preview
+
+The native server records previews with its own implementation of LinuxCNC's
+CANON API (`native/server/src/gcode/recording_canon.cc`). This patch adds what
+that implementation needs inside LinuxCNC: the interpreter reports cutter
+compensation being switched on and off through the existing canon calls, and
+`tool_mmap_user()` is safe to call from several threads.
 
 ### 0011 — In-flight Single Step arming
 
@@ -282,11 +415,11 @@ before stopping at an exact boundary. Later motion remains queued and does not
 begin, including when several following blocks or threading passes were
 prequeued by readahead.
 
-The temporary exact boundary is restored if Step is canceled by Resume or Stop.
-Existing paused source-line stepping and two-stage G76 stepping remain intact.
+The temporary exact boundary is restored if Step is canceled by Resume, Stop or
+Pause; Pause during an in-flight Step is an ordinary Pause. Existing paused source-line stepping and two-stage G76 stepping remain intact.
 Two additional runtime scenarios arm Step during an ordinary block with three
-later blocks queued and during an active G76 cut with later passes queued,
-bringing the resumable-stop suite to twenty-seven scenarios. During an
+later blocks queued and during an active G76 cut with later passes queued;
+they are part of the resumable-stop tests described under patch 0004. During an
 in-flight step, `single_stepping` reports the armed/active state while task and
 motion remain unpaused; both paused flags become true only after motion reaches
 the boundary.
@@ -304,7 +437,34 @@ Remote CRUD supports LinuxCNC's native random and nonrandom table models for
 file-backed configurations. Random support covers ATC-addressable pockets and
 the spindle; it does not model off-machine tool inventory. This patched build
 rejects `[EMCIO]DB_PROGRAM` during IO initialization and requires file-backed
-`[EMCIO]TOOL_TABLE` configuration for managed tool data.
+`[EMCIO]TOOL_TABLE` configuration for managed tool data. The LinuxCNC tests
+that need a database program (`tests/tooldb/*`, added upstream after the old
+base) are therefore skipped. Saving keeps patch 0007's 510-character line limit
+and its refusal to overwrite a table loaded with refused lines.
+
+A tool-table file with an unrecognised line does not load at all, so no
+partial table is ever published. At startup task reports "can't load tool
+table ..." and runs with no tools; a failed reload keeps the previous table. In
+both cases nothing saves over the file (G10, a random-changer M6, tool CRUD)
+until a table loads successfully; a missing table file can still be created by
+a save. A reload that is refused reports why and keeps the table in use. If the
+refused file still matches that table, saves continue. Pocket numbers above the
+changer limit are refused only on a random changer, where they address slots. On
+a random changer a reload is also refused unless pocket 0 holds the tool in the
+spindle, so a file left stale by a failed save cannot replace the real layout. CRLF line endings, whitespace-only lines and comment-only lines count as
+blank. `linuxcnc-tests/tool-table-load` covers this.
+
+A save replaces the table atomically and follows symbolic links, so a linked
+table stays linked. LinuxCNC remembers the bytes it last loaded from or saved to
+the configured file and refuses a save if the file now holds anything else,
+including a file created after startup found none; reloading accepts the change.
+A deleted file is created again. Only loading the configured file lifts a save
+block. On a random changer, the first table to load after a failed startup sets
+the spindle tool and `iocontrol.0.tool-number` from pocket 0.
+
+A refused tool update or delete tells the operator why and fails only that
+command: spindle, coolant and an open program are unaffected.
+`linuxcnc-tests/tool-crud-refusal` covers this.
 
 Tool-table reload now preserves the live table when opening, parsing, or
 validation fails. Read-only mmap clients detect inode replacement after a
@@ -343,7 +503,7 @@ G97 clears it. Spindle `enabled` is now derived from the motion controller's
 explicit on/off state instead of commanded speed, so a stopped spindle with a
 nonzero CSS limit remains disabled and is not restarted by resumable Stop.
 
-The `tests/css-status` regression covers G96 while stopped, persistence across
+The `linuxcnc-tests/css-status` regression covers G96 while stopped, persistence across
 M5, clearing on G97, and stopped-spindle enabled state. The patch exposes
 `css_maximum` through Python spindle status; the canonical protobuf schema
 already carries it, so no transport-contract change is required.
@@ -358,7 +518,7 @@ retains responsibility for validating the spindle values it supports.
 When `^` requires a positive spindle speed, `$` selects which spindle is
 checked and supplied as `s`; omitting `$` preserves the spindle 0 default.
 
-The `tests/remap/dollar-argspec` regression covers omitted, numbered, and
+The `linuxcnc-tests/remap/dollar-argspec` regression covers omitted, numbered, and
 all-spindle selectors through Python, named NGC, and positional NGC remaps,
 plus selected-spindle behavior for `^`.
 
@@ -375,7 +535,7 @@ than planner, interpolator, compensation, jog, homing, and probing internals.
 This patch exposes no availability controls and builds independently of the
 runtime feature.
 
-`tests/motion-target-preparation` compiles the production target-preparation
+`linuxcnc-tests/motion-target-preparation` compiles the production target-preparation
 function with deterministic kinematics and the real cubic implementation. It
 covers late invalid targets, interpolation failure, and no partial commitment.
 
@@ -411,6 +571,20 @@ Availability-controlled joints cannot define `HOME_SEQUENCE`; Home All skips
 unavailable controlled joints and continues with its ordinary sequence.
 Controlled joints are homed individually only by acquisition and reject user
 HOME and UNHOME commands, so AVAILABLE implies a valid homed state.
+Acquisition homing uses the home cycle LinuxCNC provides for `G28.2`: task
+queues the joint home, waits in its homing state with the usual start timeout
+(motion publishes the command number of the last home it started, so a home
+that begins and ends between two task status reads counts as run; this also
+applies to `G28.2` and is covered by `linuxcnc-tests/interp/g28.2/instant-home`),
+and restores the task mode afterwards. Abort, E-stop and Machine Off cancel it
+as they cancel a `G28.2`, and a resumable Stop (patch 0004) during it is
+accepted and stays `STOPPING` until homing ends. Stop or Pause before the
+hardware acknowledgment of an unhomed joint does not hold `STOPPING`: the
+acknowledgment completes the handshake and the acquisition home starts only
+after Resume. Once acknowledged, the home must start within
+`AVAILABILITY_TIMEOUT`, not counting time paused or stopped; if it does not,
+the trajectory mode is restored once Abort has cancelled the acquisition. A failed acquisition homing
+reports the `G28.2` homing messages; the motion fault code is set as before.
 Other resources can continue operating while a joint or spindle is released.
 Coordinated and teleop motion are permitted only when inverse kinematics leaves
 every unavailable joint at its held command position. Commands requiring an
@@ -467,9 +641,22 @@ HOME ALL ordering and negative synchronized `HOME_SEQUENCE` groups retain the
 global sequence controller. HOME ALL or a synchronized group cannot start
 while independent homing is active, and independent requests cannot be mixed
 into an active global sequence. Duplicate requests for an active joint are
-rejected. An abort or homing error affects only that joint during independent
+rejected. An individual request is also refused while any other joint is
+homing if either joint sets `HOME_IS_SHARED` or `HOME_IGNORE_LIMITS`: its home
+input may be a shared switch or a limit chain that the other joint's motion
+trips, latching a wrong home position. Such joints home one at a time when
+homed individually; HOME ALL and synchronized `HOME_SEQUENCE` groups keep
+upstream behavior. Homing modules export `get_home_is_exclusive()` for this
+check (`homing.c` and both `homecomp.comp` variants). An abort or homing error affects only that joint during independent
 homing, while sequence-controlled operations preserve their group-wide abort
 behavior. No NML or protobuf interface changes are required.
+
+On v2.10.0-pre2 an independently homed joint finishes upstream's bounded
+homing return on its own, without waiting for other joints. A `G28.2` for one
+joint completes when the aggregate homing status clears, so it also waits for
+any other joint homing at the same time. Acquisition homing (patch 0017) and
+independent user homing never overlap: each refuses to start while the other
+is active.
 
 ### 0020 — Native lathe power jogging
 
@@ -515,7 +702,10 @@ tool wrappers and checks that the target sysroot reaches compilation and
 linking, and that installation honours `DESTDIR`. It also covers paths with
 spaces and a kbuild build that rereads the component Makefile.
 
-### 0022 — Raise HAL_NAME_LEN to 55
+### ~~0022 — Raise HAL_NAME_LEN to 55~~
+
+> **Removed** with the move to LinuxCNC v2.10.0-pre2. Upstream defines `HAL_NAME_LEN` as 55 there.
+> The description below records what the patch did.
 
 Raises the HAL name length from 47 to 55, the value LinuxCNC 2.10 uses, so
 thread names with statistic suffixes and other long names fit. The name length
@@ -542,3 +732,45 @@ are not supported.
 
 Known limitation, shared with the existing thread `tmax` and `time` handling:
 a failure while creating the parameters leaves a partially created thread.
+
+### 0024 — Drop interrupted MDI call state on every interpreter reset
+
+An MDI command whose remap or O-word call has to wait for its queue to drain
+leaves task with continuation state that resumes the call once the queue is
+empty. Only some abort paths cleared it: E-stop, machine off, a mode change
+to MDI or AUTO and a drop out of the ON state reset the interpreter, which
+unwinds the call, but kept the state. When the machine was back in MDI, task
+resumed a call that no longer existed, which crashed milltask in
+`Interp::execute_call()` for a Python remap and left an NGC remap's MDI command
+hanging. Commands queued behind it also survived and ran after the machine was
+re-enabled; they are now dropped.
+
+`emcTaskAbort()` now runs `mdi_execute_abort()` after its interpreter reset.
+`linuxcnc-tests/remap/mdi-remap-abort` interrupts a waiting NGC and Python remap with
+each of these and with an abort followed by an `EMC_TASK_PLAN_INIT` once idle,
+and checks that an MDI command queued behind it never runs and that MDI still
+works.
+
+This patch does not handle an `EMC_TASK_PLAN_INIT` that arrives during
+active work; 0025 refuses that. The bug is present in plain v2.10.0-pre2; the
+fix touches only upstream code paths.
+
+### 0025 — Interpreter reset only on an idle machine
+
+Upstream `EMC_TASK_PLAN_INIT` (`reset_interpreter()` in Python) re-initializes
+the interpreter at once, whatever task is doing: it reloads the INI settings
+and runs `RS274NGC_STARTUP_CODE`, so an MDI command, dwell, queued motion or
+jog that is still running suddenly sees the startup modes.
+
+Task now refuses the reset with an operator error unless the interpreter, task,
+the MDI queue and motion are all at rest and no joint is homing or availability
+change is in progress. The check runs in `emcTaskPlan()`, where task handles
+the command, so no client can start work between the check and the reset.
+Abort first, wait for the machine to stop, then reset. Right after startup task
+is busy for a few cycles, and a reset sent then is refused too.
+
+`linuxcnc-tests/task/interp-reset-requires-idle` checks that resets are refused during
+an MDI move, a dwell and a jog without changing the modes, and accepted again
+once the machine is idle. The native server additionally refuses a reset while
+a command it wrote earlier is still in progress, because task may not have
+seen that command yet.

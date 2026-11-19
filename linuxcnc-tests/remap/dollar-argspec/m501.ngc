@@ -1,0 +1,9 @@
+o<m501> sub
+o100 if [EXISTS[#<spindle>]]
+    (debug, NGC spindle=#<spindle>)
+o100 else
+    (debug, NGC spindle omitted)
+o100 endif
+o<m501> endsub
+m2
+%

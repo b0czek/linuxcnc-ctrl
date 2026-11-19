@@ -19,6 +19,7 @@ using linuxcnc::server::gcode::G5xOffsetOp;
 using linuxcnc::server::gcode::G92OffsetOp;
 using linuxcnc::server::gcode::Operation;
 using linuxcnc::server::gcode::OperationBatch;
+using linuxcnc::server::gcode::ParseError;
 using linuxcnc::server::gcode::ParseOptions;
 using linuxcnc::server::gcode::PlaneChangeOp;
 using linuxcnc::server::gcode::SerializedRs274Parser;
@@ -41,11 +42,12 @@ bool nearly_equal(double actual, double expected) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 8) {
+  if (argc != 10) {
     std::cerr << "usage: gcode_parser_integration <ini-path> <gcode-path> "
                  "<operations-gcode-path> <cutter-comp-gcode-path> "
                  "<python-remap-gcode-path> <modal-free-metric-path> "
-                 "<missing-linear-units-ini>\n";
+                 "<missing-linear-units-ini> <xyzau-ini> "
+                 "<rotary-axis-gcode-path>\n";
     return 2;
   }
 
@@ -228,6 +230,38 @@ int main(int argc, char** argv) {
                      return traverse && nearly_equal(traverse->pos.x, 25.4);
                    });
   assert(default_inch_move != default_unit_operations.end());
+
+  // The preview accepts exactly the axes [TRAJ]COORDINATES configures, as task
+  // does: an A and U move parses with X Y Z A U and is refused with X Y Z.
+  std::vector<Operation> rotary_operations;
+  ParseOptions rotary_options;
+  rotary_options.ini_path = argv[8];
+  rotary_options.on_batch = [&](OperationBatch&& batch) {
+    rotary_operations.insert(rotary_operations.end(),
+                             std::make_move_iterator(batch.begin()),
+                             std::make_move_iterator(batch.end()));
+  };
+  parser.parse_file(argv[9], rotary_options);
+  const auto rotary_move = std::find_if(
+      rotary_operations.begin(), rotary_operations.end(), [](const auto& op) {
+        const auto* traverse = std::get_if<TraverseOp>(&op);
+        return traverse && nearly_equal(traverse->pos.x, 1.0) &&
+               nearly_equal(traverse->pos.a, 90.0) &&
+               nearly_equal(traverse->pos.u, 2.0);
+      });
+  assert(rotary_move != rotary_operations.end());
+
+  bool unconfigured_axis_refused = false;
+  ParseOptions xyz_options;
+  xyz_options.ini_path = argv[1];
+  try {
+    parser.parse_file(argv[9], xyz_options);
+  } catch (const ParseError& error) {
+    unconfigured_axis_refused =
+        std::string(error.what()).find("Bad character 'a'") !=
+        std::string::npos;
+  }
+  assert(unconfigured_axis_refused);
 
   // A callback can cancel after a bounded batch. Cancellation is observed
   // before the next rs274 read/execute step and never removes that batch.

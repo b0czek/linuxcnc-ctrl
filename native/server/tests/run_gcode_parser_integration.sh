@@ -17,6 +17,7 @@ operations_program="$fixture_dir/preview_operations.ngc"
 cutter_compensation_program="$fixture_dir/cutter_compensation.ngc"
 python_remap_program="$fixture_dir/python_remap.ngc"
 modal_free_metric_program="$fixture_dir/modal_free_metric.ngc"
+rotary_axis_program="$fixture_dir/rotary_axis.ngc"
 parameter_file="$fixture_dir/sim_mm.var"
 tool_table="$fixture_dir/sim_mm.tbl"
 workdir=$(mktemp -d "${TMPDIR:-/tmp}/linuxcnc-gcode-parser.XXXXXX")
@@ -30,6 +31,10 @@ printf '#INCLUDE included.ini\n' >"$workdir/machine.ini"
 sed -e '/^LINEAR_UNITS[[:space:]]*=/d' \
     -e '/^RS274NGC_STARTUP_CODE[[:space:]]*=/d' \
     "$ini" >"$workdir/missing-linear-units.ini"
+# The same machine with an A and a U axis, in lower case to match task's
+# case-insensitive reading of COORDINATES.
+sed -e 's/^COORDINATES[[:space:]]*=.*/COORDINATES = x y z a u/' \
+    "$ini" >"$workdir/xyzau.ini"
 cp "$parameter_file" "$workdir/sim_mm.var"
 cp "$tool_table" "$workdir/sim_mm.tbl"
 cp "$fixture_dir/remap.py" "$workdir/remap.py"
@@ -39,4 +44,5 @@ cd "$workdir"
 EMC2_HOME="${EMC2_HOME:-}" "$binary" "$workdir/machine.ini" "$program" \
     "$operations_program" "$cutter_compensation_program" \
     "$python_remap_program" "$modal_free_metric_program" \
-    "$workdir/missing-linear-units.ini"
+    "$workdir/missing-linear-units.ini" "$workdir/xyzau.ini" \
+    "$rotary_axis_program"

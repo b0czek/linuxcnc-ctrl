@@ -1,0 +1,9 @@
+# Case-specific overrides; unspecified values come from FIXTURE.BASE.
+[FIXTURE]
+BASE = ../runtime-availability-regressions/base.ini
+
+[HAL]
+HALFILE = ../runtime-availability-regressions/core.hal
+
+[EMCIO]
+TOOL_TABLE = ../runtime-availability-regressions/tool.tbl

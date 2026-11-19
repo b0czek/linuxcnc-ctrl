@@ -203,6 +203,8 @@ int main(int argc, char** argv) {
   dwell.join();
   assert(dwell_status.ok());
 
+  verify_interpreter_reset_requires_idle(machine.get());
+
   // Exercise one safe representative from the remaining command families.
   // The protobuf setters are the command catalog: this table deliberately
   // does not duplicate command-case numbers or names.
@@ -381,6 +383,8 @@ int main(int argc, char** argv) {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
   assert(tool_deleted);
+
+  verify_task_queued_command_ordering(machine.get());
 
   expect_command_error(machine.get(), ExecuteCommandRequest{},
                        grpc::StatusCode::INVALID_ARGUMENT);

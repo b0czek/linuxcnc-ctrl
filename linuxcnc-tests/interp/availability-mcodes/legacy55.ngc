@@ -1,0 +1,5 @@
+o<legacy55> sub
+(msg, legacy M55 override)
+#<legacy_value> = #<q>
+o<legacy55> endsub
+M2

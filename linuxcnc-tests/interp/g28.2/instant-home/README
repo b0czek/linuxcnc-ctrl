@@ -1,0 +1,7 @@
+G28.2 for homes that finish within a few servo cycles: an absolute encoder
+joint, the same joint again while homed (HOME_NO_REHOME), and a joint with zero
+homing velocities. Task's coarse cycle means it never sees homing active, and
+it must still see that the home was accepted and ran.
+
+A home motion rejects (motion.homing-inhibit) still reports that it did not
+start.

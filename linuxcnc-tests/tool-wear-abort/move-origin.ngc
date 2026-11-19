@@ -1,0 +1,5 @@
+; run in AUTO right after the failed program, without a mode switch
+G21 G90
+(debug,applied #5081 #5083)
+G0 X0 Z0
+M2

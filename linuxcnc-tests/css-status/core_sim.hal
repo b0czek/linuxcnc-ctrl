@@ -1,0 +1,10 @@
+loadrt trivkins
+loadrt motmod base_period_nsec=0 servo_period_nsec=1000000 num_joints=1 num_spindles=1
+
+addf motion-command-handler servo-thread
+addf motion-controller servo-thread
+
+net Xpos joint.0.motor-pos-cmd => joint.0.motor-pos-fb
+net estop-loop iocontrol.0.user-enable-out iocontrol.0.emc-enable-in
+
+setp spindle.0.at-speed true
