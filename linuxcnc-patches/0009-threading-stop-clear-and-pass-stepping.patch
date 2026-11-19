@@ -1542,7 +1542,7 @@ index c756dd3..f572282 100755
  mapfile -t items < <(grep -v '^[[:space:]]*\(#\|$\)' "$1")
  [ ${#items[@]} -gt 0 ] || { echo "run-scenarios.sh: no scenarios in $1" >&2; exit 1; }
 diff --git a/tests/resumable-stop/test-ui.py b/tests/resumable-stop/test-ui.py
-index 0b39992..d29f03f 100755
+index 4cf91ee..83dfcc5 100755
 --- a/tests/resumable-stop/test-ui.py
 +++ b/tests/resumable-stop/test-ui.py
 @@ -2,6 +2,7 @@
@@ -1589,7 +1589,7 @@ index 0b39992..d29f03f 100755
  
  
  def wait_complete(message, timeout=10.0):
-@@ -478,6 +497,41 @@ def run_threading_stop_resume_test():
+@@ -480,6 +499,41 @@ def run_threading_stop_resume_test():
      )
  
  
@@ -1631,7 +1631,7 @@ index 0b39992..d29f03f 100755
  def run_fperrev_stop_resume_test():
      open_auto_program("fperrev.ngc")
      c.auto(linuxcnc.AUTO_RUN, 0)
-@@ -542,9 +596,9 @@ def run_g76_stop_resume_test():
+@@ -544,9 +598,9 @@ def run_g76_stop_resume_test():
      if s.position[2] > -4.90:
          fail("G76 stopped before its active threading TC completed")
  
@@ -1643,7 +1643,7 @@ index 0b39992..d29f03f 100755
              % s.position[0]
          )
  
-@@ -563,6 +617,264 @@ def run_g76_stop_resume_test():
+@@ -565,6 +619,264 @@ def run_g76_stop_resume_test():
      assert_outputs_stopped_after_program()
  
  
@@ -1908,7 +1908,7 @@ index 0b39992..d29f03f 100755
  def run_queued_threading_stop_resume_test():
      hal.set_p("spindle.0.at-speed", "false")
      open_auto_program("thread.ngc")
-@@ -1463,8 +1775,16 @@ SCENARIOS = {
+@@ -1465,8 +1777,16 @@ SCENARIOS = {
      "abort-empty": run_abort_from_empty_stopped_queue_test,
      "queued-g33": run_queued_threading_stop_resume_test,
      "g33": run_threading_stop_resume_test,
