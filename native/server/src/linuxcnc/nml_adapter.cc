@@ -511,7 +511,10 @@ CommandSubmission NmlAdapter::submit(
     std::stop_token stop_token) {
 #ifdef LINUXCNC_GRPC_HAS_NML
   const auto routing = detail::nml_command_routing(command);
-  const bool safety_command = routing.priority == CommandPriority::Safety;
+  const bool safety_command = routing.priority != CommandPriority::Normal;
+  // A command cancelled by a later Interrupt never runs its action, so undo
+  // what was reserved for it here instead.
+  auto on_cancelled = command.on_failed;
   return impl_->commands.submit_with_context(
       [this, command = std::move(command), safety_command,
        routing](CommandContext& context) mutable {
@@ -915,7 +918,8 @@ CommandSubmission NmlAdapter::submit(
           throw;
         }
       },
-      stop_token, routing.priority, routing.hold_policy);
+      stop_token, routing.priority, routing.hold_policy,
+      std::move(on_cancelled));
 #else
   (void)command;
   (void)stop_token;

@@ -495,6 +495,8 @@ message ExecuteCommandRequest {
   WaitPolicy wait_policy = 1;
   oneof command {
     SetTaskMode set_task_mode = 2;
+    // E-stop and machine off, like abort_task, cancel every command still
+    // waiting in this server's queue when they arrive.
     SetTaskState set_state = 3;
     EmptyCommand task_plan_synch = 4;
     // Restores the interpreter's startup modes. Refused with an error response
@@ -509,6 +511,9 @@ message ExecuteCommandRequest {
     EmptyCommand reverse_program = 12;
     EmptyCommand forward_program = 13;
     EmptyCommand stop_program = 14;
+    // Goes ahead of queued commands and cancels them; each cancelled command
+    // is answered with an error and never reaches LinuxCNC. Commands sent
+    // after the abort are kept.
     EmptyCommand abort_task = 15;
     SetBool set_optional_stop = 16;
     SetBool set_block_delete = 17;

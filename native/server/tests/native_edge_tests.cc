@@ -412,6 +412,82 @@ void command_hold_shutdown_test() {
   release();
 }
 
+CommandTicket cancellable(CommandCoordinator& coordinator, WriteLog& log,
+                          int serial, std::atomic<int>& cancelled,
+                          CommandHoldPolicy policy = CommandHoldPolicy::Wait) {
+  return submitted(coordinator.submit_with_context(
+      [&log, serial](CommandContext&) { log.add(serial); }, {},
+      CommandPriority::Normal, policy, [&cancelled] { ++cancelled; }));
+}
+
+void require_cancelled(const CommandTicket& ticket, const char* description) {
+  const auto result = finished(ticket, description);
+  require(result.state == CommandState::Failed &&
+              result.error.find("cancelled before reaching LinuxCNC") !=
+                  std::string::npos,
+          description);
+}
+
+void interrupt_cancels_held_commands_test() {
+  CommandCoordinator coordinator(8, 4);
+  WriteLog log;
+  std::atomic<int> cancelled{0};
+  const auto release = start_hold(coordinator, std::chrono::seconds(30));
+  const auto held = cancellable(coordinator, log, 1, cancelled);
+  const auto bypass =
+      cancellable(coordinator, log, 2, cancelled, CommandHoldPolicy::Bypass);
+  (void)finished(bypass, "the bypassing command passes the hold");
+
+  // Pause and Stop keep earlier work queued.
+  const auto pause = logged(coordinator, log, 3, CommandPriority::Safety);
+  (void)finished(pause, "the safety command runs");
+  require(coordinator.queued() == 1, "a safety command keeps held work");
+
+  const auto later_bypass =
+      cancellable(coordinator, log, 4, cancelled, CommandHoldPolicy::Bypass);
+  (void)finished(later_bypass, "the second bypassing command runs");
+  const auto second_held = cancellable(coordinator, log, 5, cancelled);
+  const auto abort = logged(coordinator, log, 6, CommandPriority::Interrupt);
+  (void)finished(abort, "the interrupt runs");
+  require_cancelled(held, "a command held before the interrupt is cancelled");
+  require_cancelled(second_held,
+                    "every command held before the interrupt is cancelled");
+  require(cancelled == 2, "each cancelled command releases what it reserved");
+
+  const auto after = logged(coordinator, log, 7);
+  std::this_thread::sleep_for(kSettle);
+  require(coordinator.queued() == 1,
+          "a command submitted after the interrupt is kept");
+  release();
+  (void)finished(after, "the later command runs once the hold ends");
+  require(log.writes() == std::vector<int>({2, 3, 4, 6, 7}),
+          "cancelled commands never run");
+  coordinator.shutdown();
+}
+
+void interrupt_cancels_queued_commands_without_hold_test() {
+  CommandCoordinator coordinator(8, 4);
+  WriteLog log;
+  std::atomic<int> cancelled{0};
+  Gate blocker;
+  const auto busy = submitted(coordinator.submit([&] {
+    blocker.arrive();
+    blocker.wait_until_open();
+  }));
+  blocker.wait_for_arrival();
+  const auto queued = cancellable(coordinator, log, 1, cancelled);
+  const auto estop = logged(coordinator, log, 2, CommandPriority::Interrupt);
+  require_cancelled(queued, "a queued command is cancelled at once");
+  blocker.open();
+  require(finished(busy, "the running command finishes").state ==
+              CommandState::Completed,
+          "the command already running is not cancelled");
+  (void)finished(estop, "the interrupt runs");
+  require(log.writes() == std::vector<int>({2}), "only the interrupt runs");
+  require(cancelled == 1, "the cancel handler runs once");
+  coordinator.shutdown();
+}
+
 void nml_command_routing_test() {
   const auto routed = [](NmlCommandKind kind, std::int32_t integer = 0) {
     NmlCommand command;
@@ -429,17 +505,20 @@ void nml_command_routing_test() {
                 routing.hold_policy == CommandHoldPolicy::Wait,
             "task-queued commands wait for an earlier hold");
   }
-  for (const auto kind : {NmlCommandKind::AbortTask, NmlCommandKind::Pause,
-                          NmlCommandKind::StopProgram}) {
+  for (const auto kind : {NmlCommandKind::Pause, NmlCommandKind::StopProgram}) {
     const auto routing = routed(kind);
-    require(routing.priority == CommandPriority::Safety, "stops are safety");
+    require(routing.priority == CommandPriority::Safety,
+            "Pause and Stop are safety commands that keep queued work");
     require(!routing.task_queued, "stops do not start a hold");
   }
+  const auto abort = routed(NmlCommandKind::AbortTask);
+  require(abort.priority == CommandPriority::Interrupt && !abort.task_queued,
+          "Abort cancels queued work");
   for (const auto state :
        {detail::kNmlTaskStateEstop, detail::kNmlTaskStateOff}) {
     require(routed(NmlCommandKind::SetTaskState, state).priority ==
-                CommandPriority::Safety,
-            "E-stop and machine off are safety commands");
+                CommandPriority::Interrupt,
+            "E-stop and machine off cancel queued work");
   }
   for (const auto state : {2, 4}) {
     const auto routing = routed(NmlCommandKind::SetTaskState, state);
@@ -570,6 +649,27 @@ void queued_command_superseded_by_safety_test() {
   require(commands.log.wait_for(12), "the hold ends with the queued command");
   commands.tracker.observe(task_status(12, detail::kNmlRcsStatusDone));
   (void)finished(held, "the held command resolves");
+}
+
+void queued_command_abort_cancels_held_commands_test() {
+  TrackedCommands commands;
+  const auto queued = commands.write(10, true);
+  require(commands.log.wait_for(10), "the queued command is written");
+  const auto held = commands.write(12, false);
+  const auto abort = commands.write(11, false, CommandPriority::Interrupt);
+  require(commands.log.wait_for(11), "the abort passes the hold");
+  require_cancelled(held, "the command held behind the queued one is dropped");
+
+  commands.tracker.observe(task_status(11, detail::kNmlRcsStatusDone));
+  require(finished(queued, "the overtaken command resolves").state ==
+              CommandState::Failed,
+          "the overtaken queued command is not reported complete");
+  require(
+      finished(abort, "the abort resolves").state == CommandState::Completed,
+      "the abort completes");
+  std::this_thread::sleep_for(kSettle);
+  require(commands.log.writes() == std::vector<int>({10, 11}),
+          "the held command never reaches LinuxCNC");
 }
 
 void immediate_command_completes_on_later_echo_test() {
@@ -1311,10 +1411,13 @@ int main() {
   command_hold_bypass_keeps_order_without_hold_test();
   command_hold_expiry_test();
   command_hold_shutdown_test();
+  interrupt_cancels_held_commands_test();
+  interrupt_cancels_queued_commands_without_hold_test();
   nml_command_routing_test();
   queued_command_failure_attribution_test();
   queued_command_success_releases_hold_test();
   queued_command_superseded_by_safety_test();
+  queued_command_abort_cancels_held_commands_test();
   immediate_command_completes_on_later_echo_test();
   queued_command_timeout_releases_hold_test();
   queued_command_hold_outlives_silent_status_test();

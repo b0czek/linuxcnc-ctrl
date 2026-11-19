@@ -286,6 +286,8 @@ struct NmlCommandRouting {
 
 // Later commands wait for a task-queued command because task reports one
 // result, for the command it read last. Safety commands go first regardless.
+// Abort, E-stop and machine off also cancel every command still queued here,
+// so work requested before them never reaches LinuxCNC after them.
 // Resume, Step and SpindleOff keep their queue position but pass a hold: task
 // admits them during an availability operation, and a queued command cannot
 // finish while the program is paused until Resume or Step is delivered.
@@ -294,13 +296,15 @@ inline NmlCommandRouting nml_command_routing(const NmlCommand& command) {
   switch (command.kind) {
     case NmlCommandKind::StopProgram:
     case NmlCommandKind::Pause:
-    case NmlCommandKind::AbortTask:
       routing.priority = CommandPriority::Safety;
+      break;
+    case NmlCommandKind::AbortTask:
+      routing.priority = CommandPriority::Interrupt;
       break;
     case NmlCommandKind::SetTaskState:
       if (command.integer == kNmlTaskStateEstop ||
           command.integer == kNmlTaskStateOff)
-        routing.priority = CommandPriority::Safety;
+        routing.priority = CommandPriority::Interrupt;
       break;
     case NmlCommandKind::Resume:
     case NmlCommandKind::Step:

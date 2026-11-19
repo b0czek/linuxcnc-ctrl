@@ -75,20 +75,11 @@ CommandCoordinator::~CommandCoordinator() { shutdown(); }
 CommandSubmission CommandCoordinator::submit(CommandAction action,
                                              CommandPriority priority) {
   if (!action) throw std::invalid_argument("command action must not be empty");
-
   auto state = std::make_shared<CommandTicket::State>();
-  std::unique_lock lock(mutex_);
-  if (stopping_) return {CommandSubmitStatus::Stopped, {}};
-  auto& queue = priority == CommandPriority::Safety ? safety_queue_ : queue_;
-  const auto capacity =
-      priority == CommandPriority::Safety ? safety_capacity_ : capacity_;
-  if (queue.size() >= capacity) return {CommandSubmitStatus::QueueFull, {}};
-  const auto sequence = next_sequence_++;
-  state->result.sequence = sequence;
-  queue.push_back(Item{sequence, std::move(action), {}, state, false});
-  lock.unlock();
-  condition_.notify_one();
-  return {CommandSubmitStatus::Submitted, CommandTicket(std::move(state))};
+  const auto status =
+      enqueue(Item{0, std::move(action), {}, state, false, {}}, priority);
+  if (status != CommandSubmitStatus::Submitted) return {status, {}};
+  return {status, CommandTicket(std::move(state))};
 }
 
 CommandSubmission CommandCoordinator::submit_with_context(
@@ -99,29 +90,60 @@ CommandSubmission CommandCoordinator::submit_with_context(
 
 CommandSubmission CommandCoordinator::submit_with_context(
     ContextCommandAction action, const std::stop_token& stop_token,
-    CommandPriority priority, CommandHoldPolicy hold_policy) {
+    CommandPriority priority, CommandHoldPolicy hold_policy,
+    CommandCancelHandler on_cancelled) {
   if (!action) throw std::invalid_argument("command action must not be empty");
   auto state = std::make_shared<CommandTicket::State>();
-  std::unique_lock lock(mutex_);
-  if (stopping_) return {CommandSubmitStatus::Stopped, {}};
-  auto& queue = priority == CommandPriority::Safety ? safety_queue_ : queue_;
-  const auto capacity =
-      priority == CommandPriority::Safety ? safety_capacity_ : capacity_;
-  if (queue.size() >= capacity) return {CommandSubmitStatus::QueueFull, {}};
-  const auto sequence = next_sequence_++;
-  state->result.sequence = sequence;
-  queue.push_back(
-      Item{sequence,
+  const auto status = enqueue(
+      Item{0,
            {},
            [action = std::move(action), stop_token](CommandContext& context) {
              context.stop_token = stop_token;
              action(context);
            },
            state,
-           hold_policy == CommandHoldPolicy::Bypass});
-  lock.unlock();
+           hold_policy == CommandHoldPolicy::Bypass,
+           std::move(on_cancelled)},
+      priority);
+  if (status != CommandSubmitStatus::Submitted) return {status, {}};
+  return {status, CommandTicket(std::move(state))};
+}
+
+CommandSubmitStatus CommandCoordinator::enqueue(Item item,
+                                                CommandPriority priority) {
+  std::deque<Item> cancelled;
+  {
+    std::lock_guard lock(mutex_);
+    if (stopping_) return CommandSubmitStatus::Stopped;
+    const bool safety = priority != CommandPriority::Normal;
+    auto& queue = safety ? safety_queue_ : queue_;
+    if (queue.size() >= (safety ? safety_capacity_ : capacity_))
+      return CommandSubmitStatus::QueueFull;
+    // Under the same lock that queues the interrupt, so exactly the commands
+    // submitted before it are cancelled and later ones are kept.
+    if (priority == CommandPriority::Interrupt) cancelled.swap(queue_);
+    item.sequence = next_sequence_++;
+    item.state->result.sequence = item.sequence;
+    queue.push_back(std::move(item));
+  }
   condition_.notify_one();
-  return {CommandSubmitStatus::Submitted, CommandTicket(std::move(state))};
+  for (auto& queued : cancelled) cancel(queued);
+  return CommandSubmitStatus::Submitted;
+}
+
+void CommandCoordinator::cancel(Item& item) {
+  std::string error =
+      "cancelled before reaching LinuxCNC by a later abort, E-stop or "
+      "machine off";
+  try {
+    if (item.on_cancelled) item.on_cancelled();
+  } catch (const std::exception& cleanup_error) {
+    error += "; cleanup failed: ";
+    error += cleanup_error.what();
+  } catch (...) {
+    error += "; cleanup failed";
+  }
+  transition(item.state, CommandState::Failed, std::move(error));
 }
 
 void CommandCoordinator::shutdown() {
