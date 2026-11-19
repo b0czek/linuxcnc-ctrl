@@ -582,6 +582,14 @@ CommandSubmission NmlAdapter::submit(
               message = std::make_unique<EMC_TASK_PLAN_SYNCH>();
               break;
             case NmlCommandKind::ResetInterpreter:
+              // LinuxCNC refuses a reset unless the machine is idle. Commands
+              // this server wrote earlier may not have reached task yet, so
+              // refuse here too rather than let task judge a stale state.
+              // Checked after every earlier command was written.
+              if (impl_->completions.has_pending())
+                throw std::runtime_error(
+                    "interpreter reset refused: earlier commands are still "
+                    "in progress; wait for them or abort first");
               message = std::make_unique<EMC_TASK_PLAN_INIT>();
               break;
             case NmlCommandKind::ProgramOpen: {

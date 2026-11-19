@@ -636,6 +636,20 @@ void queued_command_channel_failure_releases_hold_test() {
       "the next command also reports the lost channel");
 }
 
+void interpreter_reset_pending_test() {
+  TrackedCommands commands;
+  commands.tracker.observe(task_status(0, detail::kNmlRcsStatusDone));
+  require(!commands.tracker.has_pending(), "nothing is pending at first");
+  const auto written = commands.write(10, false);
+  require(commands.log.wait_for(10), "the command is written");
+  require(commands.tracker.has_pending(),
+          "a written command is pending until LinuxCNC finishes it");
+  commands.tracker.observe(task_status(10, detail::kNmlRcsStatusDone));
+  (void)finished(written, "the written command resolves");
+  require(!commands.tracker.has_pending(),
+          "nothing is pending once the command resolved");
+}
+
 void command_validation_test() {
   NmlStatusSnapshot configuration;
   configuration.motion_stat.traj.joints = 3;
@@ -1333,6 +1347,7 @@ int main() {
   queued_command_timeout_releases_hold_test();
   queued_command_hold_outlives_silent_status_test();
   queued_command_channel_failure_releases_hold_test();
+  interpreter_reset_pending_test();
   command_validation_test();
   nml_serial_wrap_test();
   position_cursor_generation_and_replacement_test();

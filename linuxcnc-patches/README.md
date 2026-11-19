@@ -715,24 +715,42 @@ a failure while creating the parameters leaves a partially created thread.
 An MDI command whose remap or O-word call has to wait for its queue to drain
 leaves task with continuation state that resumes the call once the queue is
 empty. Only some abort paths cleared it: E-stop, machine off, a mode change
-to MDI or AUTO, a drop out of the ON state and an `EMC_TASK_PLAN_INIT` reset
-or re-initialise the interpreter, which unwinds the call, but kept the state.
-When the machine was back in MDI, task resumed a call that no longer existed,
-which crashed milltask in `Interp::execute_call()` for a Python remap and
-left an NGC remap's MDI command hanging. Commands queued behind it also
-survived and ran after the machine was re-enabled; they are now dropped.
+to MDI or AUTO and a drop out of the ON state reset the interpreter, which
+unwinds the call, but kept the state. When the machine was back in MDI, task
+resumed a call that no longer existed, which crashed milltask in
+`Interp::execute_call()` for a Python remap and left an NGC remap's MDI command
+hanging. Commands queued behind it also survived and ran after the machine was
+re-enabled; they are now dropped.
 
-`emcTaskAbort()` now runs `mdi_execute_abort()` after its interpreter reset,
-and `EMC_TASK_PLAN_INIT` always drops MDI commands the interpreter has not read,
-including one already moved towards execution, because they were written for
-the modal state being discarded. It runs `mdi_execute_abort()` only when a call
-is interrupted. A command already read keeps running and stays reported until it
-ends, including one that returned `INTERP_EXECUTE_FINISH` outside a call
-(`G38.n`, `M66`, `M6`, `G28.2`). `tests/remap/mdi-remap-abort` interrupts a waiting NGC and
-Python remap with each of these, checks that an MDI command queued behind it
-never runs and that MDI still works, and resets the interpreter during a plain
-MDI move. The bug is present in plain
-v2.10.0-pre2; the fix touches only upstream code paths.
+`emcTaskAbort()` now runs `mdi_execute_abort()` after its interpreter reset.
+`tests/remap/mdi-remap-abort` interrupts a waiting NGC and Python remap with
+each of these and with an abort followed by an `EMC_TASK_PLAN_INIT` once idle,
+and checks that an MDI command queued behind it never runs and that MDI still
+works.
+
+This patch does not handle an `EMC_TASK_PLAN_INIT` that arrives during
+active work; 0025 refuses that. The bug is present in plain v2.10.0-pre2; the
+fix touches only upstream code paths.
+
+### 0025 — Interpreter reset only on an idle machine
+
+Upstream `EMC_TASK_PLAN_INIT` (`reset_interpreter()` in Python) re-initializes
+the interpreter at once, whatever task is doing: it reloads the INI settings
+and runs `RS274NGC_STARTUP_CODE`, so an MDI command, dwell, queued motion or
+jog that is still running suddenly sees the startup modes.
+
+Task now refuses the reset with an operator error unless the interpreter, task,
+the MDI queue and motion are all at rest and no joint is homing or availability
+change is in progress. The check runs in `emcTaskPlan()`, where task handles
+the command, so no client can start work between the check and the reset.
+Abort first, wait for the machine to stop, then reset. Right after startup task
+is busy for a few cycles, and a reset sent then is refused too.
+
+`tests/task/interp-reset-requires-idle` checks that resets are refused during
+an MDI move, a dwell and a jog without changing the modes, and accepted again
+once the machine is idle. The native server additionally refuses a reset while
+a command it wrote earlier is still in progress, because task may not have
+seen that command yet.
 
 ### 0026 — Identify the command an operator error rejects
 
