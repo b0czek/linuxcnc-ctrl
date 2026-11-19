@@ -102,6 +102,12 @@ class CommandCompletionTracker {
                std::chrono::seconds(1);
   }
 
+  // Whether a written command is still waiting for LinuxCNC to finish it.
+  bool has_pending() const {
+    std::lock_guard lock(mutex_);
+    return !pending_.empty();
+  }
+
  private:
   struct Pending {
     int serial;

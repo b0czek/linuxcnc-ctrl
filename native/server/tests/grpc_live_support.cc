@@ -449,6 +449,77 @@ void verify_task_queued_command_ordering(
                "the delete still queued in LinuxCNC runs after Resume");
 }
 
+namespace {
+
+void expect_reset_refused(linuxcnc::v1::MachineService::Stub* machine,
+                          const std::string& reason) {
+  ExecuteCommandRequest reset;
+  reset.set_wait_policy(linuxcnc::v1::WAIT_POLICY_COMPLETED);
+  reset.mutable_reset_interpreter();
+  grpc::ClientContext context;
+  context.set_deadline(std::chrono::system_clock::now() +
+                       std::chrono::seconds(5));
+  ExecuteCommandResponse response;
+  live_require(machine->ExecuteCommand(&context, reset, &response).ok(),
+               "the refused reset is answered");
+  live_require(response.status() == linuxcnc::v1::RCS_STATUS_ERROR,
+               "a reset of a busy machine is refused");
+  live_require(response.error().message().find(reason) != std::string::npos,
+               "the refusal says why");
+}
+
+}  // namespace
+
+void verify_interpreter_reset_requires_idle(
+    linuxcnc::v1::MachineService::Stub* machine) {
+  const auto mdi = [](const char* line) {
+    ExecuteCommandRequest request;
+    request.mutable_mdi()->set_command(line);
+    return request;
+  };
+  const auto distance_mode = [](const GetStatusResponse& response) {
+    return response.status().task().active_g_codes().distance_mode();
+  };
+  const auto wait_for = [&](const char* description, auto&& condition) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (condition(get_status_with_retry(machine))) return;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    live_require(false, description);
+  };
+
+  (void)execute_completed(machine, mdi("G91"));
+  (void)execute_accepted(machine, mdi("G1 X5 F60"));
+  wait_for("the move starts", [](const GetStatusResponse& response) {
+    return response.status().motion().traj().current_velocity() > 0.0;
+  });
+
+  expect_reset_refused(machine, "refused");
+  const auto refused = get_status_with_retry(machine);
+  live_require(refused.status().motion().traj().current_velocity() > 0.0,
+               "the move keeps running after the refusal");
+  live_require(distance_mode(refused) == 910, "the refusal keeps the modes");
+
+  ExecuteCommandRequest abort;
+  abort.mutable_abort_task();
+  (void)execute_completed(machine, std::move(abort));
+  wait_for("the abort reaches idle", [](const GetStatusResponse& response) {
+    const auto& task = response.status().task();
+    const auto& traj = response.status().motion().traj();
+    return task.interp_state() == linuxcnc::v1::INTERP_STATE_IDLE &&
+           task.exec_state() == linuxcnc::v1::EXEC_STATE_DONE &&
+           traj.queue() == 0 && traj.in_position() &&
+           traj.current_velocity() == 0.0;
+  });
+  ExecuteCommandRequest reset;
+  reset.mutable_reset_interpreter();
+  (void)execute_completed(machine, std::move(reset));
+  wait_for("the reset restores the modes",
+           [&](const GetStatusResponse& s) { return distance_mode(s) == 900; });
+}
+
 void verify_priority_admission(linuxcnc::v1::MachineService::Stub* machine) {
   constexpr int kSubmitters = 256;
   std::atomic<int> ready{0};

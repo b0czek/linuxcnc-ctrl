@@ -497,6 +497,8 @@ message ExecuteCommandRequest {
     SetTaskMode set_task_mode = 2;
     SetTaskState set_state = 3;
     EmptyCommand task_plan_synch = 4;
+    // Restores the interpreter's startup modes. Refused with an error response
+    // unless the machine is idle; abort and wait for it to stop first.
     EmptyCommand reset_interpreter = 5;
     ProgramOpen program_open = 6;
     EmptyCommand program_close = 7;
