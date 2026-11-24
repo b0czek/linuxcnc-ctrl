@@ -684,7 +684,7 @@ index 55fb417..90cc136 100644
  }
 -
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 9e21ff7..e2bdf62 100644
+index eb0dda6..3f7e971 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -503,6 +503,22 @@ static int programStartLine = 0;	// which line to run program from
@@ -765,16 +765,16 @@ index 9e21ff7..e2bdf62 100644
  	break;
  
      case EMC_TRAJ_CIRCULAR_MOVE_TYPE:
-@@ -2655,6 +2685,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
- 	} else { // we can honour the modeswitch
- 	    if (mode_msg->mode != emcStatus->task.mode) {
+@@ -2658,6 +2688,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+ 	    if (mode_msg->mode != emcStatus->task.mode ||
+ 		    mode_msg->mode != EMC_TASK_MODE::MANUAL) {
  		emcTaskStopClear();
 +		emcStatus->motion.traj.single_stepping = 0;
 +		emcTaskResetSteppingState();
  	    }
  	    if (mode_msg->mode == EMC_TASK_MODE::MANUAL &&
  		emcStatus->task.mode != EMC_TASK_MODE::MANUAL) {
-@@ -2688,8 +2720,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2691,8 +2723,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  		emcStatus->task.interpState = EMC_TASK_INTERP::IDLE;
  		emcStatus->task.execState = EMC_TASK_EXEC::DONE;
  		emcStatus->motion.traj.single_stepping = 0;
@@ -784,7 +784,7 @@ index 9e21ff7..e2bdf62 100644
  
  		// now queue up command to resynch interpreter
  		emcTaskQueueTaskPlanSynchCmd();
-@@ -2702,6 +2733,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2705,6 +2736,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	state_msg = reinterpret_cast<EMC_TASK_SET_STATE *>(cmd);
  	if (state_msg->state != EMC_TASK_STATE::ON) {
  	    emcTaskStopClear();
@@ -793,7 +793,7 @@ index 9e21ff7..e2bdf62 100644
  	}
  	retval = emcTaskSetState(state_msg->state);
  	break;
-@@ -2786,8 +2819,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2789,8 +2822,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_TASK_PLAN_EXECUTE_TYPE:
  	emcStatus->motion.traj.single_stepping = 0;
@@ -803,7 +803,7 @@ index 9e21ff7..e2bdf62 100644
  	execute_msg = reinterpret_cast<EMC_TASK_PLAN_EXECUTE *>(cmd);
          if (!all_homed() && !no_force_homing) { //!no_force_homing = force homing before MDI
              emcOperatorError(_("Can't issue MDI command when not homed"));
-@@ -2882,8 +2914,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2885,8 +2917,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
              break;
          }
  	emcStatus->motion.traj.single_stepping = 0;
@@ -813,7 +813,7 @@ index 9e21ff7..e2bdf62 100644
  	if (!taskplanopen && emcStatus->task.file[0] != 0) {
  	    emcTaskPlanOpen(emcStatus->task.file);
  	}
-@@ -2952,6 +2983,10 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2955,6 +2986,10 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	}
  	break;
  
@@ -824,7 +824,7 @@ index 9e21ff7..e2bdf62 100644
      case EMC_TASK_PLAN_SET_OPTIONAL_STOP_TYPE:
  	os_msg = reinterpret_cast<EMC_TASK_PLAN_SET_OPTIONAL_STOP *>(cmd);
  	emcTaskPlanSetOptionalStop(os_msg->state);
-@@ -3060,6 +3095,7 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3063,6 +3098,7 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
      case EMC_TASK_PLAN_END_TYPE:
      case EMC_TASK_PLAN_INIT_TYPE:
      case EMC_TASK_PLAN_SYNCH_TYPE:
@@ -832,7 +832,7 @@ index 9e21ff7..e2bdf62 100644
      case EMC_TASK_PLAN_EXECUTE_TYPE:
      case EMC_TASK_PLAN_OPTIONAL_STOP_TYPE:
  	return EMC_TASK_EXEC::DONE;
-@@ -3112,11 +3148,18 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3115,11 +3151,18 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
  #define STEPPING_CHECK()                                                   \
  if (stepping) {                                                            \
    if (! steppingWait) {                                                    \
@@ -854,7 +854,7 @@ index 9e21ff7..e2bdf62 100644
        break;                                                               \
      }                                                                      \
    }                                                                        \
-@@ -3178,8 +3221,7 @@ static int emcTaskExecute(void)
+@@ -3181,8 +3224,7 @@ static int emcTaskExecute(void)
  	emcStatus->task.interpState = EMC_TASK_INTERP::IDLE;
  	emcStatus->task.execState = EMC_TASK_EXEC::DONE;
  	emcStatus->motion.traj.single_stepping = 0;
@@ -864,7 +864,7 @@ index 9e21ff7..e2bdf62 100644
  
  	// now queue up command to resynch interpreter
  	emcTaskQueueTaskPlanSynchCmd();
-@@ -3201,6 +3243,7 @@ static int emcTaskExecute(void)
+@@ -3204,6 +3246,7 @@ static int emcTaskExecute(void)
  		if (NULL != emcTaskCommand) {
  		    emcTaskEager = 1;
  		    emcStatus->task.currentLine = interp_list.get_line_number();
@@ -872,7 +872,7 @@ index 9e21ff7..e2bdf62 100644
  		    // callLevel is set by emcTaskUpdate() from the executing
  		    // move's StateTag; the interpreter's live level at dequeue
  		    // time leads motion by the whole read-ahead queue.
-@@ -4197,8 +4240,7 @@ int main(int argc, char *argv[])
+@@ -4200,8 +4243,7 @@ int main(int argc, char *argv[])
  	    emcStatus->task.interpState = EMC_TASK_INTERP::IDLE;
  	    emcStatus->task.execState = EMC_TASK_EXEC::DONE;
  		emcStatus->motion.traj.single_stepping = 0;
@@ -936,7 +936,7 @@ index 47018b2..bd8ad13 100644
                              // this segment (g64 mode)
  
 diff --git a/src/emc/tp/tp.c b/src/emc/tp/tp.c
-index 8ef21c3..c9b271e 100644
+index e481a43..a9dfacc 100644
 --- a/src/emc/tp/tp.c
 +++ b/src/emc/tp/tp.c
 @@ -240,10 +240,12 @@ STATIC int tpGetMachineActiveLimit(double * const act_limit, PmCartesian const *
@@ -1111,7 +1111,7 @@ index 8ef21c3..c9b271e 100644
      //TODO make progress to match target?
      // done with this move
      if (tp->reverse_run) {
-@@ -4303,6 +4374,10 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
+@@ -4314,6 +4385,10 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
      if(!tc) {
          if (tp->stopping) {
              tpHandleEmptyQueue(tp);
@@ -1122,7 +1122,7 @@ index 8ef21c3..c9b271e 100644
              if (tp->stopping) {
                  tp->stop_sync_run = 0;
                  tp->pausing = 1;
-@@ -4310,6 +4385,11 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
+@@ -4321,6 +4396,11 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
              }
              return TP_ERR_WAITING;
          }
@@ -1134,7 +1134,7 @@ index 8ef21c3..c9b271e 100644
          tpHandleEmptyQueue(tp);
          return TP_ERR_WAITING;
      }
-@@ -4458,6 +4538,42 @@ int tpSetSpindleSync(TP_STRUCT * const tp, int spindle, double sync, int mode) {
+@@ -4469,6 +4549,42 @@ int tpSetSpindleSync(TP_STRUCT * const tp, int spindle, double sync, int mode) {
      return TP_ERR_OK;
  }
  
@@ -1177,7 +1177,7 @@ index 8ef21c3..c9b271e 100644
  int tpPause(TP_STRUCT * const tp)
  {
      if (0 == tp) {
-@@ -4465,22 +4581,75 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4476,22 +4592,75 @@ int tpPause(TP_STRUCT * const tp)
      }
  
      if (tp->stopping) {
@@ -1259,7 +1259,7 @@ index 8ef21c3..c9b271e 100644
      } else {
          tp->pausing = 1;
      }
-@@ -4495,6 +4664,17 @@ int tpResume(TP_STRUCT * const tp)
+@@ -4506,6 +4675,17 @@ int tpResume(TP_STRUCT * const tp)
      tp->pausing = 0;
      tp->stopping = 0;
      tp->stop_sync_run = 0;
@@ -1277,7 +1277,7 @@ index 8ef21c3..c9b271e 100644
      emcmotStatus->stopped = 0;
      return TP_ERR_OK;
  }
-@@ -4507,6 +4687,10 @@ int tpAbort(TP_STRUCT * const tp)
+@@ -4518,6 +4698,10 @@ int tpAbort(TP_STRUCT * const tp)
  
      if (!tp->aborting) {
          /* const to abort, signal a pause and set our abort flag */

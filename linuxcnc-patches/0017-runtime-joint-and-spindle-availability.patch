@@ -40,7 +40,7 @@ other motion-logger tests.
  src/emc/motion-logger/motion-logger.c         |  22 +
  src/emc/motion/axis.c                         |   2 +-
  src/emc/motion/command.c                      | 376 +++++++++++-
- src/emc/motion/control.c                      | 568 ++++++++++++++++--
+ src/emc/motion/control.c                      | 575 ++++++++++++++++--
  src/emc/motion/homing.h                       |   4 +-
  src/emc/motion/mot_priv.h                     |  21 +
  src/emc/motion/motion.c                       |  19 +
@@ -58,7 +58,7 @@ other motion-logger tests.
  .../basic/expected.builtin-startup.in         |  16 +-
  .../mountaindew/expected.motion-logger        |  11 +-
  .../expected.motion-logger.in                 |   9 +-
- 27 files changed, 1721 insertions(+), 104 deletions(-)
+ 27 files changed, 1728 insertions(+), 104 deletions(-)
 
 diff --git a/docs/src/config/ini-config.adoc b/docs/src/config/ini-config.adoc
 index 2d7a99e..e93f55a 100644
@@ -987,7 +987,7 @@ index ff48890..9d6fb2c 100644
          }
  	    break;
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index f22ab9b..31c4284 100644
+index f22ab9b..7f55169 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
 @@ -45,6 +45,9 @@ static int    switchkins_type = 0;
@@ -1051,7 +1051,22 @@ index f22ab9b..31c4284 100644
  
      /* PLANNER_SWITCH_DEFER (reversible): apply a latched PLANNER_TYPE switch once the
       * coordinated queue has gone idle. No-op unless a switch is pending + motion idle. */
-@@ -518,8 +539,29 @@ static void process_inputs(void)
+@@ -415,7 +436,14 @@ static void process_inputs(void)
+ 				hal_get_real(emcmot_hal_data->spindle[spindle_num].spindle_revs);
+ 		emcmotStatus->spindle_status[spindle_num].spindleSpeedIn =
+ 				hal_get_real(emcmot_hal_data->spindle[spindle_num].spindle_speed_in);
++		/* A released spindle is run by its external owner. Its at-speed
++		   input says nothing about this program and must not hold the
++		   at-speed waits of the other spindles. */
++		const availability_status_t *availability =
++				&emcmotStatus->spindle_status[spindle_num].availability;
+ 		emcmotStatus->spindle_status[spindle_num].at_speed =
++				(availability->controlled &&
++				 availability->state != EMCMOT_AVAILABILITY_AVAILABLE) ||
+ 				hal_get_bool(emcmot_hal_data->spindle[spindle_num].spindle_is_atspeed);
+ 		/* Sampled every servo period for resumable Stop: a short false
+ 		   between a Stop restore and at-speed would be missed by task. */
+@@ -518,8 +546,29 @@ static void process_inputs(void)
  	joint_data = &(emcmot_hal_data->joint[joint_num]);
  	/* point to joint data */
  	joint = &joints[joint_num];
@@ -1082,7 +1097,7 @@ index f22ab9b..31c4284 100644
  	    continue;
  	}
  	/* copy data from HAL to joint structure */
-@@ -567,25 +609,7 @@ static void process_inputs(void)
+@@ -567,25 +616,7 @@ static void process_inputs(void)
  	    SET_JOINT_FERROR_FLAG(joint, 0);
  	}
  
@@ -1109,7 +1124,7 @@ index f22ab9b..31c4284 100644
      }
  
      // a fault was signalled during a spindle-orient in progress
-@@ -629,6 +653,401 @@ static void process_inputs(void)
+@@ -629,6 +660,401 @@ static void process_inputs(void)
      }
  }
  
@@ -1511,7 +1526,7 @@ index f22ab9b..31c4284 100644
  static void joint_jog_abort_all(bool immediate)
  {
      int jNum;
-@@ -691,7 +1110,7 @@ static void do_forward_kins(void)
+@@ -691,7 +1117,7 @@ static void do_forward_kins(void)
     at the traj rate */
  
      double joint_pos[EMCMOT_MAX_JOINTS] = {0,};
@@ -1520,7 +1535,7 @@ index f22ab9b..31c4284 100644
      emcmot_joint_t *joint;
  
      /* copy joint position feedback to local array */
-@@ -873,7 +1292,9 @@ static void check_for_faults(void)
+@@ -873,7 +1299,9 @@ static void check_for_faults(void)
      }
      /* check for spindle ampfifier errors */
      for (spindle_num = 0; spindle_num < emcmotConfig->numSpindles; spindle_num++){
@@ -1531,7 +1546,7 @@ index f22ab9b..31c4284 100644
              reportError(_("spindle %d amplifier fault"), spindle_num);
              emcmotInternal->enabling = 0;
          }
-@@ -945,6 +1366,7 @@ static void set_operating_mode(void)
+@@ -945,6 +1373,7 @@ static void set_operating_mode(void)
  
      /* check for disabling */
      if (!emcmotInternal->enabling && GET_MOTION_ENABLE_FLAG()) {
@@ -1539,7 +1554,7 @@ index f22ab9b..31c4284 100644
  	/* clear out the motion emcmotInternal->coord_tp and interpolators */
  	tpClear(&emcmotInternal->coord_tp);
  	for (joint_num = 0; joint_num < ALL_JOINTS; joint_num++) {
-@@ -999,8 +1421,9 @@ static void set_operating_mode(void)
+@@ -999,8 +1428,9 @@ static void set_operating_mode(void)
              }
  	}
  	SET_MOTION_ENABLE_FLAG(1);
@@ -1551,7 +1566,7 @@ index f22ab9b..31c4284 100644
      }
  
      /* check for entering teleop mode */
-@@ -1028,7 +1451,7 @@ static void set_operating_mode(void)
+@@ -1028,7 +1458,7 @@ static void set_operating_mode(void)
  	    /* Initialize things to do when starting teleop mode. */
  	    SET_MOTION_TELEOP_FLAG(1);
  	    SET_MOTION_COORD_FLAG(0);
@@ -1560,7 +1575,7 @@ index f22ab9b..31c4284 100644
  
              kinematicsForward(positions, &emcmotStatus->carte_pos_cmd, &fflags, &iflags);
              // entering teleop (INPOS), remove ext offsets
-@@ -1072,7 +1495,7 @@ static void set_operating_mode(void)
+@@ -1072,7 +1502,7 @@ static void set_operating_mode(void)
  		emcmotStatus->overrideLimitMask = 0;
  		SET_MOTION_COORD_FLAG(1);
  		SET_MOTION_TELEOP_FLAG(0);
@@ -1569,7 +1584,7 @@ index f22ab9b..31c4284 100644
  	    } else {
  		/* not in position-- defer the mode change; the request stays
  		   pending and is honored when motion comes to rest */
-@@ -1092,7 +1515,7 @@ static void set_operating_mode(void)
+@@ -1092,7 +1522,7 @@ static void set_operating_mode(void)
  		}
  		SET_MOTION_COORD_FLAG(0);
  		SET_MOTION_TELEOP_FLAG(0);
@@ -1578,7 +1593,7 @@ index f22ab9b..31c4284 100644
  	    } else {
  		/* not in position-- defer the mode change; the request stays
  		   pending and is honored when motion comes to rest */
-@@ -1127,10 +1550,17 @@ static void handle_jjogwheels(void)
+@@ -1127,10 +1557,17 @@ static void handle_jjogwheels(void)
  	/* point to joint data */
  	joint_data = &(emcmot_hal_data->joint[joint_num]);
  	joint = &joints[joint_num];
@@ -1600,7 +1615,7 @@ index f22ab9b..31c4284 100644
  
          // disallow accel bogus fractions
          rtapi_real jjog_accel_fraction = hal_get_real(joint_data->jjog_accel_fraction);
-@@ -1145,6 +1575,7 @@ static void handle_jjogwheels(void)
+@@ -1145,6 +1582,7 @@ static void handle_jjogwheels(void)
  	delta = new_jjog_counts - joint->old_jjog_counts;
  	/* save value for next time */
  	joint->old_jjog_counts = new_jjog_counts;
@@ -1608,7 +1623,7 @@ index f22ab9b..31c4284 100644
  	/* initialization complete */
  	if ( first_pass ) {
  	    continue;
-@@ -1276,6 +1707,16 @@ static int prepare_joint_targets(const EmcPose *pose, double *positions,
+@@ -1276,6 +1714,16 @@ static int prepare_joint_targets(const EmcPose *pose, double *positions,
              reportError(_("kinematicsInverse gave non-finite joint location on joint %d"), n);
              return -1;
          }
@@ -1625,7 +1640,7 @@ index f22ab9b..31c4284 100644
          cubics[n] = joints[n].cubic;
          if (cubicNeedNextPoint(&cubics[n]) &&
              cubicAddPoint(&cubics[n], positions[n]) != 0) {
-@@ -1365,7 +1806,10 @@ static void get_pos_cmds(long period)
+@@ -1365,7 +1813,10 @@ static void get_pos_cmds(long period)
  	for (joint_num = 0; joint_num < ALL_JOINTS; joint_num++) {
  	    /* point to joint struct */
  	    joint = &joints[joint_num];
@@ -1637,7 +1652,7 @@ index f22ab9b..31c4284 100644
  	        /* if joint is not active, skip it */
  	        continue;
              }
-@@ -1521,8 +1965,7 @@ static void get_pos_cmds(long period)
+@@ -1521,8 +1972,7 @@ static void get_pos_cmds(long period)
              result = prepare_joint_targets(&emcmotStatus->carte_pos_cmd,
                                             positions, staged_cubics);
              if (result != 0) {
@@ -1647,7 +1662,7 @@ index f22ab9b..31c4284 100644
                  break;
              }
              for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
-@@ -1583,8 +2026,7 @@ static void get_pos_cmds(long period)
+@@ -1583,8 +2033,7 @@ static void get_pos_cmds(long period)
          result = prepare_joint_targets(&emcmotStatus->carte_pos_cmd,
                                         positions, staged_cubics);
          if (result != 0) {
@@ -1657,7 +1672,7 @@ index f22ab9b..31c4284 100644
              break;
          }
          for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
-@@ -1595,6 +2037,8 @@ static void get_pos_cmds(long period)
+@@ -1595,6 +2044,8 @@ static void get_pos_cmds(long period)
                  &joint->vel_cmd, &joint->acc_cmd, &joint->jerk_cmd);
          }
  
@@ -1666,7 +1681,7 @@ index f22ab9b..31c4284 100644
  
  	/* END OF OUTPUT KINS */
  
-@@ -1611,10 +2055,13 @@ static void get_pos_cmds(long period)
+@@ -1611,10 +2062,13 @@ static void get_pos_cmds(long period)
      case EMCMOT_MOTION_DISABLED:
  	/* set position commands to match feedbacks, this avoids
  	   disturbances and/or following errors when enabling */
@@ -1681,7 +1696,7 @@ index f22ab9b..31c4284 100644
  	    /* save old command */
  	    joint->pos_cmd = joint->pos_fb;
  	    /* set joint velocity and acceleration to zero */
-@@ -2002,8 +2449,6 @@ static void output_to_hal(void)
+@@ -2002,8 +2456,6 @@ static void output_to_hal(void)
      double inch_mult;
      emcmot_joint_t *joint;
      joint_hal_t *joint_data;
@@ -1690,7 +1705,7 @@ index f22ab9b..31c4284 100644
  
      /* output machine info to HAL for scoping, etc */
      hal_set_bool(emcmot_hal_data->motion_enabled, GET_MOTION_ENABLE_FLAG());
-@@ -2045,6 +2490,9 @@ static void output_to_hal(void)
+@@ -2045,6 +2497,9 @@ static void output_to_hal(void)
  
      for (spindle_num = 0; spindle_num < emcmotConfig->numSpindles; spindle_num++){
          double speed;
@@ -1700,7 +1715,7 @@ index f22ab9b..31c4284 100644
  		if(emcmotStatus->spindle_status[spindle_num].css_factor) {
  			double denom = fabs(emcmotStatus->spindle_status[spindle_num].xoffset
  								- emcmotStatus->carte_pos_cmd.tran.x);
-@@ -2079,14 +2527,22 @@ static void output_to_hal(void)
+@@ -2079,14 +2534,22 @@ static void output_to_hal(void)
              }
          }
  
@@ -1727,7 +1742,7 @@ index f22ab9b..31c4284 100644
          // What is this for? Docs don't say
          hal_set_real(emcmot_hal_data->spindle[spindle_num].spindle_speed_cmd_rps,
  				emcmotStatus->spindle_status[spindle_num].speed / 60.);
-@@ -2147,6 +2603,13 @@ static void output_to_hal(void)
+@@ -2147,6 +2610,13 @@ static void output_to_hal(void)
  
      /* two way handshaking for the spindle encoder */
      for (spindle_num = 0; spindle_num < emcmotConfig->numSpindles; spindle_num++){
@@ -1741,7 +1756,7 @@ index f22ab9b..31c4284 100644
  		if(emcmotStatus->spindle_status[spindle_num].spindle_index_enable
  				&& !old_motion_index[spindle_num]) {
  			hal_set_bool(emcmot_hal_data->spindle[spindle_num].spindle_index_enable, 1);
-@@ -2189,7 +2652,14 @@ static void output_to_hal(void)
+@@ -2189,7 +2659,14 @@ static void output_to_hal(void)
  	hal_set_real(joint_data->motor_pos_cmd, joint->motor_pos_cmd);
  	hal_set_real(joint_data->joint_pos_cmd, joint->pos_cmd);
  	hal_set_real(joint_data->joint_pos_fb, joint->pos_fb);
@@ -2252,7 +2267,7 @@ index d2634e9..f889dd3 100644
  
      // clear out the pending command
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 76e3cf8..86385c3 100644
+index bae7266..2a76c92 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -171,6 +171,61 @@ volatile int done;
@@ -2584,7 +2599,7 @@ index 76e3cf8..86385c3 100644
      case EMC_SPINDLE_BRAKE_RELEASE_TYPE:
      spindle_brake_release_msg = reinterpret_cast<EMC_SPINDLE_BRAKE_RELEASE *>(cmd);
  	retval = emcSpindleBrakeRelease(spindle_brake_release_msg->spindle);
-@@ -3062,7 +3254,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -3065,7 +3257,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	break;
  
      case EMC_TASK_PLAN_SYNCH_TYPE:
@@ -2599,7 +2614,7 @@ index 76e3cf8..86385c3 100644
  	if (retval > INTERP_MIN_ERROR) {
  	    retval = -1;
  	}
-@@ -3177,6 +3376,11 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3180,6 +3379,11 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
  	return EMC_TASK_EXEC::DONE;
  	break;
  
@@ -2611,7 +2626,7 @@ index 76e3cf8..86385c3 100644
      case EMC_TASK_PLAN_RUN_TYPE:
      case EMC_TASK_PLAN_PAUSE_TYPE:
      case EMC_TASK_PLAN_END_TYPE:
-@@ -3259,6 +3463,12 @@ static int emcTaskExecute(void)
+@@ -3262,6 +3466,12 @@ static int emcTaskExecute(void)
      int status;			// status of child from EMC_SYSTEM_CMD
      pid_t pid;			// pid returned from waitpid()
  
@@ -2624,7 +2639,7 @@ index 76e3cf8..86385c3 100644
      // first check for an abandoned system command and abort it
      if (emcSystemCmdPid != 0 &&
  	emcStatus->task.execState !=
-@@ -3386,11 +3596,59 @@ static int emcTaskExecute(void)
+@@ -3389,11 +3599,59 @@ static int emcTaskExecute(void)
  	break;
  
      case EMC_TASK_EXEC::WAITING_FOR_MOTION:
@@ -2684,7 +2699,7 @@ index 76e3cf8..86385c3 100644
  	    emcStatus->task.execState = EMC_TASK_EXEC::DONE;
  	    emcTaskEager = 1;
  	}
-@@ -3518,12 +3776,17 @@ static int emcTaskExecute(void)
+@@ -3521,12 +3779,17 @@ static int emcTaskExecute(void)
  		homingStarted = true;
  		break; // still running; no timeout once started (see HOMING_START_TIMEOUT comment)
  	    }
@@ -2707,7 +2722,7 @@ index 76e3cf8..86385c3 100644
  		// HOMING_START_TIMEOUT before concluding it was rejected.
  		if (etime() - homingIssueTime < HOMING_START_TIMEOUT) {
  		    break;
-@@ -3535,11 +3798,8 @@ static int emcTaskExecute(void)
+@@ -3538,11 +3801,8 @@ static int emcTaskExecute(void)
  		emcTaskEager = 1;
  		homingWaiting = false;
  		// Nothing physically moved, so it's safe to restore the
@@ -2721,7 +2736,7 @@ index 76e3cf8..86385c3 100644
  		break;
  	    }
  	    // It ran and has now stopped; did it reach the expected end state?
-@@ -3605,7 +3865,9 @@ static int emcTaskExecute(void)
+@@ -3608,7 +3868,9 @@ static int emcTaskExecute(void)
  				    "coordinated motion until every joint is homed"));
  		emcStatus->task.execState = EMC_TASK_EXEC::ERROR;
  	    } else if (success) {

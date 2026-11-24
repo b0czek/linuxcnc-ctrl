@@ -182,7 +182,7 @@ index 6a5632c..e4a04b1 100644
    public:
      EMC_TOOL_SET_NUMBER()
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 7185ec7..f483726 100644
+index 7335937..a8ee5a6 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -1280,7 +1280,18 @@ static int emcTaskPlan(void)
@@ -286,7 +286,7 @@ index 7185ec7..f483726 100644
      case EMC_TOOL_SET_NUMBER_TYPE:
  	emc_tool_set_number_msg = reinterpret_cast<EMC_TOOL_SET_NUMBER *>(cmd);
  	retval = emcToolSetNumber(emc_tool_set_number_msg->tool);
-@@ -3076,6 +3133,8 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3079,6 +3136,8 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
      case EMC_TOOL_UNLOAD_TYPE:
      case EMC_TOOL_LOAD_TOOL_TABLE_TYPE:
      case EMC_TOOL_SET_OFFSET_TYPE:
@@ -295,7 +295,7 @@ index 7185ec7..f483726 100644
      case EMC_TOOL_SET_NUMBER_TYPE:
      case EMC_SPINDLE_SPEED_TYPE:
      case EMC_SPINDLE_ON_TYPE:
-@@ -3260,10 +3319,18 @@ static int emcTaskExecute(void)
+@@ -3263,10 +3322,18 @@ static int emcTaskExecute(void)
  		// emcTaskCheckPostconditions(), i.e. the only one whose commands
  		// can reach a WAITING_FOR_* state. See issuingQueuedCommand.
  		issuingQueuedCommand = true;

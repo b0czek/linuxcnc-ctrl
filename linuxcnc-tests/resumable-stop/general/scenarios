@@ -24,3 +24,4 @@ resume-s0
 pause-inflight-step
 trapezoidal:inflight-step-short
 system-command
+set-auto-stopped

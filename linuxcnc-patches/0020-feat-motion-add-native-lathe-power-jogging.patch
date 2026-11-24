@@ -11,25 +11,25 @@ other halui u32 pins.
  src/Makefile                          |   1 +
  src/emc/motion-logger/Submakefile     |   1 +
  src/emc/motion-logger/motion-logger.c |   6 ++
- src/emc/motion/axis.c                 |  68 +++++++++++++-
+ src/emc/motion/axis.c                 |  68 ++++++++++++-
  src/emc/motion/axis.h                 |   5 +-
  src/emc/motion/command.c              |  29 ++++++
  src/emc/motion/control.c              |   9 +-
  src/emc/motion/mot_priv.h             |   1 +
  src/emc/motion/motion.c               |   7 ++
  src/emc/motion/motion.h               |   3 +
- src/emc/motion/power_jog.c            | 128 ++++++++++++++++++++++++++
- src/emc/motion/power_jog.h            |  37 ++++++++
+ src/emc/motion/power_jog.c            | 135 ++++++++++++++++++++++++++
+ src/emc/motion/power_jog.h            |  37 +++++++
  src/emc/nml_intf/emc.cc               |  14 +++
  src/emc/nml_intf/emc.hh               |   2 +
  src/emc/nml_intf/emc_nml.hh           |  11 +++
  src/emc/task/emctaskmain.cc           |   8 ++
  src/emc/task/taskintf.cc              |  12 +++
- src/emc/tp/sp_scurve.c                |  52 +++++++++++
+ src/emc/tp/sp_scurve.c                |  52 ++++++++++
  src/emc/tp/sp_scurve.h                |   7 ++
  src/emc/usr_intf/halui.cc             |  14 +++
- src/emc/usr_intf/halui_power_feed.hh  |  67 ++++++++++++++
- 22 files changed, 506 insertions(+), 4 deletions(-)
+ src/emc/usr_intf/halui_power_feed.hh  |  67 +++++++++++++
+ 22 files changed, 513 insertions(+), 4 deletions(-)
  create mode 100644 src/emc/motion/power_jog.c
  create mode 100644 src/emc/motion/power_jog.h
  create mode 100644 src/emc/usr_intf/halui_power_feed.hh
@@ -339,10 +339,10 @@ index e8a68ce..554c1b5 100644
  	    /* do a continuous jog, implemented as an incremental jog to the
  	       limit.  When the user lets go of the button an abort will
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index babce73..cb1b2cb 100644
+index c75c227..f0e6a18 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
-@@ -2006,7 +2006,14 @@ static void get_pos_cmds(long period)
+@@ -2013,7 +2013,14 @@ static void get_pos_cmds(long period)
  	break;
  
      case EMCMOT_MOTION_TELEOP:
@@ -424,15 +424,18 @@ index bed4351..51719c1 100644
  	double home;		/* joint home position */
 diff --git a/src/emc/motion/power_jog.c b/src/emc/motion/power_jog.c
 new file mode 100644
-index 0000000..2303950
+index 0000000..1db5c50
 --- /dev/null
 +++ b/src/emc/motion/power_jog.c
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,135 @@
 +#include <float.h>
 +#include <rtapi_math.h>
 +#include "power_jog.h"
 +#include "mot_priv.h"
 +#include "../tp/sp_scurve.h"
++
++/* Distance in machine units a power jog stops short of a soft limit. */
++#define POWER_JOG_LIMIT_MARGIN 1e-6
 +
 +void power_jog_abort(power_jog_t *jog, int immediate)
 +{
@@ -516,7 +519,11 @@ index 0000000..2303950
 +        velocity = fmin(velocity, axes[i].velocity / magnitude);
 +        acceleration = fmin(acceleration, axes[i].acceleration / magnitude);
 +        jerk = fmin(jerk, axes[i].jerk / magnitude);
-+        double limit = d > 0 ? axes[i].maximum : axes[i].minimum;
++        /* Like an ordinary jog, which motion never lets rest on a soft
++           limit, end just inside it: an axis resting exactly on the limit
++           reports a teleop limit hit every cycle afterwards. */
++        double limit = d > 0 ? axes[i].maximum - POWER_JOG_LIMIT_MARGIN
++                             : axes[i].minimum + POWER_JOG_LIMIT_MARGIN;
 +        target = fmin(target, (limit - jog->origin[i]) / d);
 +    }
 +    if (!(velocity > 0) || !(acceleration > 0) || target == DBL_MAX) {
@@ -681,7 +688,7 @@ index feab3fb..a9fc353 100644
    public:
      EMC_JOG_CONT()
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 86385c3..20092fb 100644
+index 2a76c92..57b8240 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -1521,6 +1521,7 @@ static int emcTaskPlan(void)

@@ -22,7 +22,7 @@ and accepted again once the machine is idle.
  1 file changed, 62 insertions(+)
 
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index b2d4a91..42f985ac 100644
+index 3e8c047..2a975eb 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -1269,6 +1269,45 @@ static void emcTaskStopProgress()

@@ -5,9 +5,9 @@ Subject: [PATCH] hal: support cross-compiling external components
 
 ---
  docs/src/man/man1/halcompile.1.adoc |  34 ++++++++
- src/Makefile.modinc.in              |  64 +++++++++++---
+ src/Makefile.modinc.in              |  69 ++++++++++++---
  src/hal/utils/halcompile.g          | 130 ++++++++++++++++++++++++----
- 3 files changed, 201 insertions(+), 27 deletions(-)
+ 3 files changed, 206 insertions(+), 27 deletions(-)
 
 diff --git a/docs/src/man/man1/halcompile.1.adoc b/docs/src/man/man1/halcompile.1.adoc
 index 593be84..e688a75 100644
@@ -55,10 +55,10 @@ index 593be84..e688a75 100644
  
  *halcompile* performs many different functions:
 diff --git a/src/Makefile.modinc.in b/src/Makefile.modinc.in
-index 85bc79d..fd55cf3 100644
+index 85bc79d..42db924 100644
 --- a/src/Makefile.modinc.in
 +++ b/src/Makefile.modinc.in
-@@ -65,46 +65,87 @@ BUILDSYS = @BUILD_SYS@
+@@ -65,46 +65,92 @@ BUILDSYS = @BUILD_SYS@
  KERNELDIR := @KERNELDIR@
  CC := @CC@
  RTAI = @RTAI@
@@ -66,6 +66,11 @@ index 85bc79d..fd55cf3 100644
 +exec_prefix := @exec_prefix@
 +EMC2_HOME=@EMC2_HOME@
 +RUN_IN_PLACE=@RUN_IN_PLACE@
++# Only halcompile --sysroot selects a cross build; a SYSROOT exported by a
++# cross SDK environment must not turn a native build into one.
++ifneq ($(origin SYSROOT),command line)
++SYSROOT :=
++endif
 +ifneq ($(SYSROOT),)
 +ifeq ($(RUN_IN_PLACE),yes)
 +$(error Cross compilation from a run-in-place build requires an installed target Makefile.modinc; pass --modinc=...)
@@ -155,7 +160,7 @@ index 85bc79d..fd55cf3 100644
  
  getobjs = $(if $(filter undefined, $(origin $(1)-objs)), $(1).o, $($(1)-objs))
  getsrcs = $(patsubst %.o,%.c,$(call getobjs,$(1)))
-@@ -119,8 +160,8 @@ $(foreach mod,$(patsubst %.o,%,$(obj-m)),\
+@@ -119,8 +165,8 @@ $(foreach mod,$(patsubst %.o,%,$(obj-m)),\
  .PHONY: %.so
  %.so:
  	$(ECHO) Linking $@
@@ -166,7 +171,7 @@ index 85bc79d..fd55cf3 100644
  	| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($$6,16))} END{print "local : * ; };"}' \
  	> $*.ver
  	$(Q)$(CC) -shared -Wl,-Bsymbolic $(LDFLAGS) -Wl,--version-script,$*.ver -o $@ $^ -lm $(EXTRA_LDFLAGS)
-@@ -130,4 +171,3 @@ endif
+@@ -130,4 +176,3 @@ endif
  ifeq ($(BUILDSYS),normal)
  $(error Makefile.modinc is only suitable for 'kbuild' kernels and 'uspace' systems)
  endif

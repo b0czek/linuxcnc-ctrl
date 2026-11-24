@@ -153,6 +153,12 @@ wait(lambda: abs(velocity('x')) + abs(velocity('z')) < 1e-8, 'limit stops both')
 x, z = position()
 assert z <= 10.000001 and abs(x - .5*z) < .002
 release()
+# Like an ordinary jog it stops just inside the limit, so motion does not
+# keep reporting a teleop limit hit once the jog has ended.
+x, z = position()
+assert 9.99 < z < 10, z
+time.sleep(.2)
+assert not hal.get_value('motion.eoffset-limited'), 'power jog left a soft limit hit'
 
 origin()
 pin('halui.power-feed.z.plus', 1)

@@ -60,10 +60,10 @@ index 9d6fb2c..e8a68ce 100644
  		break;
  	    }
 diff --git a/src/emc/motion/control.c b/src/emc/motion/control.c
-index 31c4284..babce73 100644
+index 7f55169..c75c227 100644
 --- a/src/emc/motion/control.c
 +++ b/src/emc/motion/control.c
-@@ -2735,18 +2735,13 @@ static void update_status(void)
+@@ -2742,18 +2742,13 @@ static void update_status(void)
  	}
  #endif
  	joint_status->flag = joint->flag;

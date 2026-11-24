@@ -1262,6 +1262,67 @@ def run_system_command_stop_test():
     assert_outputs_stopped_after_program()
 
 
+def run_set_auto_while_stopped_test():
+    # Set mode AUTO aborts the program even when the mode does not change.
+    # The Stop state goes with it, so a later Resume does not restore the
+    # spindle and coolant of the aborted program.
+    open_auto_program("set-auto.ngc")
+    c.auto(linuxcnc.AUTO_RUN, 0)
+    wait_for(
+        lambda: s.position[0] > 0.3
+        and hal.get_value("spindle.0.speed-out") > 0.0,
+        "feed with spindle on did not start",
+    )
+    c.program_stop()
+    wait_for(
+        lambda: s.stop_state == linuxcnc.STOP_STOPPED and s.task_paused,
+        "task did not enter STOPPED",
+    )
+    c.mode(linuxcnc.MODE_AUTO)
+    wait_complete("set mode AUTO while stopped did not complete")
+    wait_for(
+        lambda: s.stop_state == linuxcnc.STOP_IDLE
+        and s.interp_state == linuxcnc.INTERP_IDLE,
+        "set mode AUTO left the Stop state behind",
+    )
+    c.auto(linuxcnc.AUTO_RESUME)
+    time.sleep(0.5)
+    s.poll()
+    if abs(hal.get_value("spindle.0.speed-out")) > 0.001:
+        fail("Resume after the aborted program switched the spindle on")
+    if hal.get_value("iocontrol.0.coolant-flood"):
+        fail("Resume after the aborted program switched coolant on")
+
+    # The same while Stop still waits in STOPPING for a thread to finish.
+    open_auto_program("thread-then-steps.ngc")
+    c.auto(linuxcnc.AUTO_RUN, 0)
+    wait_for(
+        lambda: s.position[2] < -0.5
+        and s.position[2] > -3.0
+        and hal.get_value("spindle.0.speed-out") > 0.0,
+        "G33 did not start",
+        timeout=15.0,
+    )
+    c.program_stop()
+    wait_for(
+        lambda: s.stop_state == linuxcnc.STOP_STOPPING,
+        "Stop did not wait for the active G33",
+        timeout=1.0,
+    )
+    c.mode(linuxcnc.MODE_AUTO)
+    wait_complete("set mode AUTO while stopping did not complete")
+    wait_for(
+        lambda: s.stop_state == linuxcnc.STOP_IDLE
+        and s.interp_state == linuxcnc.INTERP_IDLE,
+        "set mode AUTO left STOPPING behind",
+    )
+    # The program can be run again; dwell.ngc does not move Z.
+    aborted_z = s.position[2]
+    open_auto_program("dwell.ngc")
+    c.auto(linuxcnc.AUTO_RUN, 0)
+    wait_for_program_complete(5.0, expected_z=aborted_z)
+
+
 def run_dwell_atspeed_barrier_test():
     # M3 arms motion's next-feed at-speed barrier before the dwell, and the
     # following feed is not queued until the dwell ends. Turning the spindle
@@ -2098,6 +2159,7 @@ SCENARIOS = {
     "orientation": run_spindle_orientation_stop_test,
     "dwell": run_dwell_stop_resume_test,
     "system-command": run_system_command_stop_test,
+    "set-auto-stopped": run_set_auto_while_stopped_test,
     "dwell-atspeed": run_dwell_atspeed_barrier_test,
     "command-after-sync": run_command_after_sync_motion_test,
     "resume-atspeed": run_resume_atspeed_wait_test,

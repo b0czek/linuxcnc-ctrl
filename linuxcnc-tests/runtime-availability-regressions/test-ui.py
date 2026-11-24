@@ -187,6 +187,14 @@ elif case == 'amp':
     settle()
     assert not hal.get_value('flipflop.0.out'), 'amp-enable pulsed with amp-fault asserted'
 
+elif case == 'atspeed':
+    # A released spindle's at-speed input does not hold the at-speed wait of
+    # a feed on another spindle.
+    assert not s.spindle[0]['available'], 'spindle 0 not released'
+    run('atspeed.ngc')
+    wait(lambda: s.interp_state == linuxcnc.INTERP_IDLE
+         and abs(s.position[0] - 1) < .001, 'feed on spindle 1 held by released spindle 0')
+
 elif case == 'slowtask':
     # fixture.py acquired joint 1, which homes through the queued home cycle
     assert s.homed[1], s.homed

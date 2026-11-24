@@ -285,6 +285,19 @@ elif scenario == "stop-timeout":
     if abs(status.position[0]) > 0.001:
         fail("program continued after the executor timed out")
 
+elif scenario == "comp":
+    # Under cutter radius compensation the move before the remap is still
+    # held back, so the request is refused instead of starting early.
+    command.mode(linuxcnc.MODE_AUTO)
+    wait_complete("machine did not enter AUTO")
+    command.program_open(os.path.join(os.getcwd(), "comp.ngc"))
+    wait_complete("program did not open")
+    command.auto(linuxcnc.AUTO_RUN, 0)
+    wait_error("cutter radius compensation")
+    wait_interp_idle("refused executor request did not end the program")
+    if hal.get_value("remap.executor.chuck.request"):
+        fail("executor request started under cutter radius compensation")
+
 else:
     fail("unknown executor scenario %s" % scenario)
 

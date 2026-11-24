@@ -1,0 +1,6 @@
+[FIXTURE]
+BASE = base.ini
+[HAL]
+HALFILE = atspeed.hal
+[TRAJ]
+SPINDLES = 2

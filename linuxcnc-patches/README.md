@@ -223,6 +223,16 @@ timeout of their own; Abort, E-stop and Machine Off end them. While Stop is
 planner does not start a held move from rest, so a pending spindle at-speed
 wait or a `G33` index search is not consumed while Stop has the spindle off.
 
+Known limitation: position-synchronized threading (`G33`, `G33.1`, `G76`)
+and rigid tapping always run on the trapezoidal planner, also when
+`PLANNER_TYPE` selects the jerk-limited one, so they start and reverse
+without jerk limiting. Their speed limit follows spindle feedback and drops
+to zero while the spindle restarts after Stop or while a thread waits for its
+index, and the jerk-limited (Ruckig) planner rejects a zero maximum speed.
+Velocity-synchronized motion stays on the jerk-limited planner and uses
+velocity control while its limit is zero. To be revisited with the Stop
+rework.
+
 The command is exposed as Python `command.program_stop()`, protobuf
 `stop_program`, and `halui.program.stop`. Stop progress is
 reported as `EMC_TASK_STOP_STATE` (`IDLE`, `STOPPING`, `STOPPED`, `STARTING`)
@@ -239,6 +249,8 @@ connected, or tied true) does not hold Resume. A second Stop, Abort, E-stop or
 Machine Off end the wait. A next-feed at-speed wait that was pending before
 Stop still holds after Resume, and a later `S` word change still arms one.
 Resume or Run during a Stop leaves single-step mode entered by an earlier Step.
+Setting the AUTO or MDI mode aborts the program, also when the mode does not
+change, and so ends a Stop as Abort does.
 Resume, Run and Single Step during `STOPPING` are refused with an operator
 error, not remembered: the operator resumes once the machine has stopped.
 A second Stop or a Pause during `STARTING` cancels the Resume: the program
@@ -502,7 +514,9 @@ cancellation while returning the terminal response for machine-specific
 policy. `execute` adds the common policy that only a successful response
 continues program execution. The default timeout is 10 seconds. A request
 starts only after everything queued before it has finished, so in AUTO it
-does not run ahead of earlier moves while the interpreter reads ahead.
+does not run ahead of earlier moves while the interpreter reads ahead. With
+cutter radius compensation on the move before it is still held back, so both
+helpers refuse a request then, as M54/M55 and tool changes are refused.
 
 A request already started runs to its end when a resumable Stop (patch 0004)
 or a Pause arrives, like any other M function: task keeps running the remap
@@ -522,8 +536,9 @@ Python remap generators are closed during interpreter unwind so their
 `finally` cleanup runs on task or operator abort. The regression also covers
 success, raw failure handling, standard failure policy, timeout, stale
 responses, monotonic request IDs, request release, cancellation, a request
-read ahead of a running AUTO move, Stop and Pause during a request, and a
-timeout while stopping. Headless
+read ahead of a running AUTO move, Stop and Pause during a request, a
+timeout while stopping, and a request refused under cutter radius
+compensation. Headless
 installs now include the curated `stdglue`.
 
 ### 0014 — Publish modal CSS maximum in spindle status
@@ -619,6 +634,8 @@ Resume. Once acknowledged, the home must start within
 the trajectory mode is restored once Abort has cancelled the acquisition. A failed acquisition homing
 reports the `G28.2` homing messages; the motion fault code is set as before.
 Other resources can continue operating while a joint or spindle is released.
+A released spindle counts as at speed, so its at-speed input, driven by its
+external owner, does not hold the at-speed waits of the other spindles.
 Coordinated and teleop motion are permitted only when inverse kinematics leaves
 every unavailable joint at its held command position. Commands requiring an
 unavailable spindle are rejected. Deliberately released joints do not block Run
@@ -701,7 +718,9 @@ and feed override. Both axes share acceleration and travel constraints.
 Dedicated power-feed X/Z direction pins keep ordinary axis jogging separate.
 Cancelled motion requires all direction buttons to release before rearming.
 A `halui.power-feed.spindle` value too large for the command's spindle index
-is sent as an invalid index, so motion refuses the jog.
+is sent as an invalid index, so motion refuses the jog. Like an ordinary
+jog, a power jog stops just inside a soft limit (by 1e-6 machine units), so
+motion does not report a teleop limit hit once the jog has ended.
 Includes simulator coverage and HALUI pin documentation.
 
 ### 0021 — Cross-compile external HAL components
@@ -732,8 +751,8 @@ userspace components alike. The kbuild recipe preserves paths containing
 spaces when passing the compiler, kernel directory, module directory, and
 symbol file to make. `--cc` and `--make` accept a command with arguments.
 With no new options, native compilation retains the existing configured
-compiler and standard `ld` and `objdump`, ignoring `LD` and `OBJDUMP` exported
-by a cross SDK environment. The accompanying regression test builds and
+compiler and standard `ld` and `objdump`, ignoring `LD`, `OBJDUMP` and
+`SYSROOT` exported by a cross SDK environment. The accompanying regression test builds and
 installs realtime and userspace components through argument-logging target
 tool wrappers and checks that the target sysroot reaches compilation and
 linking, and that installation honours `DESTDIR`. It also covers paths with

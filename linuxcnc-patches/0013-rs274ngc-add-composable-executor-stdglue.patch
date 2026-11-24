@@ -20,8 +20,8 @@ pycall() then returns the unwind status (INTERP_EXIT or an error)
 instead of continuing the unwound call.
 ---
  docs/src/config/python-interface.adoc         |   3 +-
- docs/src/remap/remap.adoc                     | 130 +++++++++
- nc_files/remap_lib/python-stdglue/stdglue.py  | 271 +++++++++++++++++-
+ docs/src/remap/remap.adoc                     | 130 ++++++++
+ nc_files/remap_lib/python-stdglue/stdglue.py  | 278 +++++++++++++++++-
  src/emc/nml_intf/emc.hh                       |   3 +-
  src/emc/rs274ngc/interp_internal.hh           |   7 +
  src/emc/rs274ngc/interp_python.cc             |  60 +++-
@@ -33,7 +33,7 @@ instead of continuing the unwound call.
  src/emc/task/emctaskmain.cc                   |  43 ++-
  src/emc/task/task.hh                          |   4 +
  src/emc/usr_intf/axis/extensions/emcmodule.cc |   1 +
- 14 files changed, 548 insertions(+), 10 deletions(-)
+ 14 files changed, 555 insertions(+), 10 deletions(-)
 
 diff --git a/docs/src/config/python-interface.adoc b/docs/src/config/python-interface.adoc
 index 1c871cf..2131b07 100644
@@ -191,7 +191,7 @@ index 75e2a09..642e4c7 100644
  
  These wrap a NGC procedure for T__x__ Tool Prepare.
 diff --git a/nc_files/remap_lib/python-stdglue/stdglue.py b/nc_files/remap_lib/python-stdglue/stdglue.py
-index 8457e40..be54d1a 100644
+index 8457e40..7c4efca 100644
 --- a/nc_files/remap_lib/python-stdglue/stdglue.py
 +++ b/nc_files/remap_lib/python-stdglue/stdglue.py
 @@ -16,6 +16,9 @@
@@ -204,7 +204,7 @@ index 8457e40..be54d1a 100644
  import emccanon
  from interpreter import *
  from emccanon import MESSAGE
-@@ -40,6 +43,272 @@ def build_hal(self):
+@@ -40,6 +43,279 @@ def build_hal(self):
      except Exception as e:
          print(e)
  
@@ -262,6 +262,13 @@ index 8457e40..be54d1a 100644
 +    and an ExecutorResponse at completion. The operation is released after any
 +    terminal response and cancelled on timeout, interpreter error, or abort.
 +    """
++
++    # With cutter radius compensation on, the move before this call is still
++    # held in the compensation queue, so the request would start before it.
++    if self.cutter_comp_side:
++        raise ValueError(
++            "executor requests cannot run with cutter radius compensation on"
++        )
 +
 +    if not self.task:
 +        return ExecutorResponse(EXECUTOR_SUCCEEDED)
@@ -477,7 +484,7 @@ index 8457e40..be54d1a 100644
  # REMAP=S   prolog=setspeed_prolog  ngc=setspeed epilog=setspeed_epilog
  # exposed parameter: #<speed>
  
-@@ -655,5 +924,3 @@ def tool_probe_m6(self, **words):
+@@ -655,5 +931,3 @@ def tool_probe_m6(self, **words):
          self.set_errormsg("tool_probe_m6 remap error." )
          yield INTERP_ERROR
  
@@ -734,7 +741,7 @@ index 90cc136..d2634e9 100644
  {
      waitFlag = 0;
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index f483726..7156924 100644
+index a8ee5a6..9133a28 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -577,7 +577,12 @@ extern int emcTaskMopup();
@@ -815,7 +822,7 @@ index f483726..7156924 100644
  		break;		// EMC_TASK_INTERP::PAUSED
  
  	    case EMC_TASK_INTERP::WAITING:
-@@ -3289,7 +3319,8 @@ static int emcTaskExecute(void)
+@@ -3292,7 +3322,8 @@ static int emcTaskExecute(void)
      case EMC_TASK_EXEC::DONE:
  	STEPPING_CHECK();
  	if (!emcStatus->motion.traj.queueFull &&
@@ -825,7 +832,7 @@ index f483726..7156924 100644
  	    emcStatus->task.stopState != EMC_TASK_STOP_STATE::STOPPED &&
  	    emcStatus->task.stopState != EMC_TASK_STOP_STATE::STARTING) {
  	    if (NULL == emcTaskCommand) {
-@@ -3594,7 +3625,9 @@ static int emcTaskExecute(void)
+@@ -3597,7 +3628,9 @@ static int emcTaskExecute(void)
  
      case EMC_TASK_EXEC::WAITING_FOR_DELAY:
  	STEPPING_CHECK();

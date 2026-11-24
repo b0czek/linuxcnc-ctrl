@@ -99,7 +99,7 @@ index e347bf1..75a9f1c 100644
              emcmotStatus->stepping = 0;
              emcmotStatus->paused = 1;
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index e2bdf62..7185ec7 100644
+index 3f7e971..7335937 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -503,6 +503,7 @@ static int programStartLine = 0;	// which line to run program from
@@ -190,7 +190,7 @@ index e2bdf62..7185ec7 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -4118,6 +4116,10 @@ int main(int argc, char *argv[])
+@@ -4121,6 +4119,10 @@ int main(int argc, char *argv[])
  	// update subordinate status
  
  	emcMotionUpdate(&emcStatus->motion);
@@ -216,7 +216,7 @@ index bd8ad13..5d6e0b4 100644
                              // this segment (g64 mode)
  
 diff --git a/src/emc/tp/tp.c b/src/emc/tp/tp.c
-index c9b271e..c42d4f1 100644
+index a9dfacc..85ee681 100644
 --- a/src/emc/tp/tp.c
 +++ b/src/emc/tp/tp.c
 @@ -357,9 +357,9 @@ STATIC inline double tpGetRealFinalVel(TP_STRUCT const * const tp,
@@ -278,7 +278,7 @@ index c9b271e..c42d4f1 100644
      }
  
      //TODO make progress to match target?
-@@ -4385,7 +4387,7 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
+@@ -4396,7 +4398,7 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
              }
              return TP_ERR_WAITING;
          }
@@ -287,7 +287,7 @@ index c9b271e..c42d4f1 100644
                  tp->step_pass_id && !tp->step_tc) {
              tpHandleEmptyQueue(tp);
              return TP_ERR_WAITING;
-@@ -4574,6 +4576,146 @@ STATIC int tpGetQueuedG76PassId(TP_STRUCT * const tp)
+@@ -4585,6 +4587,146 @@ STATIC int tpGetQueuedG76PassId(TP_STRUCT * const tp)
      return tc ? tc->g76_pass_id : 0;
  }
  
@@ -434,7 +434,7 @@ index c9b271e..c42d4f1 100644
  int tpPause(TP_STRUCT * const tp)
  {
      if (0 == tp) {
-@@ -4581,10 +4723,12 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4592,10 +4734,12 @@ int tpPause(TP_STRUCT * const tp)
      }
  
      if (tp->stopping) {
@@ -448,7 +448,7 @@ index c9b271e..c42d4f1 100644
          TC_STRUCT *tc = tcqItem(&tp->queue, 0);
          /*
           * A G76 cut that has passed spindle index, or its explicitly marked
-@@ -4631,7 +4775,7 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4642,7 +4786,7 @@ int tpPause(TP_STRUCT * const tp)
              tp->pausing = 1;
          }
      } else if (emcmotStatus->stepping &&
@@ -457,7 +457,7 @@ index c9b271e..c42d4f1 100644
          /*
           * EMCMOT_STEP requests default-TP pass targeting through the existing
           * tpPause ABI. Alternate planners leave step_target_pending clear and
-@@ -4640,15 +4784,27 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4651,15 +4795,27 @@ int tpPause(TP_STRUCT * const tp)
          int pass_id = tpGetQueuedG76PassId(tp);
          if (pass_id) {
              tp->step_pass_id = pass_id;
@@ -489,7 +489,7 @@ index c9b271e..c42d4f1 100644
          }
      } else {
          tp->pausing = 1;
-@@ -4661,6 +4817,7 @@ int tpResume(TP_STRUCT * const tp)
+@@ -4672,6 +4828,7 @@ int tpResume(TP_STRUCT * const tp)
      if (0 == tp) {
          return TP_ERR_FAIL;
      }
@@ -497,7 +497,7 @@ index c9b271e..c42d4f1 100644
      tp->pausing = 0;
      tp->stopping = 0;
      tp->stop_sync_run = 0;
-@@ -4670,7 +4827,8 @@ int tpResume(TP_STRUCT * const tp)
+@@ -4681,7 +4838,8 @@ int tpResume(TP_STRUCT * const tp)
      tp->step_tc = 0;
      tp->step_target_pending = 0;
      tp->step_pass_id = 0;
@@ -507,7 +507,7 @@ index c9b271e..c42d4f1 100644
      if (MOTION_ID_VALID(tp->spindle.waiting_for_index)) {
          emcmotStatus->spindle_status[
              tp->spindle.spindle_num].spindle_index_enable = 1;
-@@ -4690,7 +4848,9 @@ int tpAbort(TP_STRUCT * const tp)
+@@ -4701,7 +4859,9 @@ int tpAbort(TP_STRUCT * const tp)
          tp->step_tc = 0;
          tp->step_target_pending = 0;
          tp->step_pass_id = 0;

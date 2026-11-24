@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 python3 ../runtime-availability/make-fixtures.py
-for scenario in ${AVAILABILITY_REGRESSION_CASES:-fault wheel jointwheel tail amp power index jogstop joghome slowtask extra sequence}; do
+for scenario in ${AVAILABILITY_REGRESSION_CASES:-fault wheel jointwheel tail amp power index jogstop joghome slowtask atspeed extra sequence}; do
     ini=test.ini
     case "$scenario" in
         fault) ini=fault.ini ;;
@@ -9,6 +9,7 @@ for scenario in ${AVAILABILITY_REGRESSION_CASES:-fault wheel jointwheel tail amp
         power) ini=xzc.ini ;;
         joghome) ini=joghome.ini ;;
         slowtask) ini=slowtask.ini ;;
+        atspeed) ini=atspeed.ini ;;
         extra)
             # Unsupported ownership must fail configuration, before Machine On.
             if linuxcnc -r extra.ini >extra.log 2>&1; then

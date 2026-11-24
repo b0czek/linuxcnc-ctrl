@@ -113,9 +113,10 @@ if halcompile --compile --sysroot="$sysroot" cross_tools.comp \
 fi
 grep -F 'requires an installed target Makefile.modinc' "$space_root/rip-cross-output"
 
-# A native build ignores target tools exported by a cross SDK environment.
+# A native build ignores target tools and a sysroot exported by a cross SDK
+# environment.
 rm -f cross_tools.so
-LD=false OBJDUMP=false halcompile --compile cross_tools.comp
+LD=false OBJDUMP=false SYSROOT="$sysroot" halcompile --compile cross_tools.comp
 test -s cross_tools.so
 
 # Compiler and make overrides may be commands with arguments.

@@ -32,13 +32,13 @@ Ported to v2.10.0-pre2. Differences from the patch on the old base:
  src/emc/nml_intf/emc.hh                       |  23 +
  src/emc/nml_intf/emc_nml.hh                   |  24 +
  src/emc/nml_intf/emcops.cc                    |   5 +
- src/emc/task/emctaskmain.cc                   | 462 +++++++++++++++++-
+ src/emc/task/emctaskmain.cc                   | 465 +++++++++++++++++-
  src/emc/task/taskintf.cc                      |  67 ++-
- src/emc/tp/tp.c                               | 133 ++++-
+ src/emc/tp/tp.c                               | 144 +++++-
  src/emc/tp/tp_types.h                         |  12 +
  src/emc/usr_intf/axis/extensions/emcmodule.cc |  19 +
  src/emc/usr_intf/halui.cc                     |   9 +-
- 18 files changed, 860 insertions(+), 25 deletions(-)
+ 18 files changed, 874 insertions(+), 25 deletions(-)
 
 diff --git a/docs/src/config/python-interface.adoc b/docs/src/config/python-interface.adoc
 index 25d5762..5153f11 100644
@@ -569,7 +569,7 @@ index ed6a962..6010ecb 100644
  {
  }
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index a3b5256..8fff91d 100644
+index a3b5256..60ae9b4 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -124,6 +124,39 @@ static int emcTaskEager = 0;
@@ -1064,17 +1064,20 @@ index a3b5256..8fff91d 100644
  	// abort everything
  	emcTaskAbort();
  	// KLUDGE call motion abort before state restore to make absolutely sure no
-@@ -2215,6 +2629,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2215,6 +2629,12 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	    mode_msg->mode != EMC_TASK_MODE::AUTO) {
  	    emcOperatorError(_("Can't switch mode while mode is AUTO and interpreter is not IDLE"));
  	} else { // we can honour the modeswitch
-+	    if (mode_msg->mode != emcStatus->task.mode) {
++	    // emcTaskSetMode() aborts the program for AUTO and MDI even when
++	    // the mode does not change, so the Stop state goes with it.
++	    if (mode_msg->mode != emcStatus->task.mode ||
++		    mode_msg->mode != EMC_TASK_MODE::MANUAL) {
 +		emcTaskStopClear();
 +	    }
  	    if (mode_msg->mode == EMC_TASK_MODE::MANUAL &&
  		emcStatus->task.mode != EMC_TASK_MODE::MANUAL) {
  		// leaving auto or mdi mode for manual
-@@ -2259,6 +2676,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2259,6 +2679,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_TASK_SET_STATE_TYPE:
  	state_msg = reinterpret_cast<EMC_TASK_SET_STATE *>(cmd);
@@ -1084,7 +1087,7 @@ index a3b5256..8fff91d 100644
  	retval = emcTaskSetState(state_msg->state);
  	break;
  
-@@ -2451,6 +2871,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2451,6 +2874,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	break;
  
      case EMC_TASK_PLAN_PAUSE_TYPE:
@@ -1092,7 +1095,7 @@ index a3b5256..8fff91d 100644
  	emcTrajPause();
  	if (emcStatus->task.interpState != EMC_TASK_INTERP::PAUSED) {
  	    interpResumeState = emcStatus->task.interpState;
-@@ -2484,11 +2905,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2484,11 +2908,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_TASK_PLAN_RESUME_TYPE:
  	emcTrajResume();
@@ -1105,7 +1108,7 @@ index a3b5256..8fff91d 100644
  	retval = 0;
  	break;
  
-@@ -2701,6 +3119,7 @@ static int emcTaskExecute(void)
+@@ -2701,6 +3122,7 @@ static int emcTaskExecute(void)
  
      switch (emcStatus->task.execState) {
      case EMC_TASK_EXEC::ERROR:
@@ -1113,7 +1116,7 @@ index a3b5256..8fff91d 100644
  
  	/*! \todo FIXME-- duplicate code for abort,
  	   also near end of main, when aborting on subordinate errors,
-@@ -2746,7 +3165,9 @@ static int emcTaskExecute(void)
+@@ -2746,7 +3168,9 @@ static int emcTaskExecute(void)
      case EMC_TASK_EXEC::DONE:
  	STEPPING_CHECK();
  	if (!emcStatus->motion.traj.queueFull &&
@@ -1124,7 +1127,7 @@ index a3b5256..8fff91d 100644
  	    if (NULL == emcTaskCommand) {
  		// need a new command
  		emcTaskCommand = interp_list.get();
-@@ -2767,7 +3188,7 @@ static int emcTaskExecute(void)
+@@ -2767,7 +3191,7 @@ static int emcTaskExecute(void)
  			emcStatus->task.execState = emcTaskCheckPreconditions(emcTaskCommand.get());
  		    }
  		}
@@ -1133,7 +1136,7 @@ index a3b5256..8fff91d 100644
  		// have an outstanding command
  		// This is the one emcTaskIssueCommand() call site followed by
  		// emcTaskCheckPostconditions(), i.e. the only one whose commands
-@@ -3040,6 +3461,18 @@ static int emcTaskExecute(void)
+@@ -3040,6 +3464,18 @@ static int emcTaskExecute(void)
  
      case EMC_TASK_EXEC::WAITING_FOR_DELAY:
  	STEPPING_CHECK();
@@ -1152,7 +1155,7 @@ index a3b5256..8fff91d 100644
  	// check if delay has passed
  	emcStatus->task.delayLeft = taskExecDelayTimeout - etime();
  	if (etime() >= taskExecDelayTimeout) {
-@@ -3626,6 +4059,7 @@ int main(int argc, char *argv[])
+@@ -3626,6 +4062,7 @@ int main(int argc, char *argv[])
  	prev_traj_enabled = emcStatus->motion.traj.enabled;
  	// synchronize subordinate states
  	if (emcStatus->io.aux.estop) {
@@ -1160,7 +1163,7 @@ index a3b5256..8fff91d 100644
  	    if (emcStatus->motion.traj.enabled) {
  		emcTrajDisable();
  		emcTaskAbort();
-@@ -3707,6 +4141,7 @@ int main(int argc, char *argv[])
+@@ -3707,6 +4144,7 @@ int main(int argc, char *argv[])
  	    // 	emcOperatorError("wait for orient complete timed out");
  	    // }
  
@@ -1168,7 +1171,7 @@ index a3b5256..8fff91d 100644
              // abort everything
              emcTaskAbort();
              emcIoAbort(EMC_ABORT::MOTION_OR_IO_RCS_ERROR);
-@@ -3742,6 +4177,18 @@ int main(int argc, char *argv[])
+@@ -3742,6 +4180,18 @@ int main(int argc, char *argv[])
  	    emcTaskQueueTaskPlanSynchCmd();
  	}
  
@@ -1187,7 +1190,7 @@ index a3b5256..8fff91d 100644
  	// update task-specific status
  	emcTaskUpdate(&emcStatus->task);
  
-@@ -3762,6 +4209,9 @@ int main(int argc, char *argv[])
+@@ -3762,6 +4212,9 @@ int main(int argc, char *argv[])
  	    emcStatus->io.status == RCS_STATUS::ERROR) {
  	    emcStatus->status = RCS_STATUS::ERROR;
  	    emcStatus->task.status = RCS_STATUS::ERROR;
@@ -1310,7 +1313,7 @@ index 4215d22..3f66a0b 100644
      return 0;
  }
 diff --git a/src/emc/tp/tp.c b/src/emc/tp/tp.c
-index c75c795..8ef21c3 100644
+index c75c795..e481a43 100644
 --- a/src/emc/tp/tp.c
 +++ b/src/emc/tp/tp.c
 @@ -229,6 +229,31 @@ STATIC int tpGetMachineActiveLimit(double * const act_limit, PmCartesian const *
@@ -1406,17 +1409,28 @@ index c75c795..8ef21c3 100644
  }
  
  /** Wrapper function to unlock rotary axes */
-@@ -3812,6 +3857,9 @@ STATIC int tpUpdateCycle(TP_STRUCT * const tp,
+@@ -3812,6 +3857,20 @@ STATIC int tpUpdateCycle(TP_STRUCT * const tp,
      int planner_type = GET_TRAJ_PLANNER_TYPE();
  
      if(mode == NULL) planner_type = 0;
++    /*
++     * Spindle-synchronized threading (G33, G33.1, G76) and rigid tapping run
++     * on the trapezoidal planner even when PLANNER_TYPE selects the S-curve
++     * one. Their speed limit follows spindle feedback and drops to zero while
++     * the spindle restarts after a resumable Stop or while a thread waits for
++     * its index; the S-curve (Ruckig) planner rejects a zero maximum speed.
++     * Velocity-synchronized motion handles this in velocity control (see
++     * above); position-synchronized motion was moved to the trapezoidal
++     * planner instead. Known limitation, revisit with the Stop rework: such
++     * moves start and reverse without jerk limiting.
++     */
 +    if (tc->synchronized == TC_SYNC_POSITION || tc->motion_type == TC_RIGIDTAP) {
 +        planner_type = 0;
 +    }
  
      if(planner_type != 1){
          // If the slowdown is not too great, use velocity ramping instead of trapezoidal velocity
-@@ -4253,10 +4301,48 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
+@@ -4253,10 +4312,48 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
  
      //If we have a NULL pointer, then the queue must be empty, so we're done.
      if(!tc) {
@@ -1465,7 +1479,7 @@ index c75c795..8ef21c3 100644
      tc_debug_print("-------------------\n");
  
  
-@@ -4270,6 +4356,18 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
+@@ -4270,6 +4367,18 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
          return TP_ERR_STOPPED;
      }
  
@@ -1484,7 +1498,7 @@ index c75c795..8ef21c3 100644
      //Return early if we have a reason to wait (i.e. not ready for motion)
      if (tpCheckAtSpeed(tp, tc) != TP_ERR_OK){
          return TP_ERR_WAITING;
-@@ -4365,7 +4463,27 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4365,7 +4474,27 @@ int tpPause(TP_STRUCT * const tp)
      if (0 == tp) {
          return TP_ERR_FAIL;
      }
@@ -1513,7 +1527,7 @@ index c75c795..8ef21c3 100644
      return TP_ERR_OK;
  }
  
-@@ -4375,6 +4493,9 @@ int tpResume(TP_STRUCT * const tp)
+@@ -4375,6 +4504,9 @@ int tpResume(TP_STRUCT * const tp)
          return TP_ERR_FAIL;
      }
      tp->pausing = 0;
