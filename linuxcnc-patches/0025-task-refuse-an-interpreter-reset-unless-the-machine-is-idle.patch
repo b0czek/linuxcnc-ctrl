@@ -18,11 +18,11 @@ The new test tests/task/interp-reset-requires-idle checks that resets are
 refused during an MDI move, a dwell and a jog without touching the modes,
 and accepted again once the machine is idle.
 ---
- src/emc/task/emctaskmain.cc | 50 +++++++++++++++++++++++++++++++++++++
- 1 file changed, 50 insertions(+)
+ src/emc/task/emctaskmain.cc | 62 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 62 insertions(+)
 
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 65846a8..968fb84 100644
+index 65846a8..f7db2f0 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -1216,6 +1216,45 @@ static void emcTaskStopProgress()
@@ -71,7 +71,26 @@ index 65846a8..968fb84 100644
  /*
    emcTaskPlan()
  
-@@ -1273,6 +1312,17 @@ static int emcTaskPlan(void)
+@@ -1235,6 +1274,18 @@ static int emcTaskPlan(void)
+ 	type = 0;
+     }
+ 
++    // Tool table edits and other commands outside a program set the plan
++    // wait so the interpreter does not read past them, but only a reading
++    // interpreter or an MDI call clears it. Once task is idle nothing is
++    // waiting any more; a wait left set would make an idle machine look
++    // busy and refuse interpreter resets.
++    if (emcTaskPlanIsWait() && !mdi_execute_wait &&
++            emcStatus->task.interpState == EMC_TASK_INTERP::IDLE &&
++            interp_list.len() == 0 && emcTaskCommand == NULL &&
++            emcStatus->task.execState == EMC_TASK_EXEC::DONE) {
++        emcTaskPlanClearWait();
++    }
++
+     // Always display messages
+     switch (type) {
+     case EMC_OPERATOR_ERROR_TYPE:
+@@ -1273,6 +1324,17 @@ static int emcTaskPlan(void)
          return retval;
      }
  

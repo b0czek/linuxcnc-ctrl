@@ -300,6 +300,61 @@ def run_inflight_single_step_test():
     wait_for_program_complete(40.0, timeout=10.0)
 
 
+def run_inflight_short_block_step_test():
+    # Step armed at full speed among blocks shorter than the stopping
+    # distance must stop on the first block end it can reach within the
+    # acceleration limit, not cut the speed at the end of the current block.
+    # Runs with the trapezoidal planner: the S-curve planner already limits
+    # the speed in short blocks to one each block can stop in.
+    open_auto_program("inflight-step-short.ngc")
+    c.auto(linuxcnc.AUTO_RUN, 0)
+    wait_for(
+        lambda: 10.0 < s.position[0] < 13.0 and s.current_vel > 45.0,
+        "program did not reach full speed in its short blocks",
+        timeout=15.0,
+        poll_interval=0.001,
+    )
+    hal.set_p("accel-peak.reset", "1")
+    time.sleep(0.01)
+    hal.set_p("accel-peak.reset", "0")
+    armed_x = s.position[0]
+    c.auto(linuxcnc.AUTO_STEP)
+    wait_for(
+        lambda: s.task_paused and s.paused and abs(s.current_vel) < 0.001,
+        "in-flight Single Step did not stop",
+        timeout=15.0,
+    )
+    stopped_x = s.position[0]
+    peak_decel = -hal.get_value("accel-peak.min")
+    print(
+        "short-block Step armed at X=%.4f, stopped at X=%.4f, peak "
+        "deceleration %.1f" % (armed_x, stopped_x, peak_decel)
+    )
+    if peak_decel > 500.0 * 1.05:
+        fail(
+            "in-flight Single Step decelerated at %.1f, above the 500 limit"
+            % peak_decel
+        )
+    block_end = round(stopped_x * 2.0) / 2.0
+    if not math.isclose(stopped_x, block_end, abs_tol=0.001) or not (
+        10.5 <= block_end <= 20.0
+    ):
+        fail(
+            "in-flight Single Step stopped at X=%.4f, not on a short block end"
+            % stopped_x
+        )
+    if block_end <= armed_x:
+        fail("in-flight Single Step stopped behind where it was armed")
+
+    time.sleep(0.25)
+    s.poll()
+    if not math.isclose(s.position[0], stopped_x, abs_tol=0.001):
+        fail("in-flight Single Step advanced past its block end")
+
+    c.auto(linuxcnc.AUTO_RESUME)
+    wait_for_program_complete(40.0, timeout=10.0)
+
+
 def run_pause_inflight_single_step_test():
     # Pause during an armed Single Step is an ordinary Pause: motion stops
     # where it is instead of finishing the block, and Resume continues.
@@ -897,6 +952,20 @@ def run_inflight_g76_single_step_test():
         or not math.isclose(s.position[2], stepped_z, abs_tol=0.001)
     ):
         fail("in-flight G76 Single Step advanced into the next approach")
+
+    # Later passes are still prequeued. The next Step must end exactly at the
+    # pass 2 approach point (no blend into the infeed may trim it), and the
+    # one after it must run the pass 2 infeed, thread and clearance.
+    step_g76_approach(10.2, "prequeued G76")
+    if not (
+        math.isclose(s.position[0], 10.2, abs_tol=0.001)
+        and math.isclose(s.position[2], 0.0, abs_tol=0.001)
+    ):
+        fail(
+            "prequeued G76 Single Step stopped at X=%.6f Z=%.6f, not exactly "
+            "at the approach point X10.2 Z0" % (s.position[0], s.position[2])
+        )
+    step_g76_thread_and_clearance(10.2, "prequeued G76")
 
     c.auto(linuxcnc.AUTO_RESUME)
     wait_for_program_complete(20.0, expected_z=-5.0, timeout=20.0)
@@ -2029,6 +2098,7 @@ SCENARIOS = {
     "stop-latched-resume": lambda: run_cancel_latched_resume_test(
         "Stop", c.program_stop),
     "pause-inflight-step": run_pause_inflight_single_step_test,
+    "inflight-step-short": run_inflight_short_block_step_test,
     "resume-s0": run_resume_zero_speed_test,
     "multi-spindle": run_multi_spindle_stop_resume_test,
     "css": run_css_stop_resume_test,

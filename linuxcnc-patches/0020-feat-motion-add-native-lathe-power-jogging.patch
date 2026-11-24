@@ -28,8 +28,8 @@ other halui u32 pins.
  src/emc/tp/sp_scurve.c                |  52 +++++++++++
  src/emc/tp/sp_scurve.h                |   7 ++
  src/emc/usr_intf/halui.cc             |  14 +++
- src/emc/usr_intf/halui_power_feed.hh  |  63 +++++++++++++
- 22 files changed, 502 insertions(+), 4 deletions(-)
+ src/emc/usr_intf/halui_power_feed.hh  |  67 ++++++++++++++
+ 22 files changed, 506 insertions(+), 4 deletions(-)
  create mode 100644 src/emc/motion/power_jog.c
  create mode 100644 src/emc/motion/power_jog.h
  create mode 100644 src/emc/usr_intf/halui_power_feed.hh
@@ -865,11 +865,13 @@ index 65b890a..d59b478 100644
      if (check_bit_changed(new_halui_data.machine_on, old_halui_data.machine_on) != 0)
 diff --git a/src/emc/usr_intf/halui_power_feed.hh b/src/emc/usr_intf/halui_power_feed.hh
 new file mode 100644
-index 0000000..ad9e6e0
+index 0000000..c0024ad
 --- /dev/null
 +++ b/src/emc/usr_intf/halui_power_feed.hh
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,67 @@
 +#pragma once
++
++#include <climits>
 +
 +#include "hal.h"
 +#include "nml_intf/emc_nml.hh"
@@ -922,7 +924,9 @@ index 0000000..ad9e6e0
 +            command.x_direction = x;
 +            command.z_direction = z;
 +            command.feed_per_rev = hal_get_real(pins->feed);
-+            command.spindle = spindle;
++            // The pin is 64 bits wide; an index that does not fit the
++            // command's int becomes -1, which motion refuses.
++            command.spindle = spindle <= INT_MAX ? int(spindle) : -1;
 +            command.taper_slope = slope;
 +            if (send(command) != 0 && (x || z)) blocked = true;
 +            held_slope = slope;

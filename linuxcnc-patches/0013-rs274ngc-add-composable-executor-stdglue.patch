@@ -19,19 +19,19 @@ while it runs; the close is deferred until it yields or returns, and
 pycall() then returns the unwind status (INTERP_EXIT or an error)
 instead of continuing the unwound call.
 ---
- docs/src/remap/remap.adoc                    | 129 +++++++++
- nc_files/remap_lib/python-stdglue/stdglue.py | 260 ++++++++++++++++++-
+ docs/src/remap/remap.adoc                    | 130 +++++++++
+ nc_files/remap_lib/python-stdglue/stdglue.py | 268 ++++++++++++++++++-
  src/emc/rs274ngc/interp_internal.hh          |   3 +
  src/emc/rs274ngc/interp_python.cc            |  60 ++++-
  src/emc/rs274ngc/interp_python.hh            |   7 +
  src/emc/rs274ngc/rs274ngc_pre.cc             |   5 +
- 6 files changed, 461 insertions(+), 3 deletions(-)
+ 6 files changed, 470 insertions(+), 3 deletions(-)
 
 diff --git a/docs/src/remap/remap.adoc b/docs/src/remap/remap.adoc
-index 75e2a09..410381a 100644
+index 75e2a09..642e4c7 100644
 --- a/docs/src/remap/remap.adoc
 +++ b/docs/src/remap/remap.adoc
-@@ -1576,6 +1576,135 @@ For a slightly more advanced example, see `tests/remap/predefined-named-params`.
+@@ -1576,6 +1576,136 @@ For a slightly more advanced example, see `tests/remap/predefined-named-params`.
  Since many remapping tasks are very similar, I've started collecting working prolog and epilog routines in a single Python module.
  These can currently be found in 'ncfiles/remap_lib/python-stdglue/stdglue.py' and provide the following routines:
  
@@ -44,7 +44,8 @@ index 75e2a09..410381a 100644
 +machine configuration still defines each remap and supplies the endpoint that
 +performs the request.
 +
-+`executor_transact` begins one request, waits cooperatively, releases a
++`executor_transact` first waits until the moves and commands queued before
++it have finished, then begins one request, waits cooperatively, releases a
 +terminal request, cancels it on timeout or interpreter abort, and returns an
 +`ExecutorResponse` without deciding whether the response is acceptable.
 +`executor_execute` adds the common policy: only `EXECUTOR_SUCCEEDED` continues
@@ -168,7 +169,7 @@ index 75e2a09..410381a 100644
  
  These wrap a NGC procedure for T__x__ Tool Prepare.
 diff --git a/nc_files/remap_lib/python-stdglue/stdglue.py b/nc_files/remap_lib/python-stdglue/stdglue.py
-index 8457e40..f7d7d47 100644
+index 8457e40..3cd13d2 100644
 --- a/nc_files/remap_lib/python-stdglue/stdglue.py
 +++ b/nc_files/remap_lib/python-stdglue/stdglue.py
 @@ -16,6 +16,9 @@
@@ -181,7 +182,7 @@ index 8457e40..f7d7d47 100644
  import emccanon
  from interpreter import *
  from emccanon import MESSAGE
-@@ -40,6 +43,261 @@ def build_hal(self):
+@@ -40,6 +43,269 @@ def build_hal(self):
      except Exception as e:
          print(e)
  
@@ -249,6 +250,14 @@ index 8457e40..f7d7d47 100644
 +        raise ValueError("executor timeout must be a number")
 +    if not math.isfinite(timeout) or timeout <= 0.0:
 +        raise ValueError("executor timeout must be finite and greater than zero")
++
++    # In AUTO the interpreter runs ahead of motion. Wait until everything
++    # queued before this call has finished, so the request starts in program
++    # order and not while earlier moves are still running. FINISH() first
++    # sends a move canon still holds for blending; the resynchronisation that
++    # follows the yield would otherwise drop it.
++    emccanon.FINISH()
++    yield INTERP_EXECUTE_FINISH
 +
 +    operation = None
 +    finalized = False
@@ -443,7 +452,7 @@ index 8457e40..f7d7d47 100644
  # REMAP=S   prolog=setspeed_prolog  ngc=setspeed epilog=setspeed_epilog
  # exposed parameter: #<speed>
  
-@@ -655,5 +913,3 @@ def tool_probe_m6(self, **words):
+@@ -655,5 +921,3 @@ def tool_probe_m6(self, **words):
          self.set_errormsg("tool_probe_m6 remap error." )
          yield INTERP_ERROR
  

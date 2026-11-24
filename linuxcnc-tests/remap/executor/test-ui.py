@@ -51,6 +51,24 @@ def wait_request(executor, opcode):
     return prefix, request_id
 
 
+def wait_error(expected, timeout=5.0):
+    start = time.time()
+    while time.time() - start < timeout:
+        message = errors.poll()
+        if message is None:
+            time.sleep(0.01)
+            continue
+        kind, text = message
+        if kind in (linuxcnc.NML_ERROR, linuxcnc.OPERATOR_ERROR) and expected in text:
+            return
+        print("ignoring message: %s" % text)
+    fail("no error containing %r" % expected)
+
+
+def wait_interp_idle(message):
+    wait_for(lambda: status.interp_state == linuxcnc.INTERP_IDLE, message)
+
+
 def respond(prefix, request_id, state, result):
     hal.set_p(prefix + "state", str(state))
     hal.set_p(prefix + "result", str(result))
@@ -68,6 +86,7 @@ def assert_released(prefix):
 
 command = linuxcnc.command()
 status = linuxcnc.stat()
+errors = linuxcnc.error_channel()
 test_component = hal.component("executor-test-ui")
 test_component.ready()
 
@@ -136,6 +155,9 @@ elif scenario == "failure":
     )
     if hal.get_value(prefix + "cancel"):
         fail("terminal executor failure was incorrectly cancelled")
+    # Only a succeeded response continues; anything else ends the MDI in error.
+    wait_error("executor 'chuck': ")
+    wait_interp_idle("failed executor request did not stop the MDI command")
 
 elif scenario == "timeout":
     command.mdi("M11")
@@ -146,6 +168,8 @@ elif scenario == "timeout":
         "timed-out executor request was not cancelled",
         timeout=2.0,
     )
+    wait_error("executor 'chuck': timed out")
+    wait_interp_idle("timed-out executor request did not stop the MDI command")
 
     command.abort()
     wait_complete("timeout recovery abort did not complete")
@@ -169,6 +193,32 @@ elif scenario == "abort":
         and not hal.get_value(prefix + "request"),
         "aborted executor request was not cancelled",
     )
+
+elif scenario == "readahead":
+    # The interpreter reads M10 while the 2 s move before it still runs; the
+    # request must not start until the move has finished.
+    command.mode(linuxcnc.MODE_AUTO)
+    wait_complete("machine did not enter AUTO")
+    command.program_open(os.path.join(os.getcwd(), "readahead.ngc"))
+    wait_complete("program did not open")
+    command.auto(linuxcnc.AUTO_RUN, 0)
+    wait_for(lambda: status.current_vel > 0.0, "move before M10 did not start")
+    prefix = "remap.executor.chuck."
+    while True:
+        status.poll()
+        if hal.get_value(prefix + "request"):
+            break
+        if status.interp_state == linuxcnc.INTERP_IDLE:
+            fail("program ended without an executor request")
+        time.sleep(0.005)
+    status.poll()
+    if abs(status.position[0] - 4.0) > 0.001 or status.current_vel != 0.0:
+        fail("executor request started during the earlier move at X%.4f"
+             % status.position[0])
+    prefix, request_id = wait_request("chuck", 0)
+    respond(prefix, request_id, 4, 0)
+    assert_released(prefix)
+    wait_interp_idle("program did not finish after the executor request")
 
 else:
     fail("unknown executor scenario %s" % scenario)

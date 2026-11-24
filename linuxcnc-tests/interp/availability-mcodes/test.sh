@@ -62,6 +62,10 @@ check_rejected fractional-spindle.ngc '$ selector must be a non-negative integer
 check_rejected negative-fractional-spindle.ngc '$ selector must be a non-negative integer spindle number'
 check_rejected huge-spindle.ngc '$ selector must be a non-negative integer spindle number'
 
+# The cutter comp queue still holds the preceding move.
+check_rejected comp-m54.ngc "Cannot change joint or spindle availability with cutter radius compensation on"
+check_rejected comp-m55.ngc "Cannot change joint or spindle availability with cutter radius compensation on"
+
 # Legacy remaps accept their own words without built-in resource selectors.
 rs274 -n 0 -i remap.ini -g remapped.ngc >"$output_dir/remap" 2>"$output_dir/diagnostics"
 sed '/^executing$/d; /^[[:space:]]*$/d' "$output_dir/diagnostics" >"$output_dir/errors"

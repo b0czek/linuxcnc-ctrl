@@ -1,2 +1,2 @@
 #!/bin/sh
-exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 24
+exec "$(dirname "$0")/../check-result.sh" "$1" "$(dirname "$0")/scenarios" 25

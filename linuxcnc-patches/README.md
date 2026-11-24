@@ -372,8 +372,10 @@ the trajectory planner latches that pass and completes exactly its marked
 retract before entering `STOPPED`, binding the target when it reaches motion
 if necessary. This leaves the tool clear instead of cutting a groove at thread
 depth, while ordinary G33, rigid tapping, and unrelated following rapids
-retain their prior Stop boundaries. The clearance is an exact, non-blendable
-endpoint, so arc blending cannot trim it. Synthetic blend arcs within a
+retain their prior Stop boundaries. The clearance and the approach endpoint
+are exact, non-blendable endpoints, so arc blending cannot trim them; with
+later passes prequeued, the rapid back to the pass start therefore stops at
+the approach point instead of rounding into the infeed. Synthetic blend arcs within a
 synchronized cut inherit the pass owner, keeping Stop bound to that pass's
 marked clearance.
 
@@ -411,14 +413,22 @@ compensation being switched on and off through the existing canon calls, and
 `AUTO_STEP` is forwarded to motion while an AUTO program is already running.
 The trajectory planner latches the active source block, or the active G76
 approach or thread-plus-clearance unit supplied by patch 0009, and finishes it
-before stopping at an exact boundary. Later motion remains queued and does not
+before stopping at an exact boundary. As on most controls, when the end of the
+active block is closer than the distance needed to stop from the current speed
+(within the acceleration and, for the S-curve planner, jerk limits), Step stops
+at the first later block end it can reach instead, and the planner lowers the
+end speeds of the segments before that point so the machine never brakes
+harder than its limits. A Step that is canceled restores every segment it
+changed. Later motion remains queued and does not
 begin, including when several following blocks or threading passes were
 prequeued by readahead.
 
 The temporary exact boundary is restored if Step is canceled by Resume, Stop or
 Pause; Pause during an in-flight Step is an ordinary Pause. Existing paused source-line stepping and two-stage G76 stepping remain intact.
-Two additional runtime scenarios arm Step during an ordinary block with three
-later blocks queued and during an active G76 cut with later passes queued;
+Runtime scenarios arm Step during an ordinary block with three later blocks
+queued, at full speed among blocks shorter than the stopping distance (checking
+the peak deceleration through HAL), and during an active G76 cut with later
+passes queued, stepping on through the prequeued passes;
 they are part of the resumable-stop tests described under patch 0004. During an
 in-flight step, `single_stepping` reports the armed/active state while task and
 motion remain unpaused; both paused flags become true only after motion reaches
@@ -479,7 +489,9 @@ ordinary, explicitly named remaps and pass an endpoint object into either
 helper. `transact` owns cooperative waiting, timeout, release, and abort
 cancellation while returning the terminal response for machine-specific
 policy. `execute` adds the common policy that only a successful response
-continues program execution. The default timeout is 10 seconds.
+continues program execution. The default timeout is 10 seconds. A request
+starts only after everything queued before it has finished, so in AUTO it
+does not run ahead of earlier moves while the interpreter reads ahead.
 
 The supplied `HalExecutor` endpoint adds namespaced request and response pins
 to a HAL component provided and owned by the machine configuration. It neither
@@ -491,7 +503,8 @@ endpoint and an in-memory endpoint.
 Python remap generators are closed during interpreter unwind so their
 `finally` cleanup runs on task or operator abort. The regression also covers
 success, raw failure handling, standard failure policy, timeout, stale
-responses, monotonic request IDs, request release, and cancellation. Headless
+responses, monotonic request IDs, request release, cancellation, and a request
+read ahead of a running AUTO move. Headless
 installs now include the curated `stdglue`.
 
 ### 0014 — Publish modal CSS maximum in spindle status
@@ -610,7 +623,9 @@ identifies a spindle. Selectors are zero-based integer indices, and the selected
 resource must have availability control enabled. For example, `M54 P2` acquires
 joint 2, while `M55 $0` releases spindle 0. Each command occupies its own block;
 line numbers and comments are allowed, but other commands and parameter
-assignments cannot share the block. Standalone validation uses the parser's
+assignments cannot share the block. Both are refused while cutter radius
+compensation is on, because the compensation queue still holds the preceding
+move, like other LinuxCNC codes that must wait for motion. Standalone validation uses the parser's
 generic non-comment item count. The interpreter checks selector representation;
 task and motion authoritatively validate configured resource topology and
 availability ownership.
@@ -665,6 +680,8 @@ X/Z motion. Feed/rev is captured per held request, with live spindle feedback
 and feed override. Both axes share acceleration and travel constraints.
 Dedicated power-feed X/Z direction pins keep ordinary axis jogging separate.
 Cancelled motion requires all direction buttons to release before rearming.
+A `halui.power-feed.spindle` value too large for the command's spindle index
+is sent as an invalid index, so motion refuses the jog.
 Includes simulator coverage and HALUI pin documentation.
 
 ### 0021 — Cross-compile external HAL components
@@ -767,11 +784,15 @@ the MDI queue and motion are all at rest and no joint is homing or availability
 change is in progress. The check runs in `emcTaskPlan()`, where task handles
 the command, so no client can start work between the check and the reset.
 Abort first, wait for the machine to stop, then reset. Right after startup task
-is busy for a few cycles, and a reset sent then is refused too.
+is busy for a few cycles, and a reset sent then is refused too. A tool table
+edit holds the interpreter until it is done, and only a reading interpreter or
+an MDI call used to release that hold; task now releases it once it is idle,
+so an edit does not leave an idle machine looking busy.
 
 `linuxcnc-tests/task/interp-reset-requires-idle` checks that resets are refused during
 an MDI move, a dwell and a jog without changing the modes, and accepted again
-once the machine is idle. The native server additionally refuses a reset while
+once the machine is idle, including after tool edits made while idle and
+during an MDI move. The native server additionally refuses a reset while
 a command it wrote earlier is still in progress, because task may not have
 seen that command yet.
 

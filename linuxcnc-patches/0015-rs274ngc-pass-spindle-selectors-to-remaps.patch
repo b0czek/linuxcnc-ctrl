@@ -9,7 +9,7 @@ Subject: [PATCH] rs274ngc: pass spindle selectors to remaps
  2 files changed, 21 insertions(+), 6 deletions(-)
 
 diff --git a/docs/src/remap/remap.adoc b/docs/src/remap/remap.adoc
-index 410381a..6027d2b 100644
+index 642e4c7..e332924 100644
 --- a/docs/src/remap/remap.adoc
 +++ b/docs/src/remap/remap.adoc
 @@ -324,7 +324,7 @@ there is the somewhat easier way of <<remap:python-o-word-procs,calling Python f

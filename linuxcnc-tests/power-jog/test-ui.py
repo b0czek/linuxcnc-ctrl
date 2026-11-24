@@ -98,6 +98,14 @@ pin('halui.power-feed.spindle', 1)
 pin('halui.power-feed.z.minus', 1)
 wait(lambda: abs(velocity('z') + 4) < .01, 'selected reverse spindle magnitude')
 release()
+# The spindle pin is 64 bits wide; indices that do not fit the command must
+# be refused, not wrapped onto spindle 0 or 1.
+for invalid in (1 << 31, 1 << 32, (1 << 32) + 1):
+    pin('halui.power-feed.spindle', invalid)
+    pin('halui.power-feed.z.plus', 1)
+    time.sleep(.3)
+    assert abs(velocity('z')) < 1e-8, ('invalid spindle fed', invalid)
+    release()
 
 # Unequal X/Z constraints must preserve geometry throughout acceleration/stop.
 pin('halui.power-feed.spindle', 0)

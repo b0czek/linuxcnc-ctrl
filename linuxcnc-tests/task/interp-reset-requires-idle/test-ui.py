@@ -148,6 +148,31 @@ c.wait_complete()
 wait_idle("jog to stop")
 expect_reset_accepted("after stopped jog")
 
+# A tool edit holds the interpreter back until it is done, and the wait must
+# not outlive the edit: an idle machine accepts a reset afterwards.
+def edit_tool(z):
+    c.tool_offset(1, z, 0.0, 0.0, 0.0, 0.0, 0)
+    c.wait_complete()
+
+
+mdi_g91()
+edit_tool(1.0)
+wait_idle("tool edit in idle MDI to finish")
+expect_reset_accepted("after tool edit in idle MDI")
+mdi_g91()
+set_mode(linuxcnc.MODE_MANUAL)
+edit_tool(2.0)
+wait_idle("tool edit in manual to finish")
+expect_reset_accepted("after tool edit in manual")
+
+# The same edit sent while an MDI move runs.
+mdi_g91()
+c.mdi("G1 X-3 F60")
+wait_for(lambda: s.current_vel > 0.0, "MDI move to start")
+edit_tool(3.0)
+wait_idle("MDI move with tool edit to finish")
+expect_reset_accepted("after tool edit during MDI move")
+
 print("all scenarios passed")
 set_state(linuxcnc.STATE_ESTOP)
 sys.exit(0)

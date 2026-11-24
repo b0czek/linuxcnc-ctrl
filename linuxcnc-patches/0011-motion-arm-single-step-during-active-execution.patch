@@ -11,12 +11,13 @@ Ported onto v2.10.0-pre2. The two in-flight scenarios, already present
 in the earlier G76 Stop patch's test list, are added here with the
 feature and its program.
 ---
- src/emc/motion/command.c    | 24 +++++++----
- src/emc/motion/control.c    |  9 +++--
- src/emc/task/emctaskmain.cc | 48 +++++++++++-----------
- src/emc/tp/tp.c             | 80 +++++++++++++++++++++++++++++--------
- src/emc/tp/tp_types.h       |  6 ++-
- 5 files changed, 116 insertions(+), 51 deletions(-)
+ src/emc/motion/command.c    |  24 +++--
+ src/emc/motion/control.c    |   9 +-
+ src/emc/task/emctaskmain.cc |  48 ++++-----
+ src/emc/tp/tc_types.h       |   3 +
+ src/emc/tp/tp.c             | 192 +++++++++++++++++++++++++++++++++---
+ src/emc/tp/tp_types.h       |   5 +-
+ 6 files changed, 230 insertions(+), 51 deletions(-)
 
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
 index a8e8ae3..ff48890 100644
@@ -200,8 +201,22 @@ index e2a7209..f69fcbb 100644
  	// On a motion enabled -> disabled edge (limit switch, amp fault,
  	// following error, etc.) unhome joints marked VOLATILE_HOME. The estop
  	// and machine-off paths already do their own unhome; this catches the
+diff --git a/src/emc/tp/tc_types.h b/src/emc/tp/tc_types.h
+index bd8ad13..5d6e0b4 100644
+--- a/src/emc/tp/tc_types.h
++++ b/src/emc/tp/tc_types.h
+@@ -170,6 +170,9 @@ typedef struct {
+     int canon_motion_type;  // this motion is due to which canon function?
+     int g76_pass_id;        // internal G76 pass ownership, zero otherwise
+     int g76_pass_clearance; // 1: clearance retract, 2: approach endpoint
++    int step_saved;         // Single Step changed term_cond/finalvel below
++    int step_saved_term_cond;
++    double step_saved_finalvel;
+     int term_cond;          // gcode requests continuous feed at the end of
+                             // this segment (g64 mode)
+ 
 diff --git a/src/emc/tp/tp.c b/src/emc/tp/tp.c
-index c690207..dac694f 100644
+index c9b271e..c42d4f1 100644
 --- a/src/emc/tp/tp.c
 +++ b/src/emc/tp/tp.c
 @@ -357,9 +357,9 @@ STATIC inline double tpGetRealFinalVel(TP_STRUCT const * const tp,
@@ -216,20 +231,18 @@ index c690207..dac694f 100644
              tc->term_cond != TC_TERM_COND_TANGENT || tp->reverse_run) {
          return 0.0;
      }
-@@ -497,7 +497,11 @@ int tpClear(TP_STRUCT * const tp)
+@@ -497,7 +497,9 @@ int tpClear(TP_STRUCT * const tp)
      tp->step_tc = 0;
      tp->step_target_pending = 0;
      tp->step_pass_id = 0;
 -    tp->stepping_to_pass_clearance = 0;
 +    tp->step_motion_id = 0;
 +    tp->stepping_to_motion_target = 0;
-+    tp->step_target_term_cond = 0;
-+    tp->step_target_finalvel = 0.0;
 +    tp->step_target_overridden = 0;
      tp->reverse_run = 0;
      tp->synchronized = 0;
      tp->uu_per_rev = 0.0;
-@@ -1595,7 +1599,7 @@ STATIC inline int tpAddSegmentToQueue(TP_STRUCT * const tp, TC_STRUCT * const tc
+@@ -1595,7 +1597,7 @@ STATIC inline int tpAddSegmentToQueue(TP_STRUCT * const tp, TC_STRUCT * const tc
                  tp->stop_pass_id);
          return TP_ERR_FAIL;
      }
@@ -238,7 +251,7 @@ index c690207..dac694f 100644
              tp->step_target_pending && tp->step_pass_id && !tp->step_tc &&
              tc->g76_pass_id != tp->step_pass_id) {
          rtapi_print_msg(RTAPI_MSG_ERR,
-@@ -1621,12 +1625,11 @@ STATIC inline int tpAddSegmentToQueue(TP_STRUCT * const tp, TC_STRUCT * const tc
+@@ -1621,12 +1623,11 @@ STATIC inline int tpAddSegmentToQueue(TP_STRUCT * const tp, TC_STRUCT * const tc
          }
      }
      if (queued_tc && queued_tc->g76_pass_clearance &&
@@ -252,7 +265,7 @@ index c690207..dac694f 100644
      // Store end of current move as new final goal of TP
      // KLUDGE: endpoint is garbage for rigid tap since it's supposed to retract past the start point.
      if (tc->motion_type != TC_RIGIDTAP) {
-@@ -3496,10 +3499,11 @@ STATIC int tpCompleteSegment(TP_STRUCT * const tp,
+@@ -3497,10 +3498,11 @@ STATIC int tpCompleteSegment(TP_STRUCT * const tp,
          tp->stop_tc = 0;
          tp->stop_pass_id = 0;
      }
@@ -265,7 +278,7 @@ index c690207..dac694f 100644
      }
  
      //TODO make progress to match target?
-@@ -4384,7 +4388,7 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
+@@ -4385,7 +4387,7 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
              }
              return TP_ERR_WAITING;
          }
@@ -274,7 +287,7 @@ index c690207..dac694f 100644
                  tp->step_pass_id && !tp->step_tc) {
              tpHandleEmptyQueue(tp);
              return TP_ERR_WAITING;
-@@ -4573,6 +4577,30 @@ STATIC int tpGetQueuedG76PassId(TP_STRUCT * const tp)
+@@ -4574,6 +4576,146 @@ STATIC int tpGetQueuedG76PassId(TP_STRUCT * const tp)
      return tc ? tc->g76_pass_id : 0;
  }
  
@@ -293,19 +306,135 @@ index c690207..dac694f 100644
 +
 +STATIC void tpRestoreStepTarget(TP_STRUCT * const tp)
 +{
-+    if (tp->step_target_overridden && tp->step_target_pending &&
-+            tp->step_tc) {
-+        tp->step_tc->term_cond = tp->step_target_term_cond;
-+        tp->step_tc->finalvel = tp->step_target_finalvel;
++    if (tp->step_target_overridden) {
++        for (int i = 0; i < tcqLen(&tp->queue); ++i) {
++            TC_STRUCT *tc = tcqItem(&tp->queue, i);
++            if (tc && tc->step_saved) {
++                tc->term_cond = tc->step_saved_term_cond;
++                tc->finalvel = tc->step_saved_finalvel;
++                tc->step_saved = 0;
++            }
++        }
 +        tpRunOptimization(tp);
 +    }
 +    tp->step_target_overridden = 0;
 +}
 +
++STATIC void tpOverrideStepSegment(TP_STRUCT * const tp, TC_STRUCT * const tc,
++        int term_cond, double finalvel)
++{
++    if (!tc->step_saved) {
++        tc->step_saved = 1;
++        tc->step_saved_term_cond = tc->term_cond;
++        tc->step_saved_finalvel = tc->finalvel;
++    }
++    tc->term_cond = term_cond;
++    tc->finalvel = finalvel;
++    tp->step_target_overridden = 1;
++}
++
++/* Fastest start from which tc can still slow to end_vel within its length. */
++STATIC double tpStepMaxStartVel(TC_STRUCT const * const tc, double end_vel)
++{
++    double acc = tcGetTangentialMaxAccel(tc);
++    double start_vel = pmSqrt(pmSq(end_vel) + 2.0 * acc * tc->target);
++    if (GET_TRAJ_PLANNER_TYPE() == 1) {
++        double jerk = fmin(tc->maxjerk, emcmotStatus->jerk);
++        double scurve_vel;
++        if (findSCurveMaxStartSpeed(tc->target, end_vel, acc, jerk,
++                    &scurve_vel) == 1) {
++            start_vel = fmin(start_vel, scurve_vel);
++        } else {
++            start_vel = end_vel;
++        }
++    }
++    return start_vel;
++}
++
++/*
++ * Queue index where a Single Step armed now stops: the end of the source
++ * block in progress or, when that end is closer than the distance needed to
++ * stop from the current speed within the acceleration (and, for S-curve, jerk)
++ * limits, the first later block end that is far enough. A block end the
++ * planner already brings to rest (an exact stop or the end of the queue) is
++ * always reachable.
++ */
++STATIC int tpFindReachableStepTarget(TP_STRUCT * const tp)
++{
++    int len = tcqLen(&tp->queue);
++    TC_STRUCT *head = tcqItem(&tp->queue, 0);
++    if (!head) {
++        return -1;
++    }
++    double vel = head->currentvel;
++    if (head->blending_next) {
++        TC_STRUCT *next = tcqItem(&tp->queue, 1);
++        if (next) {
++            vel += next->currentvel;
++        }
++    }
++    double dist = tcGetDistanceToGo(head, tp->reverse_run);
++    double acc = tcGetTangentialMaxAccel(head);
++    double jerk = fmin(head->maxjerk, emcmotStatus->jerk);
++    for (int i = 0; i < len; ++i) {
++        TC_STRUCT *tc = tcqItem(&tp->queue, i);
++        if (i > 0) {
++            dist += tc->target;
++            acc = fmin(acc, tcGetTangentialMaxAccel(tc));
++            jerk = fmin(jerk, fmin(tc->maxjerk, emcmotStatus->jerk));
++        }
++        TC_STRUCT *next = tcqItem(&tp->queue, i + 1);
++        if (next && next->id == tc->id) {
++            continue;
++        }
++        if (!next || tc->term_cond != TC_TERM_COND_TANGENT) {
++            return i;
++        }
++        double stop_dist = GET_TRAJ_PLANNER_TYPE() == 1 ?
++            stoppingDist(vel, head->currentacc, acc, jerk) :
++            pmSq(vel) / (2.0 * acc);
++        // Braking starts in the next servo cycle at the earliest.
++        stop_dist += vel * tp->cycleTime;
++        if (dist >= stop_dist) {
++            return i;
++        }
++    }
++    return len - 1;
++}
++
++/*
++ * Make the chosen block end an exact stop, and lower the end speed of every
++ * segment before it so each can still slow down in time, as tpRunOptimization
++ * does for segments it queues. Returns the target segment.
++ */
++STATIC TC_STRUCT *tpArmReachableStepTarget(TP_STRUCT * const tp)
++{
++    int target = tpFindReachableStepTarget(tp);
++    if (target < 0) {
++        return 0;
++    }
++    TC_STRUCT *step_tc = tcqItem(&tp->queue, target);
++    tpOverrideStepSegment(tp, step_tc, TC_TERM_COND_STOP, 0.0);
++    for (int i = target - 1; i >= 0; --i) {
++        TC_STRUCT *tc = tcqItem(&tp->queue, i);
++        TC_STRUCT *next = tcqItem(&tp->queue, i + 1);
++        if (tc->term_cond != TC_TERM_COND_TANGENT) {
++            continue;
++        }
++        double next_end = next->term_cond == TC_TERM_COND_TANGENT ?
++            next->finalvel : 0.0;
++        double limit = tpStepMaxStartVel(next, next_end);
++        if (limit < tc->finalvel) {
++            tpOverrideStepSegment(tp, tc, tc->term_cond, limit);
++        }
++    }
++    return step_tc;
++}
++
  int tpPause(TP_STRUCT * const tp)
  {
      if (0 == tp) {
-@@ -4580,10 +4608,12 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4581,10 +4723,12 @@ int tpPause(TP_STRUCT * const tp)
      }
  
      if (tp->stopping) {
@@ -319,7 +448,7 @@ index c690207..dac694f 100644
          TC_STRUCT *tc = tcqItem(&tp->queue, 0);
          /*
           * A G76 cut that has passed spindle index, or its explicitly marked
-@@ -4630,7 +4660,7 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4631,7 +4775,7 @@ int tpPause(TP_STRUCT * const tp)
              tp->pausing = 1;
          }
      } else if (emcmotStatus->stepping &&
@@ -328,7 +457,7 @@ index c690207..dac694f 100644
          /*
           * EMCMOT_STEP requests default-TP pass targeting through the existing
           * tpPause ABI. Alternate planners leave step_target_pending clear and
-@@ -4639,15 +4669,25 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4640,15 +4784,27 @@ int tpPause(TP_STRUCT * const tp)
          int pass_id = tpGetQueuedG76PassId(tp);
          if (pass_id) {
              tp->step_pass_id = pass_id;
@@ -344,21 +473,23 @@ index c690207..dac694f 100644
 -            tp->stepping_to_pass_clearance = 0;
 -            tp->pausing = 1;
 +            tp->step_motion_id = tc ? tc->id : 0;
-+            tp->step_tc = tpFindSourceBlockTarget(tp, tp->step_motion_id);
-+            tp->step_target_pending = tp->step_tc != 0;
-+            if (tp->step_tc) {
-+                /* Finalize the latched block as an exact runnable boundary. */
-+                tp->step_target_term_cond = tp->step_tc->term_cond;
-+                tp->step_target_finalvel = tp->step_tc->finalvel;
-+                tp->step_target_overridden = 1;
-+                tp->step_tc->term_cond = TC_TERM_COND_STOP;
-+                tp->step_tc->finalvel = 0.0;
++            if (tc && tc->synchronized == TC_SYNC_POSITION) {
++                /* A spindle-synchronized move cannot change speed; keep the
++                 * established end of its source block. */
++                tp->step_tc = tpFindSourceBlockTarget(tp, tp->step_motion_id);
++                if (tp->step_tc) {
++                    tpOverrideStepSegment(tp, tp->step_tc,
++                            TC_TERM_COND_STOP, 0.0);
++                }
++            } else {
++                tp->step_tc = tpArmReachableStepTarget(tp);
 +            }
++            tp->step_target_pending = tp->step_tc != 0;
 +            tp->pausing = !tp->step_target_pending;
          }
      } else {
          tp->pausing = 1;
-@@ -4660,6 +4700,7 @@ int tpResume(TP_STRUCT * const tp)
+@@ -4661,6 +4817,7 @@ int tpResume(TP_STRUCT * const tp)
      if (0 == tp) {
          return TP_ERR_FAIL;
      }
@@ -366,44 +497,39 @@ index c690207..dac694f 100644
      tp->pausing = 0;
      tp->stopping = 0;
      tp->stop_sync_run = 0;
-@@ -4669,7 +4710,10 @@ int tpResume(TP_STRUCT * const tp)
+@@ -4670,7 +4827,8 @@ int tpResume(TP_STRUCT * const tp)
      tp->step_tc = 0;
      tp->step_target_pending = 0;
      tp->step_pass_id = 0;
 -    tp->stepping_to_pass_clearance = 0;
 +    tp->step_motion_id = 0;
 +    tp->stepping_to_motion_target = 0;
-+    tp->step_target_term_cond = 0;
-+    tp->step_target_finalvel = 0.0;
      if (MOTION_ID_VALID(tp->spindle.waiting_for_index)) {
          emcmotStatus->spindle_status[
              tp->spindle.spindle_num].spindle_index_enable = 1;
-@@ -4689,7 +4733,11 @@ int tpAbort(TP_STRUCT * const tp)
+@@ -4690,7 +4848,9 @@ int tpAbort(TP_STRUCT * const tp)
          tp->step_tc = 0;
          tp->step_target_pending = 0;
          tp->step_pass_id = 0;
 -        tp->stepping_to_pass_clearance = 0;
 +        tp->step_motion_id = 0;
 +        tp->stepping_to_motion_target = 0;
-+        tp->step_target_term_cond = 0;
-+        tp->step_target_finalvel = 0.0;
 +        tp->step_target_overridden = 0;
          tpPause(tp);
          tp->aborting = 1;
      }
 diff --git a/src/emc/tp/tp_types.h b/src/emc/tp/tp_types.h
-index 2963bcc..819f508 100644
+index 2963bcc..0d3f164 100644
 --- a/src/emc/tp/tp_types.h
 +++ b/src/emc/tp/tp_types.h
-@@ -171,7 +171,11 @@ typedef struct {
+@@ -171,7 +171,10 @@ typedef struct {
      TC_STRUCT *step_tc;
      int step_target_pending;
      int step_pass_id;
 -    int stepping_to_pass_clearance;
 +    int step_motion_id;
 +    int stepping_to_motion_target;
-+    int step_target_term_cond;
-+    double step_target_finalvel;
++    /* Single Step changed queued segments; their originals are in the TCs. */
 +    int step_target_overridden;
  
  } TP_STRUCT;

@@ -39,11 +39,11 @@ that adds in-flight stepping.
  src/emc/task/task.hh               |   2 +-
  src/emc/task/taskintf.cc           |   5 +-
  src/emc/tp/tc_types.h              |   2 +
- src/emc/tp/tp.c                    | 203 +++++++++++++++++++++++++++--
+ src/emc/tp/tp.c                    | 204 +++++++++++++++++++++++++++--
  src/emc/tp/tp.h                    |   3 +-
  src/emc/tp/tp_types.h              |  16 ++-
  tests/interp/compile/use-rs274.cc  |   5 +
- 23 files changed, 496 insertions(+), 51 deletions(-)
+ 23 files changed, 497 insertions(+), 51 deletions(-)
 
 diff --git a/docs/src/gcode/g-code.adoc b/docs/src/gcode/g-code.adoc
 index 6f196b6..3b3d18c 100644
@@ -936,7 +936,7 @@ index 47018b2..bd8ad13 100644
                              // this segment (g64 mode)
  
 diff --git a/src/emc/tp/tp.c b/src/emc/tp/tp.c
-index 8ef21c3..c690207 100644
+index 8ef21c3..c9b271e 100644
 --- a/src/emc/tp/tp.c
 +++ b/src/emc/tp/tp.c
 @@ -240,10 +240,12 @@ STATIC int tpGetMachineActiveLimit(double * const act_limit, PmCartesian const *
@@ -1037,8 +1037,8 @@ index 8ef21c3..c690207 100644
          tp_debug_print("Blending disabled: can't blend between rapid and feed motions\n");
          tcSetTermCond(prev_tc, tc, TC_TERM_COND_STOP);
      }
-+    if (prev_tc->g76_pass_clearance == 1) {
-+        tp_debug_print("Blending disabled: G76 pass clearance endpoint\n");
++    if (prev_tc->g76_pass_clearance) {
++        tp_debug_print("Blending disabled: G76 pass clearance or approach endpoint\n");
 +        tcSetTermCond(prev_tc, tc, TC_TERM_COND_STOP);
 +    }
      if (prev_tc->synchronized != TC_SYNC_POSITION &&
@@ -1048,8 +1048,8 @@ index 8ef21c3..c690207 100644
          tp_debug_print(" queue empty\n");
          return NO_BLEND;
      }
-+    if (prev_tc->g76_pass_clearance == 1) {
-+        tp_debug_print(" G76 pass clearance is an exact endpoint\n");
++    if (prev_tc->g76_pass_clearance) {
++        tp_debug_print(" G76 pass clearance or approach is an exact endpoint\n");
 +        return NO_BLEND;
 +    }
      if (prev_tc->progress > prev_tc->target / 2.0) {
@@ -1065,7 +1065,7 @@ index 8ef21c3..c690207 100644
  {
      if (tpErrorCheck(tp) < 0) {
          return TP_ERR_FAIL;
-@@ -2167,12 +2221,17 @@ int tpAddLine(TP_STRUCT * const tp, EmcPose end, int canon_motion_type,
+@@ -2167,12 +2221,18 @@ int tpAddLine(TP_STRUCT * const tp, EmcPose end, int canon_motion_type,
              enables,
              atspeed);
      tc.tag = tag;
@@ -1077,13 +1077,14 @@ index 8ef21c3..c690207 100644
  
      // Copy over state data from the trajectory planner
      tcSetupState(&tc, tp);
-+    if (tc.g76_pass_clearance == 1) {
++    // Step stops at these, so no blend may trim them.
++    if (tc.g76_pass_clearance) {
 +        tc.term_cond = TC_TERM_COND_STOP;
 +    }
  
      // Copy in motion parameters
      tcSetupMotion(&tc,
-@@ -3370,7 +3429,7 @@ STATIC void tpHandleEmptyQueue(TP_STRUCT * const tp)
+@@ -3370,7 +3430,7 @@ STATIC void tpHandleEmptyQueue(TP_STRUCT * const tp)
  
      tpUpdateMovementStatus(tp, NULL);
  
@@ -1092,7 +1093,7 @@ index 8ef21c3..c690207 100644
          tpResume(tp);
      }
  }
-@@ -3432,6 +3491,17 @@ STATIC int tpCompleteSegment(TP_STRUCT * const tp,
+@@ -3432,6 +3492,17 @@ STATIC int tpCompleteSegment(TP_STRUCT * const tp,
      // Clean up Ruckig planner resources
      tcCleanupRuckig(tc);
  
@@ -1110,7 +1111,7 @@ index 8ef21c3..c690207 100644
      //TODO make progress to match target?
      // done with this move
      if (tp->reverse_run) {
-@@ -4303,6 +4373,10 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
+@@ -4303,6 +4374,10 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
      if(!tc) {
          if (tp->stopping) {
              tpHandleEmptyQueue(tp);
@@ -1121,7 +1122,7 @@ index 8ef21c3..c690207 100644
              if (tp->stopping) {
                  tp->stop_sync_run = 0;
                  tp->pausing = 1;
-@@ -4310,6 +4384,11 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
+@@ -4310,6 +4385,11 @@ int tpRunCycle(TP_STRUCT * const tp, long period)
              }
              return TP_ERR_WAITING;
          }
@@ -1133,7 +1134,7 @@ index 8ef21c3..c690207 100644
          tpHandleEmptyQueue(tp);
          return TP_ERR_WAITING;
      }
-@@ -4458,6 +4537,42 @@ int tpSetSpindleSync(TP_STRUCT * const tp, int spindle, double sync, int mode) {
+@@ -4458,6 +4538,42 @@ int tpSetSpindleSync(TP_STRUCT * const tp, int spindle, double sync, int mode) {
      return TP_ERR_OK;
  }
  
@@ -1176,7 +1177,7 @@ index 8ef21c3..c690207 100644
  int tpPause(TP_STRUCT * const tp)
  {
      if (0 == tp) {
-@@ -4465,22 +4580,75 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4465,22 +4581,75 @@ int tpPause(TP_STRUCT * const tp)
      }
  
      if (tp->stopping) {
@@ -1258,7 +1259,7 @@ index 8ef21c3..c690207 100644
      } else {
          tp->pausing = 1;
      }
-@@ -4495,6 +4663,17 @@ int tpResume(TP_STRUCT * const tp)
+@@ -4495,6 +4664,17 @@ int tpResume(TP_STRUCT * const tp)
      tp->pausing = 0;
      tp->stopping = 0;
      tp->stop_sync_run = 0;
@@ -1276,7 +1277,7 @@ index 8ef21c3..c690207 100644
      emcmotStatus->stopped = 0;
      return TP_ERR_OK;
  }
-@@ -4507,6 +4686,10 @@ int tpAbort(TP_STRUCT * const tp)
+@@ -4507,6 +4687,10 @@ int tpAbort(TP_STRUCT * const tp)
  
      if (!tp->aborting) {
          /* const to abort, signal a pause and set our abort flag */

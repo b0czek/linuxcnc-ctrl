@@ -4,7 +4,7 @@
 # stdglue library from the LinuxCNC tree.
 sed "s#@EMC2_HOME@#${EMC2_HOME}#g" test.ini.in > test.ini
 
-for scenario in success failure timeout abort; do
+for scenario in success failure timeout abort readahead; do
     echo "Running executor remap scenario: ${scenario}"
     EXECUTOR_SCENARIO="${scenario}" linuxcnc -r test.ini
 done

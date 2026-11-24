@@ -40,3 +40,11 @@ addf encoder.update-counters servo-thread
 
 setp spindle.0.at-speed true
 setp spindle.1.at-speed true
+
+# Peak tangential deceleration, read by the short-block in-flight Step scenario.
+loadrt ddt names=vel-ddt
+loadrt minmax names=accel-peak
+net tp-vel motion.current-vel => vel-ddt.in
+net tp-accel vel-ddt.out => accel-peak.in
+addf vel-ddt servo-thread
+addf accel-peak servo-thread
