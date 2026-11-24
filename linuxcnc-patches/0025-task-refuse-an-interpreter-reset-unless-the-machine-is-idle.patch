@@ -22,10 +22,10 @@ and accepted again once the machine is idle.
  1 file changed, 62 insertions(+)
 
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 65846a8..f7db2f0 100644
+index b2d4a91..42f985ac 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -1216,6 +1216,45 @@ static void emcTaskStopProgress()
+@@ -1269,6 +1269,45 @@ static void emcTaskStopProgress()
      }
  }
  
@@ -71,7 +71,7 @@ index 65846a8..f7db2f0 100644
  /*
    emcTaskPlan()
  
-@@ -1235,6 +1274,18 @@ static int emcTaskPlan(void)
+@@ -1288,6 +1327,18 @@ static int emcTaskPlan(void)
  	type = 0;
      }
  
@@ -90,7 +90,7 @@ index 65846a8..f7db2f0 100644
      // Always display messages
      switch (type) {
      case EMC_OPERATOR_ERROR_TYPE:
-@@ -1273,6 +1324,17 @@ static int emcTaskPlan(void)
+@@ -1326,6 +1377,17 @@ static int emcTaskPlan(void)
          return retval;
      }
  

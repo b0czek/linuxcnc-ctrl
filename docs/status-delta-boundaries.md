@@ -45,7 +45,8 @@ LinuxCNCStat
 |   |-- interpreterErrorCode *
 |   |-- taskPaused *
 |   |-- delayLeft *
-|   `-- queuedMdiCommands *
+|   |-- queuedMdiCommands *
+|   `-- holdWait *
 |-- motion
 |   |-- traj
 |   |   |-- linearUnits *

@@ -19,14 +19,36 @@ while it runs; the close is deferred until it yields or returns, and
 pycall() then returns the unwind status (INTERP_EXIT or an error)
 instead of continuing the unwound call.
 ---
- docs/src/remap/remap.adoc                    | 130 +++++++++
- nc_files/remap_lib/python-stdglue/stdglue.py | 268 ++++++++++++++++++-
- src/emc/rs274ngc/interp_internal.hh          |   3 +
- src/emc/rs274ngc/interp_python.cc            |  60 ++++-
- src/emc/rs274ngc/interp_python.hh            |   7 +
- src/emc/rs274ngc/rs274ngc_pre.cc             |   5 +
- 6 files changed, 470 insertions(+), 3 deletions(-)
+ docs/src/config/python-interface.adoc         |   3 +-
+ docs/src/remap/remap.adoc                     | 130 +++++++++
+ nc_files/remap_lib/python-stdglue/stdglue.py  | 271 +++++++++++++++++-
+ src/emc/nml_intf/emc.hh                       |   3 +-
+ src/emc/rs274ngc/interp_internal.hh           |   7 +
+ src/emc/rs274ngc/interp_python.cc             |  60 +++-
+ src/emc/rs274ngc/interp_python.hh             |   7 +
+ src/emc/rs274ngc/interp_setup.cc              |   1 +
+ src/emc/rs274ngc/interpmodule.cc              |   7 +
+ src/emc/rs274ngc/rs274ngc_pre.cc              |   9 +
+ src/emc/task/emctask.cc                       |  12 +
+ src/emc/task/emctaskmain.cc                   |  43 ++-
+ src/emc/task/task.hh                          |   4 +
+ src/emc/usr_intf/axis/extensions/emcmodule.cc |   1 +
+ 14 files changed, 548 insertions(+), 10 deletions(-)
 
+diff --git a/docs/src/config/python-interface.adoc b/docs/src/config/python-interface.adoc
+index 1c871cf..2131b07 100644
+--- a/docs/src/config/python-interface.adoc
++++ b/docs/src/config/python-interface.adoc
+@@ -219,7 +219,8 @@ see <<python:reading-ini-values,ReadingINI file values>> for an example.
+   another subsystem runs to its end first, and Abort is the way out. One of
+   `HOLD_WAIT_NONE`, `HOLD_WAIT_HOMING` (a queued `G28.2`), `HOLD_WAIT_IO` (a
+   tool change or other I/O command), `HOLD_WAIT_SYSTEM_COMMAND` (a user
+-  `M100`-`M199` program).
++  `M100`-`M199` program), `HOLD_WAIT_EXECUTOR` (a request started by an
++  executor remap).
+ 
+ *interpreter_errcode*:: '(returns integer)' -
+   current RS274NGC interpreter return code. One of
 diff --git a/docs/src/remap/remap.adoc b/docs/src/remap/remap.adoc
 index 75e2a09..642e4c7 100644
 --- a/docs/src/remap/remap.adoc
@@ -169,7 +191,7 @@ index 75e2a09..642e4c7 100644
  
  These wrap a NGC procedure for T__x__ Tool Prepare.
 diff --git a/nc_files/remap_lib/python-stdglue/stdglue.py b/nc_files/remap_lib/python-stdglue/stdglue.py
-index 8457e40..3cd13d2 100644
+index 8457e40..be54d1a 100644
 --- a/nc_files/remap_lib/python-stdglue/stdglue.py
 +++ b/nc_files/remap_lib/python-stdglue/stdglue.py
 @@ -16,6 +16,9 @@
@@ -182,7 +204,7 @@ index 8457e40..3cd13d2 100644
  import emccanon
  from interpreter import *
  from emccanon import MESSAGE
-@@ -40,6 +43,269 @@ def build_hal(self):
+@@ -40,6 +43,272 @@ def build_hal(self):
      except Exception as e:
          print(e)
  
@@ -286,6 +308,9 @@ index 8457e40..3cd13d2 100644
 +                operation.release()
 +                return response
 +
++            # The request has started, so a Stop or Pause lets it run to its
++            # end: this tells task to keep polling while it holds.
++            self.executor_poll_pending = True
 +            emccanon.DWELL(min(_EXECUTOR_POLL_INTERVAL, remaining))
 +            yield INTERP_EXECUTE_FINISH
 +    finally:
@@ -452,14 +477,28 @@ index 8457e40..3cd13d2 100644
  # REMAP=S   prolog=setspeed_prolog  ngc=setspeed epilog=setspeed_epilog
  # exposed parameter: #<speed>
  
-@@ -655,5 +921,3 @@ def tool_probe_m6(self, **words):
+@@ -655,5 +924,3 @@ def tool_probe_m6(self, **words):
          self.set_errormsg("tool_probe_m6 remap error." )
          yield INTERP_ERROR
  
 -
 -
+diff --git a/src/emc/nml_intf/emc.hh b/src/emc/nml_intf/emc.hh
+index d035390..67c8d34 100644
+--- a/src/emc/nml_intf/emc.hh
++++ b/src/emc/nml_intf/emc.hh
+@@ -247,7 +247,8 @@ enum class EMC_TASK_HOLD_WAIT {
+     NONE = 0,
+     HOMING = 1,		// a queued G28.2 homing cycle
+     IO = 2,		// a tool change or other I/O controller command
+-    SYSTEM_COMMAND = 3	// a user M100-M199 program
++    SYSTEM_COMMAND = 3,	// a user M100-M199 program
++    EXECUTOR = 4	// a request started by an executor remap (stdglue)
+ };
+ 
+ // types for motion control
 diff --git a/src/emc/rs274ngc/interp_internal.hh b/src/emc/rs274ngc/interp_internal.hh
-index 210b4db..65197e8 100644
+index 210b4db..692b6e9 100644
 --- a/src/emc/rs274ngc/interp_internal.hh
 +++ b/src/emc/rs274ngc/interp_internal.hh
 @@ -620,6 +620,9 @@ struct pycontext {
@@ -472,6 +511,17 @@ index 210b4db..65197e8 100644
      pycontext_impl *impl;
  };
  
+@@ -797,6 +800,10 @@ struct setup
+   bool kins_by_g43_4;         // G43.4 selected the kinematics, for G49 to undo
+   bool toolchange_flag;       // flag indicating we just had a tool change
+   bool home_flag;             // flag indicating a G28.2 homing cycle just ran
++  // An executor remap (stdglue) polls a request it has started; task keeps
++  // running the remap while a Stop or Pause holds. Task clears it before
++  // each read, and the remap sets it again for as long as it polls.
++  bool executor_poll_pending;
+   int input_index;		// channel queried
+   bool input_digital;		// input queried was digital (false=analog)
+   bool cutter_comp_firstmove; // this is the first comp move
 diff --git a/src/emc/rs274ngc/interp_python.cc b/src/emc/rs274ngc/interp_python.cc
 index e3f8b60..34f6fbc 100644
 --- a/src/emc/rs274ngc/interp_python.cc
@@ -592,11 +642,48 @@ index 3fcf26b..baedeab 100644
      // generator object next method as returned if Python function contained a yield statement
      boost::python::object generator_next; 
  };
+diff --git a/src/emc/rs274ngc/interp_setup.cc b/src/emc/rs274ngc/interp_setup.cc
+index 7ac607b..061952a 100644
+--- a/src/emc/rs274ngc/interp_setup.cc
++++ b/src/emc/rs274ngc/interp_setup.cc
+@@ -121,6 +121,7 @@ setup::setup() :
+     kins_by_g43_4(false),
+     toolchange_flag(0),
+     home_flag(0),
++    executor_poll_pending(false),
+     input_index(0),
+     input_digital(0),
+     cutter_comp_firstmove(0),
+diff --git a/src/emc/rs274ngc/interpmodule.cc b/src/emc/rs274ngc/interpmodule.cc
+index 1597ec1..5fe4623 100644
+--- a/src/emc/rs274ngc/interpmodule.cc
++++ b/src/emc/rs274ngc/interpmodule.cc
+@@ -316,6 +316,12 @@ static inline bool get_speed_override (Interp &interp, int spindle)  {
+ static inline void set_speed_override(Interp &interp, int spindle, bool value)  {
+     interp._setup.speed_override[spindle] = value;
+ }
++static inline bool get_executor_poll_pending (Interp &interp)  {
++    return interp._setup.executor_poll_pending;
++}
++static inline void set_executor_poll_pending(Interp &interp, bool value)  {
++    interp._setup.executor_poll_pending = value;
++}
+ static inline bool get_toolchange_flag (Interp &interp)  {
+     return interp._setup.toolchange_flag;
+ }
+@@ -941,6 +947,7 @@ BOOST_PYTHON_MODULE(interpreter) {
+ 	.add_property("probe_flag", &get_probe_flag, &set_probe_flag)
+ 	.add_property("speed_override", &get_speed_override, &set_speed_override)
+ 	.add_property("toolchange_flag", &get_toolchange_flag, &set_toolchange_flag)
++	.add_property("executor_poll_pending", &get_executor_poll_pending, &set_executor_poll_pending)
+ 	.add_property("u_current", &get_u_current, &set_u_current)
+ 	.add_property("AA_axis_offset", &get_AA_axis_offset, &set_AA_axis_offset)
+ 	.add_property("AA_current", &get_AA_current, &set_AA_current)
 diff --git a/src/emc/rs274ngc/rs274ngc_pre.cc b/src/emc/rs274ngc/rs274ngc_pre.cc
-index 2ea3ba1..dea5749 100644
+index 2ea3ba1..85dd055 100644
 --- a/src/emc/rs274ngc/rs274ngc_pre.cc
 +++ b/src/emc/rs274ngc/rs274ngc_pre.cc
-@@ -1246,6 +1246,10 @@ int Interp::init()
+@@ -1246,7 +1246,12 @@ int Interp::init()
  //_setup.feed_hold set in Interp::synch
  
    // initialization stuff for subroutines and control structures
@@ -605,9 +692,17 @@ index 2ea3ba1..dea5749 100644
 +  for (; _setup.call_level > 0; _setup.call_level--)
 +      _setup.sub_context[_setup.call_level].pystuff.close_generator(INTERP_OK);
    _setup.call_level = 0;
++  _setup.executor_poll_pending = false;
    _setup.call_stack_id = 0;
    _setup.defining_sub = 0;
-@@ -1760,6 +1764,7 @@ int Interp::unwind_call(int status, const char *file, int line, const char *func
+   _setup.skipping_o = NULL;
+@@ -1757,9 +1762,13 @@ int Interp::unwind_call(int status, const char *file, int line, const char *func
+     logDebug("unwind_call: call_level=%d status=%s from %s %s:%d",
+ 	     _setup.call_level, interp_status(status), function, file, line);
+ 
++    // the remap that polled is gone
++    _setup.executor_poll_pending = false;
++
      for(; _setup.call_level > 0; _setup.call_level--) {
  	int i;
  	context * sub = _setup.sub_context + _setup.call_level - 1;
@@ -615,3 +710,156 @@ index 2ea3ba1..dea5749 100644
  	free_named_parameters(&_setup.sub_context[_setup.call_level]);
  	if(sub->subName) {
  	    logDebug("unwind_call leaving sub '%s'", sub->subName);
+diff --git a/src/emc/task/emctask.cc b/src/emc/task/emctask.cc
+index 90cc136..d2634e9 100644
+--- a/src/emc/task/emctask.cc
++++ b/src/emc/task/emctask.cc
+@@ -514,6 +514,18 @@ int emcTaskPlanIsWait()
+     return waitFlag;
+ }
+ 
++bool emcTaskPlanExecutorPollPending()
++{
++    return _is && _is->executor_poll_pending;
++}
++
++void emcTaskPlanClearExecutorPoll()
++{
++    if (_is) {
++        _is->executor_poll_pending = false;
++    }
++}
++
+ int emcTaskPlanClearWait()
+ {
+     waitFlag = 0;
+diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
+index f483726..7156924 100644
+--- a/src/emc/task/emctaskmain.cc
++++ b/src/emc/task/emctaskmain.cc
+@@ -577,7 +577,12 @@ extern int emcTaskMopup();
+ 
+ void readahead_reading(void)
+ {
+-    if (emcStatus->task.stopState != EMC_TASK_STOP_STATE::IDLE) {
++    // While a Stop or Pause holds, only an executor remap polling a request
++    // it has started runs, until the request ends; nothing past it is read.
++    const bool held =
++        emcStatus->task.stopState != EMC_TASK_STOP_STATE::IDLE ||
++        emcStatus->task.interpState == EMC_TASK_INTERP::PAUSED;
++    if (held && !emcTaskPlanExecutorPollPending()) {
+         return;
+     }
+     int readRetval;
+@@ -596,6 +601,11 @@ interpret_again:
+ 			    goto interpret_again;
+ 			 }
+ 		    } else {
++			if (held && !emcTaskPlanExecutorPollPending()) {
++			    return;
++			}
++			// a remap still polling sets it again
++			emcTaskPlanClearExecutorPoll();
+ 			readRetval = emcTaskPlanRead();
+ 			/*! \todo MGS FIXME
+ 			   This if() actually evaluates to if (readRetval != INTERP_OK)...
+@@ -633,8 +643,18 @@ interpret_again:
+ 				// the discarded commands may include a tool
+ 				// offset canon already took on
+ 				CANON_RESYNC_TOOL_OFFSET();
+-				emcAbortCleanup(EMC_ABORT::INTERPRETER_ERROR,
+-						"interpreter error");
++				if (held) {
++				    // An executor request failed while Stop
++				    // or Pause held the program. Held motion
++				    // would never let the program finish, so
++				    // end it like an execution error, which
++				    // also clears the Stop state.
++				    emcStatus->task.execState =
++					EMC_TASK_EXEC::ERROR;
++				} else {
++				    emcAbortCleanup(EMC_ABORT::INTERPRETER_ERROR,
++						    "interpreter error");
++				}
+ 			    } else if (execRetval == -1
+ 				    || execRetval == INTERP_EXIT ) {
+ 				emcStatus->task.interpState =
+@@ -880,6 +900,10 @@ static bool emcTaskStopAllowsIssue(const NMLmsg *cmd)
+         return !reinterpret_cast<const EMC_MOTION_SET_DOUT *>(cmd)->now;
+     case EMC_MOTION_SET_AOUT_TYPE:
+         return !reinterpret_cast<const EMC_MOTION_SET_AOUT *>(cmd)->now;
++    case EMC_TRAJ_DELAY_TYPE:
++    case EMC_TASK_PLAN_SYNCH_TYPE:
++        // The poll of an executor request already under way.
++        return emcTaskPlanExecutorPollPending();
+     default:
+         return false;
+     }
+@@ -1021,6 +1045,9 @@ static void emcTaskStopResume()
+  */
+ static EMC_TASK_HOLD_WAIT emcTaskHoldWait()
+ {
++    if (emcTaskPlanExecutorPollPending()) {
++        return EMC_TASK_HOLD_WAIT::EXECUTOR;
++    }
+     if (emcStatus->task.execState == EMC_TASK_EXEC::WAITING_FOR_HOMING) {
+         return EMC_TASK_HOLD_WAIT::HOMING;
+     }
+@@ -1723,6 +1750,9 @@ static int emcTaskPlan(void)
+ 
+ 		}		// switch (type) in ON, AUTO, PAUSED
+ 
++		// an executor request under way is polled while paused
++		readahead_reading();
++
+ 		break;		// EMC_TASK_INTERP::PAUSED
+ 
+ 	    case EMC_TASK_INTERP::WAITING:
+@@ -3289,7 +3319,8 @@ static int emcTaskExecute(void)
+     case EMC_TASK_EXEC::DONE:
+ 	STEPPING_CHECK();
+ 	if (!emcStatus->motion.traj.queueFull &&
+-	    emcStatus->task.interpState != EMC_TASK_INTERP::PAUSED &&
++	    (emcStatus->task.interpState != EMC_TASK_INTERP::PAUSED ||
++	     emcTaskPlanExecutorPollPending()) &&
+ 	    emcStatus->task.stopState != EMC_TASK_STOP_STATE::STOPPED &&
+ 	    emcStatus->task.stopState != EMC_TASK_STOP_STATE::STARTING) {
+ 	    if (NULL == emcTaskCommand) {
+@@ -3594,7 +3625,9 @@ static int emcTaskExecute(void)
+ 
+     case EMC_TASK_EXEC::WAITING_FOR_DELAY:
+ 	STEPPING_CHECK();
+-	if (emcStatus->task.stopState != EMC_TASK_STOP_STATE::IDLE) {
++	// an executor's poll dwell is not frozen: its request is still running
++	if (emcStatus->task.stopState != EMC_TASK_STOP_STATE::IDLE &&
++		!emcTaskPlanExecutorPollPending()) {
+ 	    if (taskExecDelayStopTime <= 0.0) {
+ 		taskExecDelayStopTime = etime();
+ 	    }
+diff --git a/src/emc/task/task.hh b/src/emc/task/task.hh
+index 79dbeb6..ea3bdc8 100644
+--- a/src/emc/task/task.hh
++++ b/src/emc/task/task.hh
+@@ -39,6 +39,10 @@ int emcTaskSetState(EMC_TASK_STATE state);
+ int emcTaskPlanInit();
+ int emcTaskPlanSetWait();
+ int emcTaskPlanIsWait();
++// An executor remap polls a request it has started (see interp setup
++// executor_poll_pending); cleared before each interpreter read.
++bool emcTaskPlanExecutorPollPending();
++void emcTaskPlanClearExecutorPoll();
+ int emcTaskPlanClearWait();
+ int emcTaskPlanSynch();
+ int emcTaskPlanSetOptionalStop(bool state);
+diff --git a/src/emc/usr_intf/axis/extensions/emcmodule.cc b/src/emc/usr_intf/axis/extensions/emcmodule.cc
+index 6a0b6d7..74edfa0 100644
+--- a/src/emc/usr_intf/axis/extensions/emcmodule.cc
++++ b/src/emc/usr_intf/axis/extensions/emcmodule.cc
+@@ -3425,6 +3425,7 @@ PyMODINIT_FUNC PyInit_linuxcnc(void)
+     PyModule_AddIntConstant(m, "HOLD_WAIT_HOMING", (int)EMC_TASK_HOLD_WAIT::HOMING);
+     PyModule_AddIntConstant(m, "HOLD_WAIT_IO", (int)EMC_TASK_HOLD_WAIT::IO);
+     PyModule_AddIntConstant(m, "HOLD_WAIT_SYSTEM_COMMAND", (int)EMC_TASK_HOLD_WAIT::SYSTEM_COMMAND);
++    PyModule_AddIntConstant(m, "HOLD_WAIT_EXECUTOR", (int)EMC_TASK_HOLD_WAIT::EXECUTOR);
+     PyModule_AddIntConstant(m, "STOP_STOPPING", (int)EMC_TASK_STOP_STATE::STOPPING);
+     PyModule_AddIntConstant(m, "STOP_STOPPED", (int)EMC_TASK_STOP_STATE::STOPPED);
+     PyModule_AddIntConstant(m, "STOP_STARTING", (int)EMC_TASK_STOP_STATE::STARTING);

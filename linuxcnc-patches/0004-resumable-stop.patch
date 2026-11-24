@@ -20,7 +20,7 @@ Ported to v2.10.0-pre2. Differences from the patch on the old base:
 - motion-logger logs EMCMOT_STOP.
 - tests/resumable-stop gains the scenarios dwell-atspeed, homing, homing-interrupted, speed-change-atspeed, queued-feed-atspeed, g33-chain, g95-between-g33, spindle-state and step-resume-stopping, fails if STOPPED is reported while moving, re-runs four scenarios under the trapezoidal planner, and its checkresult now fails when the scenario count is wrong.
 ---
- docs/src/config/python-interface.adoc         |  12 +
+ docs/src/config/python-interface.adoc         |  20 +
  docs/src/gui/halui.adoc                       |   3 +-
  docs/src/man/man1/halui.1.adoc                |   5 +-
  src/emc/motion-logger/motion-logger.c         |   4 +
@@ -28,23 +28,23 @@ Ported to v2.10.0-pre2. Differences from the patch on the old base:
  src/emc/motion/control.c                      |  21 +
  src/emc/motion/motion.c                       |   1 +
  src/emc/motion/motion.h                       |   7 +
- src/emc/nml_intf/emc.cc                       |  24 +
- src/emc/nml_intf/emc.hh                       |  14 +
- src/emc/nml_intf/emc_nml.hh                   |  22 +
- src/emc/nml_intf/emcops.cc                    |   4 +
- src/emc/task/emctaskmain.cc                   | 440 +++++++++++++++++-
+ src/emc/nml_intf/emc.cc                       |  25 +
+ src/emc/nml_intf/emc.hh                       |  23 +
+ src/emc/nml_intf/emc_nml.hh                   |  24 +
+ src/emc/nml_intf/emcops.cc                    |   5 +
+ src/emc/task/emctaskmain.cc                   | 462 +++++++++++++++++-
  src/emc/task/taskintf.cc                      |  67 ++-
- src/emc/tp/tp.c                               | 133 +++++-
+ src/emc/tp/tp.c                               | 133 ++++-
  src/emc/tp/tp_types.h                         |  12 +
- src/emc/usr_intf/axis/extensions/emcmodule.cc |  14 +
+ src/emc/usr_intf/axis/extensions/emcmodule.cc |  19 +
  src/emc/usr_intf/halui.cc                     |   9 +-
- 18 files changed, 812 insertions(+), 25 deletions(-)
+ 18 files changed, 860 insertions(+), 25 deletions(-)
 
 diff --git a/docs/src/config/python-interface.adoc b/docs/src/config/python-interface.adoc
-index 25d5762..fa546b7 100644
+index 25d5762..5153f11 100644
 --- a/docs/src/config/python-interface.adoc
 +++ b/docs/src/config/python-interface.adoc
-@@ -209,6 +209,10 @@ see <<python:reading-ini-values,ReadingINI file values>> for an example.
+@@ -209,6 +209,18 @@ see <<python:reading-ini-values,ReadingINI file values>> for an example.
    current state of RS274NGC interpreter. One of
    INTERP_IDLE, INTERP_READING, INTERP_PAUSED, INTERP_WAITING.
  
@@ -52,10 +52,18 @@ index 25d5762..fa546b7 100644
 +  current resumable Stop state. One of `STOP_IDLE`, `STOP_STOPPING`,
 +  `STOP_STOPPED`, `STOP_STARTING`.
 +
++*hold_wait*:: '(returns integer)' -
++  while a Stop is `STOP_STOPPING` or the program is paused, the operation the
++  hold waits for before the machine holds. An operation already handed to
++  another subsystem runs to its end first, and Abort is the way out. One of
++  `HOLD_WAIT_NONE`, `HOLD_WAIT_HOMING` (a queued `G28.2`), `HOLD_WAIT_IO` (a
++  tool change or other I/O command), `HOLD_WAIT_SYSTEM_COMMAND` (a user
++  `M100`-`M199` program).
++
  *interpreter_errcode*:: '(returns integer)' -
    current RS274NGC interpreter return code. One of
    INTERP_OK, INTERP_EXIT, INTERP_EXECUTE_FINISH, INTERP_ENDFILE,
-@@ -640,6 +644,14 @@ c.tool_offset(toolno, z_offset,  x_offset, diameter, frontangle, backangle, orie
+@@ -640,6 +652,14 @@ c.tool_offset(toolno, z_offset,  x_offset, diameter, frontangle, backangle, orie
  `abort()`::
    send EMC_TASK_ABORT message.
  
@@ -293,7 +301,7 @@ index b98bfc0..1915616 100644
  				/* 1 << (joint-num*2) = ignore neg limit */
  				/* 2 << (joint-num*2) = ignore pos limit */
 diff --git a/src/emc/nml_intf/emc.cc b/src/emc/nml_intf/emc.cc
-index ec54d4e..25e5f5a 100644
+index ec54d4e..27f5172 100644
 --- a/src/emc/nml_intf/emc.cc
 +++ b/src/emc/nml_intf/emc.cc
 @@ -179,6 +179,9 @@ int emcFormat(NMLTYPE type, void *buffer, CMS * cms)
@@ -362,15 +370,16 @@ index ec54d4e..25e5f5a 100644
      cms->update(homed);
  }
  
-@@ -1388,6 +1405,7 @@ void EMC_TASK_STAT::update(CMS * cms)
+@@ -1388,6 +1405,8 @@ void EMC_TASK_STAT::update(CMS * cms)
      cms->update((int *) &state, 1);
      cms->update((int *) &execState, 1);
      cms->update((int *) &interpState, 1);
 +    cms->update((int *) &stopState, 1);
++    cms->update((int *) &holdWait, 1);
      cms->update(callLevel);
      // Send only the frames that are in use.  With the program in the main file
      // that is none, instead of EMC_MAX_CALL_STACK empty frames every cycle.
-@@ -1743,6 +1761,7 @@ void EMC_TRAJ_STAT::update(CMS * cms)
+@@ -1743,6 +1762,7 @@ void EMC_TRAJ_STAT::update(CMS * cms)
      cms->update(queueFull);
      cms->update(id);
      cms->update(paused);
@@ -378,7 +387,7 @@ index ec54d4e..25e5f5a 100644
      cms->update(single_stepping);
      cms->update(scale);
      cms->update(rapid_scale);
-@@ -1905,6 +1924,11 @@ void EMC_TRAJ_PAUSE::update(CMS * cms)
+@@ -1905,6 +1925,11 @@ void EMC_TRAJ_PAUSE::update(CMS * cms)
      EMC_TRAJ_CMD_MSG::update(cms);
  }
  
@@ -391,7 +400,7 @@ index ec54d4e..25e5f5a 100644
  *	NML/CMS Update function for EMC_AUX_STAT_MSG
  *	Automatically generated by NML CodeGen Java Applet.
 diff --git a/src/emc/nml_intf/emc.hh b/src/emc/nml_intf/emc.hh
-index c2f4d1b..f28481b 100644
+index c2f4d1b..d8b6a4b 100644
 --- a/src/emc/nml_intf/emc.hh
 +++ b/src/emc/nml_intf/emc.hh
 @@ -93,6 +93,7 @@ struct PM_CARTESIAN;
@@ -410,7 +419,7 @@ index c2f4d1b..f28481b 100644
  #define EMC_TASK_ABORT_TYPE                          ((NMLTYPE) 503)
  #define EMC_TASK_SET_MODE_TYPE                       ((NMLTYPE) 504)
  #define EMC_TASK_SET_STATE_TYPE                      ((NMLTYPE) 505)
-@@ -228,6 +230,13 @@ enum class EMC_TASK_INTERP {
+@@ -228,6 +230,22 @@ enum class EMC_TASK_INTERP {
      WAITING = 4
  };
  
@@ -421,10 +430,19 @@ index c2f4d1b..f28481b 100644
 +    STARTING = 3
 +};
 +
++// What a Stop or Pause is waiting for before the machine holds: an
++// operation already handed to another subsystem runs to its end first.
++enum class EMC_TASK_HOLD_WAIT {
++    NONE = 0,
++    HOMING = 1,		// a queued G28.2 homing cycle
++    IO = 2,		// a tool change or other I/O controller command
++    SYSTEM_COMMAND = 3	// a user M100-M199 program
++};
++
  // types for motion control
  enum class EMC_TRAJ_MODE {
      FREE = 1,	// independent-axis motion,
-@@ -369,6 +378,7 @@ extern int emcTrajEnable();
+@@ -369,6 +387,7 @@ extern int emcTrajEnable();
  extern int emcTrajDisable();
  extern int emcTrajAbort();
  extern int emcTrajPause();
@@ -432,7 +450,7 @@ index c2f4d1b..f28481b 100644
  extern int emcTrajReverse();
  extern int emcTrajForward();
  extern int emcTrajStep();
-@@ -436,6 +446,10 @@ extern int emcSpindleSpeed(int spindle, double speed, double factor, double xoff
+@@ -436,6 +455,10 @@ extern int emcSpindleSpeed(int spindle, double speed, double factor, double xoff
  extern int emcSpindleOn(int spindle, double speed, double factor, double xoffset,int wait_for_atspeed = 1);
  extern int emcSpindleOrient(int spindle, double orientation, int direction);
  extern int emcSpindleOff(int spindle, int wait_for_atspeed = 0);
@@ -444,7 +462,7 @@ index c2f4d1b..f28481b 100644
  extern int emcSpindleDecrease(int spindle);
  extern int emcSpindleConstant(int spindle);
 diff --git a/src/emc/nml_intf/emc_nml.hh b/src/emc/nml_intf/emc_nml.hh
-index 3d8c617..0d4ab6c 100644
+index 3d8c617..239d812 100644
 --- a/src/emc/nml_intf/emc_nml.hh
 +++ b/src/emc/nml_intf/emc_nml.hh
 @@ -704,6 +704,15 @@ class EMC_TRAJ_PAUSE:public EMC_TRAJ_CMD_MSG {
@@ -503,16 +521,18 @@ index 3d8c617..0d4ab6c 100644
  class EMC_TASK_ABORT:public EMC_TASK_CMD_MSG {
    public:
      EMC_TASK_ABORT()
-@@ -1516,6 +1537,7 @@ class EMC_TASK_STAT:public EMC_TASK_STAT_MSG {
+@@ -1516,6 +1537,9 @@ class EMC_TASK_STAT:public EMC_TASK_STAT_MSG {
  
      EMC_TASK_EXEC execState;	// EMC_DONE,WAITING_FOR_MOTION, etc.
      EMC_TASK_INTERP interpState;	// EMC_IDLE,READING,PAUSED,WAITING
 +    EMC_TASK_STOP_STATE stopState;
++    // While STOPPING or paused: the operation the hold waits for.
++    EMC_TASK_HOLD_WAIT holdWait;
      // Subroutine depth of the move motion is executing -- 0 if not in a
      // subroutine.  Like motionLine, this lags the interpreter, which reads ahead.
      int callLevel;
 diff --git a/src/emc/nml_intf/emcops.cc b/src/emc/nml_intf/emcops.cc
-index ed6a962..a6b2345 100644
+index ed6a962..6010ecb 100644
 --- a/src/emc/nml_intf/emcops.cc
 +++ b/src/emc/nml_intf/emcops.cc
 @@ -78,6 +78,7 @@ EMC_TRAJ_STAT::EMC_TRAJ_STAT()
@@ -523,15 +543,16 @@ index ed6a962..a6b2345 100644
      single_stepping(false),
      scale(0.0),
      rapid_scale(0.0),
-@@ -137,6 +138,7 @@ EMC_TASK_STAT::EMC_TASK_STAT()
+@@ -137,6 +138,8 @@ EMC_TASK_STAT::EMC_TASK_STAT()
      state(EMC_TASK_STATE::ESTOP),
      execState(EMC_TASK_EXEC::DONE),
      interpState(EMC_TASK_INTERP::IDLE),
 +    stopState(EMC_TASK_STOP_STATE::IDLE),
++    holdWait(EMC_TASK_HOLD_WAIT::NONE),
      callLevel(0),
      callStack{},
      motionLine(0),
-@@ -203,6 +205,7 @@ EMC_SPINDLE_STAT::EMC_SPINDLE_STAT()
+@@ -203,6 +206,7 @@ EMC_SPINDLE_STAT::EMC_SPINDLE_STAT()
      spindle_scale(1.0),
      css_maximum(0.0),
      css_factor(1.0),
@@ -539,7 +560,7 @@ index ed6a962..a6b2345 100644
      state(0),
      direction(0),
      brake(1),
-@@ -211,6 +214,7 @@ EMC_SPINDLE_STAT::EMC_SPINDLE_STAT()
+@@ -211,6 +215,7 @@ EMC_SPINDLE_STAT::EMC_SPINDLE_STAT()
      orient_state(0),
      orient_fault(0),
      spindle_override_enabled(OFF),
@@ -548,10 +569,10 @@ index ed6a962..a6b2345 100644
  {
  }
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index a3b5256..15aac38 100644
+index a3b5256..8fff91d 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -124,6 +124,40 @@ static int emcTaskEager = 0;
+@@ -124,6 +124,39 @@ static int emcTaskEager = 0;
  static int no_force_homing = 0; // forces the user to home first before allowing MDI and Program run
  //can be overridden by [TRAJ]NO_FORCE_HOMING=1
  
@@ -580,7 +601,6 @@ index a3b5256..15aac38 100644
 +static SpindleOrientRequest active_spindle_orient_requests[EMCMOT_MAX_SPINDLES] = {};
 +static bool stop_mist = false;
 +static bool stop_flood = false;
-+static bool stop_resume_latched = false;
 +static bool stop_single_step = false;
 +static bool stop_outputs_saved = false;
 +static double taskExecDelayStopTime = 0.0;
@@ -592,7 +612,7 @@ index a3b5256..15aac38 100644
  // delay counter
  static double taskExecDelayTimeout = 0.0;
  
-@@ -414,6 +448,10 @@ static double homingIssueTime = 0.0;     // etime() when issued, for the start-t
+@@ -414,6 +447,10 @@ static double homingIssueTime = 0.0;     // etime() when issued, for the start-t
  // vary widely in duration, same as a GUI just watching .homing/.homed).
  static const double HOMING_START_TIMEOUT = 2.0;
  static EMC_TRAJ_MODE homingPriorMode = EMC_TRAJ_MODE::FREE; // mode to restore on success
@@ -603,7 +623,7 @@ index a3b5256..15aac38 100644
  // True only while emcTaskExecute() is issuing a command taken off the
  // interp_list. emcTaskIssueCommand() serves both that queued path and the
  // immediate commands emcTaskPlan() sends straight through (the GUI's Home
-@@ -522,6 +560,9 @@ extern int emcTaskMopup();
+@@ -522,6 +559,9 @@ extern int emcTaskMopup();
  
  void readahead_reading(void)
  {
@@ -613,7 +633,7 @@ index a3b5256..15aac38 100644
      int readRetval;
      int execRetval;
  
-@@ -737,6 +778,9 @@ static void mdi_execute_hook(void)
+@@ -737,6 +777,9 @@ static void mdi_execute_hook(void)
  
  void readahead_waiting(void)
  {
@@ -623,7 +643,7 @@ index a3b5256..15aac38 100644
  	// now handle call logic
  	// check for subsystems done
  	if (interp_list.len() == 0 &&
-@@ -781,6 +825,275 @@ static bool allow_while_idle_type() {
+@@ -781,6 +824,289 @@ static bool allow_while_idle_type() {
      return 0;
  }
  
@@ -692,7 +712,6 @@ index a3b5256..15aac38 100644
 +{
 +    bool was_active = emcStatus &&
 +        emcStatus->task.stopState != EMC_TASK_STOP_STATE::IDLE;
-+    stop_resume_latched = false;
 +    stop_single_step = false;
 +    stop_outputs_saved = false;
 +    taskExecDelayStopTime = 0.0;
@@ -724,14 +743,12 @@ index a3b5256..15aac38 100644
 +}
 +
 +/*
-+ * A second Stop, or a Pause, while Resume is pending cancels it: a Resume
-+ * latched during STOPPING is dropped, and STARTING returns to STOPPED with
-+ * the outputs Resume switched back on off again. The program stays stopped
-+ * until the next Resume, Run or Single Step.
++ * A second Stop, or a Pause, while Resume is pending cancels it: STARTING
++ * returns to STOPPED with the outputs Resume switched back on off again. The
++ * program stays stopped until the next Resume, Run or Single Step.
 + */
 +static void emcTaskStopCancelResume()
 +{
-+    stop_resume_latched = false;
 +    stop_single_step = false;
 +    if (emcStatus->task.stopState == EMC_TASK_STOP_STATE::STARTING) {
 +        emcTaskStopDisableSavedOutputs();
@@ -741,7 +758,6 @@ index a3b5256..15aac38 100644
 +
 +static void emcTaskStopResume()
 +{
-+    stop_resume_latched = false;
 +    if (!stop_outputs_saved) {
 +        return;
 +    }
@@ -777,19 +793,40 @@ index a3b5256..15aac38 100644
 +    emcStatus->task.stopState = EMC_TASK_STOP_STATE::STARTING;
 +}
 +
++/*
++ * What a Stop or Pause waits for. An operation task has already handed to
++ * another subsystem runs to its end before the machine holds, as an M
++ * function runs to its completion signal on other controls, and only then
++ * does Stop switch spindle and coolant off. None of these waits has a
++ * timeout of its own; Abort, E-stop and Machine Off end them.
++ *
++ * A queued G28.2 homing cycle cannot be paused and resumed part way. Motion
++ * is dipped into FREE meanwhile and may report a stopped coordinated planner
++ * long before homing ends. Test the exec state, not homingWaiting: Abort,
++ * E-stop, machine off and mode changes leave that flag set when they end the
++ * wait.
++ */
++static EMC_TASK_HOLD_WAIT emcTaskHoldWait()
++{
++    if (emcStatus->task.execState == EMC_TASK_EXEC::WAITING_FOR_HOMING) {
++        return EMC_TASK_HOLD_WAIT::HOMING;
++    }
++    if (emcStatus->task.execState == EMC_TASK_EXEC::WAITING_FOR_SYSTEM_CMD) {
++        return EMC_TASK_HOLD_WAIT::SYSTEM_COMMAND;
++    }
++    if (emcStatus->io.status == RCS_STATUS::EXEC) {
++        return EMC_TASK_HOLD_WAIT::IO;
++    }
++    return EMC_TASK_HOLD_WAIT::NONE;
++}
++
 +static void emcTaskStopProgress()
 +{
 +    switch (emcStatus->task.stopState) {
 +    case EMC_TASK_STOP_STATE::STOPPING: {
-+        /*
-+         * A queued G28.2 homing cycle cannot be paused and resumed part way,
-+         * so, like position-synchronized motion, it runs to completion before
-+         * Stop is reached. Motion is dipped into FREE meanwhile and may report
-+         * a stopped coordinated planner long before homing ends. Test the
-+         * exec state, not homingWaiting: Abort, E-stop, machine off and mode
-+         * changes leave that flag set when they end the wait.
-+         */
-+        if (emcStatus->task.execState == EMC_TASK_EXEC::WAITING_FOR_HOMING ||
++        // Like position-synchronized motion, an operation already under way
++        // runs to its end before Stop is reached.
++        if (emcTaskHoldWait() != EMC_TASK_HOLD_WAIT::NONE ||
 +                !emcStatus->motion.traj.stopped) {
 +            return;
 +        }
@@ -839,9 +876,6 @@ index a3b5256..15aac38 100644
 +            return;
 +        }
 +        emcStatus->task.stopState = EMC_TASK_STOP_STATE::STOPPED;
-+        if (stop_resume_latched) {
-+            emcTaskStopResume();
-+        }
 +        return;
 +    }
 +
@@ -899,7 +933,7 @@ index a3b5256..15aac38 100644
  /*
    emcTaskPlan()
  
-@@ -809,6 +1122,29 @@ static int emcTaskPlan(void)
+@@ -809,6 +1135,33 @@ static int emcTaskPlan(void)
  	return retval;
      }
  
@@ -911,6 +945,12 @@ index a3b5256..15aac38 100644
 +            (type == EMC_TASK_PLAN_RUN_TYPE ||
 +             type == EMC_TASK_PLAN_RESUME_TYPE ||
 +             type == EMC_TASK_PLAN_STEP_TYPE)) {
++        if (emcStatus->task.stopState == EMC_TASK_STOP_STATE::STOPPING) {
++            // Not remembered for later: the operator resumes once the
++            // machine has stopped, knowing it is safe to.
++            emcOperatorError(_("Can't resume while the program is stopping; wait until it has stopped"));
++            return -1;
++        }
 +        stop_single_step = type == EMC_TASK_PLAN_STEP_TYPE;
 +        if (stop_single_step) {
 +            emcTaskStepInterpreter();
@@ -918,9 +958,7 @@ index a3b5256..15aac38 100644
 +            // Also leaves single-step mode entered by an earlier Step.
 +            emcTaskResumeInterpreter();
 +        }
-+        if (emcStatus->task.stopState == EMC_TASK_STOP_STATE::STOPPING) {
-+            stop_resume_latched = true;
-+        } else if (emcStatus->task.stopState == EMC_TASK_STOP_STATE::STOPPED) {
++        if (emcStatus->task.stopState == EMC_TASK_STOP_STATE::STOPPED) {
 +            emcTaskStopResume();
 +        }
 +        return 0;
@@ -929,7 +967,7 @@ index a3b5256..15aac38 100644
      // handle any new command
      switch (emcStatus->task.state) {
      case EMC_TASK_STATE::OFF:
-@@ -1734,6 +2070,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -1734,6 +2087,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	    // found to have been rejected), invisibly to the task-level
  	    // MDI/AUTO/MANUAL state.
  	    homingPriorMode = emcStatus->motion.traj.mode;
@@ -937,7 +975,7 @@ index a3b5256..15aac38 100644
  	    if (homingPriorMode != EMC_TRAJ_MODE::FREE) {
  		emcTrajSetMode(EMC_TRAJ_MODE::FREE);
  	    }
-@@ -1937,6 +2274,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -1937,6 +2291,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	retval = emcTrajPause();
  	break;
  
@@ -949,7 +987,7 @@ index a3b5256..15aac38 100644
      case EMC_TRAJ_RESUME_TYPE:
  	emcStatus->task.task_paused = 0;
  	retval = emcTrajResume();
-@@ -2039,6 +2381,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2039,6 +2398,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_SPINDLE_WAIT_ORIENT_COMPLETE_TYPE:
  	wait_spindle_orient_complete_msg = reinterpret_cast<EMC_SPINDLE_WAIT_ORIENT_COMPLETE *>(cmd);
@@ -961,7 +999,7 @@ index a3b5256..15aac38 100644
  	taskExecDelayTimeout = etime() + wait_spindle_orient_complete_msg->timeout;
  	break;
  
-@@ -2099,6 +2446,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2099,6 +2463,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_SPINDLE_ORIENT_TYPE:
  	spindle_orient_msg = reinterpret_cast<EMC_SPINDLE_ORIENT *>(cmd);
@@ -976,7 +1014,7 @@ index a3b5256..15aac38 100644
  	retval = emcSpindleOrient(spindle_orient_msg->spindle, spindle_orient_msg->orientation,
  			spindle_orient_msg->mode);
  	break;
-@@ -2191,7 +2546,50 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2191,7 +2563,49 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
  	// task commands
  
@@ -1003,7 +1041,6 @@ index a3b5256..15aac38 100644
 +
 +        switch (emcStatus->task.stopState) {
 +        case EMC_TASK_STOP_STATE::IDLE:
-+            stop_resume_latched = false;
 +            stop_single_step = false;
 +            stop_outputs_saved = false;
 +            emcStatus->task.stopState = EMC_TASK_STOP_STATE::STOPPING;
@@ -1027,7 +1064,7 @@ index a3b5256..15aac38 100644
  	// abort everything
  	emcTaskAbort();
  	// KLUDGE call motion abort before state restore to make absolutely sure no
-@@ -2215,6 +2613,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2215,6 +2629,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	    mode_msg->mode != EMC_TASK_MODE::AUTO) {
  	    emcOperatorError(_("Can't switch mode while mode is AUTO and interpreter is not IDLE"));
  	} else { // we can honour the modeswitch
@@ -1037,7 +1074,7 @@ index a3b5256..15aac38 100644
  	    if (mode_msg->mode == EMC_TASK_MODE::MANUAL &&
  		emcStatus->task.mode != EMC_TASK_MODE::MANUAL) {
  		// leaving auto or mdi mode for manual
-@@ -2259,6 +2660,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2259,6 +2676,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_TASK_SET_STATE_TYPE:
  	state_msg = reinterpret_cast<EMC_TASK_SET_STATE *>(cmd);
@@ -1047,7 +1084,7 @@ index a3b5256..15aac38 100644
  	retval = emcTaskSetState(state_msg->state);
  	break;
  
-@@ -2451,6 +2855,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2451,6 +2871,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	break;
  
      case EMC_TASK_PLAN_PAUSE_TYPE:
@@ -1055,7 +1092,7 @@ index a3b5256..15aac38 100644
  	emcTrajPause();
  	if (emcStatus->task.interpState != EMC_TASK_INTERP::PAUSED) {
  	    interpResumeState = emcStatus->task.interpState;
-@@ -2484,11 +2889,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2484,11 +2905,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_TASK_PLAN_RESUME_TYPE:
  	emcTrajResume();
@@ -1068,7 +1105,7 @@ index a3b5256..15aac38 100644
  	retval = 0;
  	break;
  
-@@ -2701,6 +3103,7 @@ static int emcTaskExecute(void)
+@@ -2701,6 +3119,7 @@ static int emcTaskExecute(void)
  
      switch (emcStatus->task.execState) {
      case EMC_TASK_EXEC::ERROR:
@@ -1076,7 +1113,7 @@ index a3b5256..15aac38 100644
  
  	/*! \todo FIXME-- duplicate code for abort,
  	   also near end of main, when aborting on subordinate errors,
-@@ -2746,7 +3149,9 @@ static int emcTaskExecute(void)
+@@ -2746,7 +3165,9 @@ static int emcTaskExecute(void)
      case EMC_TASK_EXEC::DONE:
  	STEPPING_CHECK();
  	if (!emcStatus->motion.traj.queueFull &&
@@ -1087,7 +1124,7 @@ index a3b5256..15aac38 100644
  	    if (NULL == emcTaskCommand) {
  		// need a new command
  		emcTaskCommand = interp_list.get();
-@@ -2767,7 +3172,7 @@ static int emcTaskExecute(void)
+@@ -2767,7 +3188,7 @@ static int emcTaskExecute(void)
  			emcStatus->task.execState = emcTaskCheckPreconditions(emcTaskCommand.get());
  		    }
  		}
@@ -1096,7 +1133,7 @@ index a3b5256..15aac38 100644
  		// have an outstanding command
  		// This is the one emcTaskIssueCommand() call site followed by
  		// emcTaskCheckPostconditions(), i.e. the only one whose commands
-@@ -3040,6 +3445,18 @@ static int emcTaskExecute(void)
+@@ -3040,6 +3461,18 @@ static int emcTaskExecute(void)
  
      case EMC_TASK_EXEC::WAITING_FOR_DELAY:
  	STEPPING_CHECK();
@@ -1115,7 +1152,7 @@ index a3b5256..15aac38 100644
  	// check if delay has passed
  	emcStatus->task.delayLeft = taskExecDelayTimeout - etime();
  	if (etime() >= taskExecDelayTimeout) {
-@@ -3626,6 +4043,7 @@ int main(int argc, char *argv[])
+@@ -3626,6 +4059,7 @@ int main(int argc, char *argv[])
  	prev_traj_enabled = emcStatus->motion.traj.enabled;
  	// synchronize subordinate states
  	if (emcStatus->io.aux.estop) {
@@ -1123,7 +1160,7 @@ index a3b5256..15aac38 100644
  	    if (emcStatus->motion.traj.enabled) {
  		emcTrajDisable();
  		emcTaskAbort();
-@@ -3707,6 +4125,7 @@ int main(int argc, char *argv[])
+@@ -3707,6 +4141,7 @@ int main(int argc, char *argv[])
  	    // 	emcOperatorError("wait for orient complete timed out");
  	    // }
  
@@ -1131,7 +1168,7 @@ index a3b5256..15aac38 100644
              // abort everything
              emcTaskAbort();
              emcIoAbort(EMC_ABORT::MOTION_OR_IO_RCS_ERROR);
-@@ -3742,6 +4161,12 @@ int main(int argc, char *argv[])
+@@ -3742,6 +4177,18 @@ int main(int argc, char *argv[])
  	    emcTaskQueueTaskPlanSynchCmd();
  	}
  
@@ -1140,11 +1177,17 @@ index a3b5256..15aac38 100644
 +        } else {
 +            emcTaskStopProgress();
 +        }
++        emcStatus->task.holdWait =
++            emcStatus->task.state == EMC_TASK_STATE::ON &&
++            (emcStatus->task.stopState == EMC_TASK_STOP_STATE::STOPPING ||
++             (emcStatus->task.stopState == EMC_TASK_STOP_STATE::IDLE &&
++              emcStatus->task.interpState == EMC_TASK_INTERP::PAUSED))
++            ? emcTaskHoldWait() : EMC_TASK_HOLD_WAIT::NONE;
 +
  	// update task-specific status
  	emcTaskUpdate(&emcStatus->task);
  
-@@ -3762,6 +4187,9 @@ int main(int argc, char *argv[])
+@@ -3762,6 +4209,9 @@ int main(int argc, char *argv[])
  	    emcStatus->io.status == RCS_STATUS::ERROR) {
  	    emcStatus->status = RCS_STATUS::ERROR;
  	    emcStatus->task.status = RCS_STATUS::ERROR;
@@ -1504,18 +1547,19 @@ index 0e9ab84..d11e695 100644
  
  
 diff --git a/src/emc/usr_intf/axis/extensions/emcmodule.cc b/src/emc/usr_intf/axis/extensions/emcmodule.cc
-index d242bd5..13069fb 100644
+index d242bd5..9261f61 100644
 --- a/src/emc/usr_intf/axis/extensions/emcmodule.cc
 +++ b/src/emc/usr_intf/axis/extensions/emcmodule.cc
-@@ -1138,6 +1138,7 @@ static PyMemberDef Stat_members[] = {
+@@ -1138,6 +1138,8 @@ static PyMemberDef Stat_members[] = {
      },
      { "exec_state", T_INT, O(task.execState), READONLY, NULL},
      { "interp_state", T_INT, O(task.interpState), READONLY, NULL},
 +    { "stop_state", T_INT, O(task.stopState), READONLY, NULL},
++    { "hold_wait", T_INT, O(task.holdWait), READONLY, NULL},
      { "call_level", T_INT, O(task.callLevel), READONLY, NULL},
      { "read_line", T_INT, O(task.readLine), READONLY, NULL},
      { "motion_line", T_INT, O(task.motionLine), READONLY, NULL},
-@@ -2003,6 +2004,13 @@ static PyObject *emcabort(pyCommandChannel *s, PyObject * /*o*/) {
+@@ -2003,6 +2005,13 @@ static PyObject *emcabort(pyCommandChannel *s, PyObject * /*o*/) {
      return Py_None;
  }
  
@@ -1529,7 +1573,7 @@ index d242bd5..13069fb 100644
  static PyObject *override_limits(pyCommandChannel *s, PyObject * /*o*/) {
      EMC_JOINT_OVERRIDE_LIMITS m;
      m.joint = 0; // same number for all
-@@ -2405,6 +2413,7 @@ static PyMethodDef Command_methods[] = {
+@@ -2405,6 +2414,7 @@ static PyMethodDef Command_methods[] = {
      {"brake", (PyCFunction)brake, METH_VARARGS, NULL},
      {"load_tool_table", (PyCFunction)load_tool_table, METH_NOARGS, NULL},
      {"abort", (PyCFunction)emcabort, METH_NOARGS, NULL},
@@ -1537,11 +1581,15 @@ index d242bd5..13069fb 100644
      {"task_plan_synch", (PyCFunction)task_plan_synch, METH_NOARGS, NULL},
      {"override_limits", (PyCFunction)override_limits, METH_NOARGS, NULL},
      {"home", (PyCFunction)home, METH_VARARGS,
-@@ -3383,6 +3392,11 @@ PyMODINIT_FUNC PyInit_linuxcnc(void)
+@@ -3383,6 +3393,15 @@ PyMODINIT_FUNC PyInit_linuxcnc(void)
      PyModule_AddIntConstant(m, "INTERP_PAUSED", (int)EMC_TASK_INTERP::PAUSED);
      PyModule_AddIntConstant(m, "INTERP_WAITING", (int)EMC_TASK_INTERP::WAITING);
  
 +    PyModule_AddIntConstant(m, "STOP_IDLE", (int)EMC_TASK_STOP_STATE::IDLE);
++    PyModule_AddIntConstant(m, "HOLD_WAIT_NONE", (int)EMC_TASK_HOLD_WAIT::NONE);
++    PyModule_AddIntConstant(m, "HOLD_WAIT_HOMING", (int)EMC_TASK_HOLD_WAIT::HOMING);
++    PyModule_AddIntConstant(m, "HOLD_WAIT_IO", (int)EMC_TASK_HOLD_WAIT::IO);
++    PyModule_AddIntConstant(m, "HOLD_WAIT_SYSTEM_COMMAND", (int)EMC_TASK_HOLD_WAIT::SYSTEM_COMMAND);
 +    PyModule_AddIntConstant(m, "STOP_STOPPING", (int)EMC_TASK_STOP_STATE::STOPPING);
 +    PyModule_AddIntConstant(m, "STOP_STOPPED", (int)EMC_TASK_STOP_STATE::STOPPED);
 +    PyModule_AddIntConstant(m, "STOP_STARTING", (int)EMC_TASK_STOP_STATE::STARTING);

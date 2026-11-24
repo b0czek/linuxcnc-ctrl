@@ -220,6 +220,71 @@ elif scenario == "readahead":
     assert_released(prefix)
     wait_interp_idle("program did not finish after the executor request")
 
+elif scenario in ("stop", "pause"):
+    # A request already started runs to its end while Stop or Pause holds;
+    # the program reads nothing past the remap until Resume.
+    command.mode(linuxcnc.MODE_AUTO)
+    wait_complete("machine did not enter AUTO")
+    command.program_open(os.path.join(os.getcwd(), "hold.ngc"))
+    wait_complete("program did not open")
+    command.auto(linuxcnc.AUTO_RUN, 0)
+    prefix, request_id = wait_request("chuck", 0)
+    if scenario == "stop":
+        command.program_stop()
+        holding = lambda: status.stop_state == linuxcnc.STOP_STOPPING
+    else:
+        command.auto(linuxcnc.AUTO_PAUSE)
+        holding = lambda: status.interp_state == linuxcnc.INTERP_PAUSED
+    wait_for(
+        lambda: holding() and status.hold_wait == linuxcnc.HOLD_WAIT_EXECUTOR,
+        "%s did not wait for the executor request" % scenario,
+    )
+    time.sleep(0.3)
+    if not hal.get_value(prefix + "request") or hal.get_value(prefix + "cancel"):
+        fail("%s ended the executor request" % scenario)
+    respond(prefix, request_id, 4, 0)
+    assert_released(prefix)
+    if scenario == "stop":
+        wait_for(
+            lambda: status.stop_state == linuxcnc.STOP_STOPPED,
+            "Stop did not complete after the executor request",
+        )
+    else:
+        wait_for(
+            lambda: status.hold_wait == linuxcnc.HOLD_WAIT_NONE
+            and status.interp_state == linuxcnc.INTERP_PAUSED,
+            "Pause did not hold after the executor request",
+        )
+    time.sleep(0.3)
+    status.poll()
+    if abs(status.position[0]) > 0.001:
+        fail("%s: program continued past the executor remap" % scenario)
+    command.auto(linuxcnc.AUTO_RESUME)
+    wait_for(
+        lambda: status.interp_state == linuxcnc.INTERP_IDLE
+        and abs(status.position[0] - 2.0) < 0.001,
+        "program did not finish after Resume",
+    )
+
+elif scenario == "stop-timeout":
+    # The request keeps its timeout while Stop waits for it; a timeout ends
+    # the program as usual.
+    command.mode(linuxcnc.MODE_AUTO)
+    wait_complete("machine did not enter AUTO")
+    command.program_open(os.path.join(os.getcwd(), "hold-timeout.ngc"))
+    wait_complete("program did not open")
+    command.auto(linuxcnc.AUTO_RUN, 0)
+    prefix, unused_request_id = wait_request("chuck", 1)
+    command.program_stop()
+    wait_error("executor 'chuck': timed out")
+    wait_for(
+        lambda: status.stop_state == linuxcnc.STOP_IDLE
+        and status.interp_state == linuxcnc.INTERP_IDLE,
+        "timeout during Stop did not end the program",
+    )
+    if abs(status.position[0]) > 0.001:
+        fail("program continued after the executor timed out")
+
 else:
     fail("unknown executor scenario %s" % scenario)
 

@@ -32,7 +32,7 @@ gain the availability configuration and reordered ABORT, as in the
 other motion-logger tests.
 ---
  docs/src/config/ini-config.adoc               |  33 +
- docs/src/config/python-interface.adoc         |  26 +
+ docs/src/config/python-interface.adoc         |  29 +-
  docs/src/man/man9/motion.9.adoc               |  26 +
  src/emc/ini/inijoint.cc                       |  36 +-
  src/emc/ini/inispindle.cc                     |  29 +
@@ -46,19 +46,19 @@ other motion-logger tests.
  src/emc/motion/motion.c                       |  19 +
  src/emc/motion/motion.h                       |  66 +-
  src/emc/nml_intf/emc.cc                       |  29 +
- src/emc/nml_intf/emc.hh                       |  16 +
+ src/emc/nml_intf/emc.hh                       |  19 +-
  src/emc/nml_intf/emc_nml.hh                   |  29 +
  src/emc/nml_intf/emcops.cc                    |  10 +-
  src/emc/task/emctask.cc                       |   1 +
- src/emc/task/emctaskmain.cc                   | 295 ++++++++-
+ src/emc/task/emctaskmain.cc                   | 308 +++++++++-
  src/emc/task/task.hh                          |   1 +
  src/emc/task/taskintf.cc                      | 112 +++-
- src/emc/usr_intf/axis/extensions/emcmodule.cc |  24 +
+ src/emc/usr_intf/axis/extensions/emcmodule.cc |  25 +
  .../expected.motion-logger                    |  17 +-
  .../basic/expected.builtin-startup.in         |  16 +-
  .../mountaindew/expected.motion-logger        |  11 +-
  .../expected.motion-logger.in                 |   9 +-
- 27 files changed, 1703 insertions(+), 102 deletions(-)
+ 27 files changed, 1721 insertions(+), 104 deletions(-)
 
 diff --git a/docs/src/config/ini-config.adoc b/docs/src/config/ini-config.adoc
 index 2d7a99e..e93f55a 100644
@@ -112,10 +112,20 @@ index 2d7a99e..e93f55a 100644
  [[sub:ini:sec:emcio]]
  === [EMCIO] Section(((INI File,Sections,[EMCIO] Section)))
 diff --git a/docs/src/config/python-interface.adoc b/docs/src/config/python-interface.adoc
-index 5355172..82db3c9 100644
+index 2131b07..08e75bd 100644
 --- a/docs/src/config/python-interface.adoc
 +++ b/docs/src/config/python-interface.adoc
-@@ -446,6 +446,9 @@ print("Joint 1 homed: ", s.joint[1]["homed"])
+@@ -220,7 +220,8 @@ see <<python:reading-ini-values,ReadingINI file values>> for an example.
+   `HOLD_WAIT_NONE`, `HOLD_WAIT_HOMING` (a queued `G28.2`), `HOLD_WAIT_IO` (a
+   tool change or other I/O command), `HOLD_WAIT_SYSTEM_COMMAND` (a user
+   `M100`-`M199` program), `HOLD_WAIT_EXECUTOR` (a request started by an
+-  executor remap).
++  executor remap), `HOLD_WAIT_AVAILABILITY` (a joint or spindle availability
++  handshake waiting for its acknowledgment).
+ 
+ *interpreter_errcode*:: '(returns integer)' -
+   current RS274NGC interpreter return code. One of
+@@ -455,6 +456,9 @@ print("Joint 1 homed: ", s.joint[1]["homed"])
  
  For each joint, the following dictionary keys are available:
  
@@ -125,7 +135,7 @@ index 5355172..82db3c9 100644
  *backlash*:: '(returns float)' -
    Backlash in machine units. configuration parameter, reflects `[JOINT___n__]BACKLASH`.
  
-@@ -520,6 +523,9 @@ For each joint, the following dictionary keys are available:
+@@ -529,6 +533,9 @@ For each joint, the following dictionary keys are available:
  [[sec:the-spindle-dictionary]]
  === The `spindle` dictionary
  
@@ -135,7 +145,7 @@ index 5355172..82db3c9 100644
  *brake*:: '(returns integer)' -
    value of the spindle brake flag.
  
-@@ -765,6 +771,26 @@ c.tool_offset(toolno, z_offset,  x_offset, diameter, frontangle, backangle, orie
+@@ -774,6 +781,26 @@ c.tool_offset(toolno, z_offset,  x_offset, diameter, frontangle, backangle, orie
  `set_optional_stop(int)`::
    set optional stop on/off
  
@@ -1994,7 +2004,7 @@ index ad391e1..bed4351 100644
                             move while overriding limits */
      TP_STRUCT coord_tp; /* coordinated mode planner */
 diff --git a/src/emc/nml_intf/emc.cc b/src/emc/nml_intf/emc.cc
-index ce4110e..f70a5e0 100644
+index 61fa3b6..54d973c 100644
 --- a/src/emc/nml_intf/emc.cc
 +++ b/src/emc/nml_intf/emc.cc
 @@ -59,6 +59,9 @@ int emcFormat(NMLTYPE type, void *buffer, CMS * cms)
@@ -2076,7 +2086,7 @@ index ce4110e..f70a5e0 100644
  
  /*
 diff --git a/src/emc/nml_intf/emc.hh b/src/emc/nml_intf/emc.hh
-index d445ee8..ba2bd2f 100644
+index 67c8d34..94d6a19 100644
 --- a/src/emc/nml_intf/emc.hh
 +++ b/src/emc/nml_intf/emc.hh
 @@ -74,6 +74,7 @@ struct PM_CARTESIAN;
@@ -2095,7 +2105,17 @@ index d445ee8..ba2bd2f 100644
  
  #define EMC_SPINDLE_STAT_TYPE                        ((NMLTYPE) 1399)
  
-@@ -332,6 +334,11 @@ extern int emcJointSetMaxAcceleration(int joint, double acc);
+@@ -248,7 +250,8 @@ enum class EMC_TASK_HOLD_WAIT {
+     HOMING = 1,		// a queued G28.2 homing cycle
+     IO = 2,		// a tool change or other I/O controller command
+     SYSTEM_COMMAND = 3,	// a user M100-M199 program
+-    EXECUTOR = 4	// a request started by an executor remap (stdglue)
++    EXECUTOR = 4,	// a request started by an executor remap (stdglue)
++    AVAILABILITY = 5	// an M54/M55 or direct availability handshake
+ };
+ 
+ // types for motion control
+@@ -342,6 +345,11 @@ extern int emcJointSetMaxAcceleration(int joint, double acc);
  extern int emcJointInit(int joint);
  extern int emcJointHalt(int joint);
  extern int emcJointHome(int joint);
@@ -2107,7 +2127,7 @@ index d445ee8..ba2bd2f 100644
  extern int emcJointUnhome(int joint);
  extern int emcJointActivate(int joint);
  extern int emcJointDeactivate(int joint);
-@@ -344,6 +351,10 @@ extern int emcJogAbs(int nr, double pos, double vel, int jjogmode);
+@@ -354,6 +362,10 @@ extern int emcJogAbs(int nr, double pos, double vel, int jjogmode);
  
  
  extern int emcJointUpdate(EMC_JOINT_STAT stat[], int numJoints);
@@ -2118,7 +2138,7 @@ index d445ee8..ba2bd2f 100644
  
  extern int emcJointSetMaxJerk(int joint, double jerk);
  
-@@ -473,6 +484,11 @@ extern int emcSpindleBrakeRelease(int spindle);
+@@ -483,6 +495,11 @@ extern int emcSpindleBrakeRelease(int spindle);
  extern int emcSpindleBrakeEngage(int spindle);
  
  extern int emcSpindleUpdate(EMC_SPINDLE_STAT stat[], int num_spindles);
@@ -2131,7 +2151,7 @@ index d445ee8..ba2bd2f 100644
  // implementation functions for EMC_COOLANT types
  
 diff --git a/src/emc/nml_intf/emc_nml.hh b/src/emc/nml_intf/emc_nml.hh
-index b40c76d..c03bfc3 100644
+index e4a04b1..feab3fb 100644
 --- a/src/emc/nml_intf/emc_nml.hh
 +++ b/src/emc/nml_intf/emc_nml.hh
 @@ -356,6 +356,17 @@ class EMC_JOINT_UNHOME:public EMC_JOINT_CMD_MSG {
@@ -2172,7 +2192,7 @@ index b40c76d..c03bfc3 100644
  };
  
  class EMC_MOTION_STAT:public EMC_MOTION_STAT_MSG {
-@@ -2000,6 +2017,18 @@ class EMC_SPINDLE_OFF:public EMC_SPINDLE_CMD_MSG {
+@@ -2002,6 +2019,18 @@ class EMC_SPINDLE_OFF:public EMC_SPINDLE_CMD_MSG {
      int wait_for_spindle_at_speed; // wait for at-speed (spindle stopped) before next feed
  };
  
@@ -2192,7 +2212,7 @@ index b40c76d..c03bfc3 100644
    public:
      EMC_SPINDLE_INCREASE()
 diff --git a/src/emc/nml_intf/emcops.cc b/src/emc/nml_intf/emcops.cc
-index a6b2345..2e672de 100644
+index 6010ecb..72fd7d4 100644
 --- a/src/emc/nml_intf/emcops.cc
 +++ b/src/emc/nml_intf/emcops.cc
 @@ -58,7 +58,10 @@ EMC_JOINT_STAT::EMC_JOINT_STAT()
@@ -2207,7 +2227,7 @@ index a6b2345..2e672de 100644
  {
  }
  
-@@ -215,7 +218,10 @@ EMC_SPINDLE_STAT::EMC_SPINDLE_STAT()
+@@ -216,7 +219,10 @@ EMC_SPINDLE_STAT::EMC_SPINDLE_STAT()
      orient_fault(0),
      spindle_override_enabled(OFF),
      at_speed(OFF),
@@ -2220,7 +2240,7 @@ index a6b2345..2e672de 100644
  }
  
 diff --git a/src/emc/task/emctask.cc b/src/emc/task/emctask.cc
-index 90cc136..5a1e60e 100644
+index d2634e9..f889dd3 100644
 --- a/src/emc/task/emctask.cc
 +++ b/src/emc/task/emctask.cc
 @@ -245,6 +245,7 @@ void emcTaskQueueTaskPlanSynchCmd()
@@ -2232,10 +2252,10 @@ index 90cc136..5a1e60e 100644
  
      // clear out the pending command
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index ee88562..b0ece8e 100644
+index 76e3cf8..86385c3 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -172,6 +172,61 @@ volatile int done;
+@@ -171,6 +171,61 @@ volatile int done;
  static int emctask_shutdown(void);
  extern void backtrace(int signo);
  int _task = 1; // control preview behaviour when remapping
@@ -2297,7 +2317,7 @@ index ee88562..b0ece8e 100644
  static int joints = 0;
  uint64_t task_beat = 0;  // Task's main loop heartbeat counter
  
-@@ -183,8 +238,13 @@ extern void setup_signal_handlers(); // backtrace, gdb-in-new-window supportx
+@@ -182,8 +237,13 @@ extern void setup_signal_handlers(); // backtrace, gdb-in-new-window supportx
  
  int all_homed(void) {
      for (int i = 0; i < emcStatus->motion.traj.joints; i++) {
@@ -2313,7 +2333,7 @@ index ee88562..b0ece8e 100644
      }
      return 1;
  }
-@@ -437,21 +497,27 @@ static EMC_TRAJ_SET_SPINDLESYNC *emcTrajSetSpindlesyncMsg;
+@@ -436,21 +496,27 @@ static EMC_TRAJ_SET_SPINDLESYNC *emcTrajSetSpindlesyncMsg;
  // per-channel-homing problem.
  static int homingWaitJoint = -1;         // joint (-1 = all) we're waiting on
  static bool homingWaiting = false;       // true while EMC_TASK_EXEC::WAITING_FOR_HOMING is active
@@ -2345,7 +2365,7 @@ index ee88562..b0ece8e 100644
  // True only while emcTaskExecute() is issuing a command taken off the
  // interp_list. emcTaskIssueCommand() serves both that queued path and the
  // immediate commands emcTaskPlan() sends straight through (the GUI's Home
-@@ -463,6 +529,19 @@ static EMC_TASK_MODE homingPriorTaskMode = EMC_TASK_MODE::MANUAL;
+@@ -462,6 +528,19 @@ static EMC_TASK_MODE homingPriorTaskMode = EMC_TASK_MODE::MANUAL;
  // an immediate home keeps its original pass-through behaviour.
  static bool issuingQueuedCommand = false;
  
@@ -2365,7 +2385,7 @@ index ee88562..b0ece8e 100644
  static EMC_SPINDLE_SPEED *spindle_speed_msg;
  static EMC_SPINDLE_ORIENT *spindle_orient_msg;
  static EMC_SPINDLE_WAIT_ORIENT_COMPLETE *wait_spindle_orient_complete_msg;
-@@ -922,6 +1001,13 @@ static bool emcTaskArmSingleStep()
+@@ -945,6 +1024,13 @@ static bool emcTaskArmSingleStep()
      return true;
  }
  
@@ -2379,7 +2399,27 @@ index ee88562..b0ece8e 100644
  static void emcTaskStopClear()
  {
      bool was_active = emcStatus &&
-@@ -1162,6 +1248,31 @@ static int emcTaskPlan(void)
+@@ -1057,6 +1143,19 @@ static EMC_TASK_HOLD_WAIT emcTaskHoldWait()
+     if (emcStatus->io.status == RCS_STATUS::EXEC) {
+         return EMC_TASK_HOLD_WAIT::IO;
+     }
++    // A joint or spindle handshake waits for its acknowledgment. The
++    // acquisition home of an unhomed joint is not part of it: like a queued
++    // G28.2 it starts only after Resume, and once started it is HOMING.
++    const auto &op = availability_pending;
++    if (op.active && !op.cancelled) {
++        int state = op.spindle
++            ? emcStatus->motion.spindle[op.index].availability_state
++            : emcStatus->motion.joint[op.index].availability_state;
++        if (state == EMCMOT_AVAILABILITY_ENABLING ||
++                state == EMCMOT_AVAILABILITY_DISABLING) {
++            return EMC_TASK_HOLD_WAIT::AVAILABILITY;
++        }
++    }
+     return EMC_TASK_HOLD_WAIT::NONE;
+ }
+ 
+@@ -1202,6 +1301,31 @@ static int emcTaskPlan(void)
          return emcTaskIssueCommand(emcCommand);
      }
  
@@ -2411,7 +2451,7 @@ index ee88562..b0ece8e 100644
      if (emcStatus->task.stopState != EMC_TASK_STOP_STATE::IDLE &&
              (type == EMC_TASK_PLAN_RUN_TYPE ||
               type == EMC_TASK_PLAN_RESUME_TYPE ||
-@@ -1181,6 +1292,36 @@ static int emcTaskPlan(void)
+@@ -1225,6 +1349,36 @@ static int emcTaskPlan(void)
          return 0;
      }
  
@@ -2448,7 +2488,7 @@ index ee88562..b0ece8e 100644
      // handle any new command
      switch (emcStatus->task.state) {
      case EMC_TASK_STATE::OFF:
-@@ -1693,9 +1834,7 @@ static int emcTaskPlan(void)
+@@ -1737,9 +1891,7 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -2459,7 +2499,7 @@ index ee88562..b0ece8e 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1958,6 +2097,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
+@@ -2005,6 +2157,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
      case EMC_TRAJ_CLEAR_PROBE_TRIPPED_FLAG_TYPE:	// and this
      case EMC_AUX_INPUT_WAIT_TYPE:
      case EMC_SPINDLE_WAIT_ORIENT_COMPLETE_TYPE:
@@ -2468,7 +2508,7 @@ index ee88562..b0ece8e 100644
  	return EMC_TASK_EXEC::WAITING_FOR_MOTION_AND_IO;
  	break;
  
-@@ -2164,10 +2305,12 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2211,10 +2365,12 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  		emcTrajSetMode(EMC_TRAJ_MODE::FREE);
  	    }
  	    homingWaitJoint = target_joint;
@@ -2481,7 +2521,7 @@ index ee88562..b0ece8e 100644
  	    if (retval != 0) {
  		// emcJointHome() rejected the request outright (e.g. an
  		// invalid joint number) -- homing will never start, so the
-@@ -2177,9 +2320,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2224,9 +2380,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  		// from it) stays stuck at FREE/MANUAL until the operator
  		// manually cycles mode again.
  		homingWaiting = false;
@@ -2492,7 +2532,7 @@ index ee88562..b0ece8e 100644
  	    }
  	}
  	break;
-@@ -2193,6 +2334,24 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2240,6 +2394,24 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	retval = emcJointUnhome(unhome_msg->joint);
  	break;
  
@@ -2517,7 +2557,7 @@ index ee88562..b0ece8e 100644
      case EMC_JOG_CONT_TYPE:
  	jog_cont_msg = reinterpret_cast<EMC_JOG_CONT *>(cmd);
  	retval = emcJogCont(jog_cont_msg->joint_or_axis,
-@@ -2560,6 +2719,26 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2607,6 +2779,26 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	retval = emcSpindleOff(spindle_off_msg->spindle, spindle_off_msg->wait_for_spindle_at_speed);
  	break;
  
@@ -2544,7 +2584,7 @@ index ee88562..b0ece8e 100644
      case EMC_SPINDLE_BRAKE_RELEASE_TYPE:
      spindle_brake_release_msg = reinterpret_cast<EMC_SPINDLE_BRAKE_RELEASE *>(cmd);
  	retval = emcSpindleBrakeRelease(spindle_brake_release_msg->spindle);
-@@ -3016,7 +3195,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -3062,7 +3254,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	break;
  
      case EMC_TASK_PLAN_SYNCH_TYPE:
@@ -2559,7 +2599,7 @@ index ee88562..b0ece8e 100644
  	if (retval > INTERP_MIN_ERROR) {
  	    retval = -1;
  	}
-@@ -3131,6 +3317,11 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3177,6 +3376,11 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
  	return EMC_TASK_EXEC::DONE;
  	break;
  
@@ -2571,7 +2611,7 @@ index ee88562..b0ece8e 100644
      case EMC_TASK_PLAN_RUN_TYPE:
      case EMC_TASK_PLAN_PAUSE_TYPE:
      case EMC_TASK_PLAN_END_TYPE:
-@@ -3213,6 +3404,12 @@ static int emcTaskExecute(void)
+@@ -3259,6 +3463,12 @@ static int emcTaskExecute(void)
      int status;			// status of child from EMC_SYSTEM_CMD
      pid_t pid;			// pid returned from waitpid()
  
@@ -2584,7 +2624,7 @@ index ee88562..b0ece8e 100644
      // first check for an abandoned system command and abort it
      if (emcSystemCmdPid != 0 &&
  	emcStatus->task.execState !=
-@@ -3339,11 +3536,59 @@ static int emcTaskExecute(void)
+@@ -3386,11 +3596,59 @@ static int emcTaskExecute(void)
  	break;
  
      case EMC_TASK_EXEC::WAITING_FOR_MOTION:
@@ -2644,7 +2684,7 @@ index ee88562..b0ece8e 100644
  	    emcStatus->task.execState = EMC_TASK_EXEC::DONE;
  	    emcTaskEager = 1;
  	}
-@@ -3471,12 +3716,17 @@ static int emcTaskExecute(void)
+@@ -3518,12 +3776,17 @@ static int emcTaskExecute(void)
  		homingStarted = true;
  		break; // still running; no timeout once started (see HOMING_START_TIMEOUT comment)
  	    }
@@ -2667,7 +2707,7 @@ index ee88562..b0ece8e 100644
  		// HOMING_START_TIMEOUT before concluding it was rejected.
  		if (etime() - homingIssueTime < HOMING_START_TIMEOUT) {
  		    break;
-@@ -3488,11 +3738,8 @@ static int emcTaskExecute(void)
+@@ -3535,11 +3798,8 @@ static int emcTaskExecute(void)
  		emcTaskEager = 1;
  		homingWaiting = false;
  		// Nothing physically moved, so it's safe to restore the
@@ -2681,7 +2721,7 @@ index ee88562..b0ece8e 100644
  		break;
  	    }
  	    // It ran and has now stopped; did it reach the expected end state?
-@@ -3558,7 +3805,9 @@ static int emcTaskExecute(void)
+@@ -3605,7 +3865,9 @@ static int emcTaskExecute(void)
  				    "coordinated motion until every joint is homed"));
  		emcStatus->task.execState = EMC_TASK_EXEC::ERROR;
  	    } else if (success) {
@@ -2693,7 +2733,7 @@ index ee88562..b0ece8e 100644
  		    emcTrajSetMode(homingPriorMode);
  		}
 diff --git a/src/emc/task/task.hh b/src/emc/task/task.hh
-index 79dbeb6..223886e 100644
+index ea3bdc8..4a7089e 100644
 --- a/src/emc/task/task.hh
 +++ b/src/emc/task/task.hh
 @@ -34,6 +34,7 @@ int emcTaskInit();
@@ -2911,10 +2951,10 @@ index aa63ab4..27418ce 100644
  	error = 1;
      } else if (stat->traj.status == RCS_STATUS::EXEC) {
 diff --git a/src/emc/usr_intf/axis/extensions/emcmodule.cc b/src/emc/usr_intf/axis/extensions/emcmodule.cc
-index f5cc454..7733e39 100644
+index af63368..25b240e 100644
 --- a/src/emc/usr_intf/axis/extensions/emcmodule.cc
 +++ b/src/emc/usr_intf/axis/extensions/emcmodule.cc
-@@ -1418,6 +1418,9 @@ static PyObject *Stat_joint_one(pyStatChannel *s, int jointno) {
+@@ -1419,6 +1419,9 @@ static PyObject *Stat_joint_one(pyStatChannel *s, int jointno) {
      F2("min_hard_limit", minHardLimit);
      F2("max_hard_limit", maxHardLimit);
      F2("override_limits", overrideLimits);
@@ -2924,7 +2964,7 @@ index f5cc454..7733e39 100644
      return res;
  }
  #undef F
-@@ -1467,6 +1470,9 @@ static PyObject *Stat_spindle_one(pyStatChannel *s, int spindleno) {
+@@ -1468,6 +1471,9 @@ static PyObject *Stat_spindle_one(pyStatChannel *s, int spindleno) {
      F(homed);
      F(orient_state);
      F(orient_fault);
@@ -2934,7 +2974,7 @@ index f5cc454..7733e39 100644
      return res;
  }
  #undef F
-@@ -2063,6 +2069,20 @@ static PyObject *unhome(pyCommandChannel *s, PyObject *o) {
+@@ -2064,6 +2070,20 @@ static PyObject *unhome(pyCommandChannel *s, PyObject *o) {
      return Py_None;
  }
  
@@ -2955,7 +2995,7 @@ index f5cc454..7733e39 100644
  // jog(JOG_STOP,       jjogmode, ja_value)
  // jog(JOG_CONTINUOUS, jjogmode, ja_value, speed)
  // jog(JOG_INCREMENT,  jjogmode, ja_value, speed, increment)
-@@ -2449,6 +2469,10 @@ static PyMethodDef Command_methods[] = {
+@@ -2450,6 +2470,10 @@ static PyMethodDef Command_methods[] = {
          "JOINT can be a valid joint number (0-9), or -1 to home all joints.\n"
      },
      {"unhome", (PyCFunction)unhome, METH_VARARGS, NULL},
@@ -2966,6 +3006,14 @@ index f5cc454..7733e39 100644
      {"jog", (PyCFunction)jog, METH_VARARGS,
          "jog(JOG_CONTINUOUS, joint_flag, index, speed)\n"
          "jog(JOG_INCREMENT, joint_flag, index, speed, increment)\n"
+@@ -3427,6 +3451,7 @@ PyMODINIT_FUNC PyInit_linuxcnc(void)
+     PyModule_AddIntConstant(m, "HOLD_WAIT_IO", (int)EMC_TASK_HOLD_WAIT::IO);
+     PyModule_AddIntConstant(m, "HOLD_WAIT_SYSTEM_COMMAND", (int)EMC_TASK_HOLD_WAIT::SYSTEM_COMMAND);
+     PyModule_AddIntConstant(m, "HOLD_WAIT_EXECUTOR", (int)EMC_TASK_HOLD_WAIT::EXECUTOR);
++    PyModule_AddIntConstant(m, "HOLD_WAIT_AVAILABILITY", (int)EMC_TASK_HOLD_WAIT::AVAILABILITY);
+     PyModule_AddIntConstant(m, "STOP_STOPPING", (int)EMC_TASK_STOP_STATE::STOPPING);
+     PyModule_AddIntConstant(m, "STOP_STOPPED", (int)EMC_TASK_STOP_STATE::STOPPED);
+     PyModule_AddIntConstant(m, "STOP_STARTING", (int)EMC_TASK_STOP_STATE::STARTING);
 diff --git a/tests/interp/m98m99/12-M99-endless-main-program/expected.motion-logger b/tests/interp/m98m99/12-M99-endless-main-program/expected.motion-logger
 index aebc5e1..71f8701 100644
 --- a/tests/interp/m98m99/12-M99-endless-main-program/expected.motion-logger

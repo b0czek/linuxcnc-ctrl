@@ -144,6 +144,7 @@ struct NmlTaskStatus {
   bool task_paused = false;
   double delay_left = 0.0;
   std::int32_t queued_mdi_commands = 0;
+  std::int32_t hold_wait = 0;
 };
 
 struct NmlJointStatus {

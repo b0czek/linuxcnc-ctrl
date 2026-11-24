@@ -75,6 +75,23 @@ enum StopState {
   STOP_STATE_STARTING = 3;
 }
 
+// While a Stop is STOPPING or the program is paused: the operation the hold
+// waits for. An operation already handed to another subsystem runs to its
+// end before the machine holds; Abort ends it.
+enum HoldWait {
+  HOLD_WAIT_NONE = 0;
+  // A queued G28.2 homing cycle.
+  HOLD_WAIT_HOMING = 1;
+  // A tool change or other I/O controller command.
+  HOLD_WAIT_IO = 2;
+  // A user M100-M199 program.
+  HOLD_WAIT_SYSTEM_COMMAND = 3;
+  // A request started by an executor remap.
+  HOLD_WAIT_EXECUTOR = 4;
+  // A joint or spindle availability handshake waiting for its acknowledgment.
+  HOLD_WAIT_AVAILABILITY = 5;
+}
+
 enum TrajMode {
   TRAJ_MODE_UNSPECIFIED = 0;
   TRAJ_MODE_FREE = 1;
@@ -201,6 +218,7 @@ message TaskStat {
   bool task_paused = 30;
   double delay_left = 31;
   int32 queued_mdi_commands = 32;
+  HoldWait hold_wait = 35;
 }
 
 message JointStat {
@@ -379,6 +397,7 @@ message TaskStatDelta {
   optional bool task_paused = 30;
   optional double delay_left = 31;
   optional int32 queued_mdi_commands = 32;
+  optional HoldWait hold_wait = 35;
 }
 
 message TrajectoryStatDelta {

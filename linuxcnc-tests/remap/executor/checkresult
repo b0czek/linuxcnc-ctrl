@@ -1,5 +1,5 @@
 #!/bin/sh
 
 set -e
-test "$(grep -c '^executor remap scenario ok:' "$1")" -eq 5
+test "$(grep -c '^executor remap scenario ok:' "$1")" -eq 8
 grep -q '^executor remap scenarios complete$' "$1"

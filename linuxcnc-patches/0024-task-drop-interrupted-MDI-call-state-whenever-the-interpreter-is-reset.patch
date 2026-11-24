@@ -37,7 +37,7 @@ MDI works afterwards.
  3 files changed, 6 insertions(+), 1 deletion(-)
 
 diff --git a/src/emc/task/emctask.cc b/src/emc/task/emctask.cc
-index 5a1e60e..67edc9b 100644
+index f889dd3..b6793d2 100644
 --- a/src/emc/task/emctask.cc
 +++ b/src/emc/task/emctask.cc
 @@ -282,6 +282,10 @@ int emcTaskAbort()
@@ -52,10 +52,10 @@ index 5a1e60e..67edc9b 100644
  }
  
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 9097f40..65846a8 100644
+index 20092fb..b2d4a91 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -798,7 +798,7 @@ interpret_again:
+@@ -817,7 +817,7 @@ interpret_again:
  		}		// if interp len is less than max
  }
  
@@ -65,7 +65,7 @@ index 9097f40..65846a8 100644
      int queued_mdi_commands;
  
 diff --git a/src/emc/task/task.hh b/src/emc/task/task.hh
-index 223886e..1a7a999 100644
+index 4a7089e..4220b67 100644
 --- a/src/emc/task/task.hh
 +++ b/src/emc/task/task.hh
 @@ -34,6 +34,7 @@ int emcTaskInit();

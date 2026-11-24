@@ -1225,6 +1225,43 @@ def run_dwell_stop_resume_test():
     wait_for_program_complete(5.0)
 
 
+def run_system_command_stop_test():
+    # A user M-code already running finishes before Stop switches the
+    # spindle off and reports STOPPED; the program then waits for Resume.
+    open_auto_program("system-command.ngc")
+    c.auto(linuxcnc.AUTO_RUN, 0)
+    wait_for(
+        lambda: s.exec_state == linuxcnc.EXEC_WAITING_FOR_SYSTEM_CMD
+        and hal.get_value("spindle.0.speed-out") > 0.0,
+        "M101 did not start",
+    )
+    # Stop completes only on STOPPED, so do not wait for it here.
+    c.program_stop()
+    wait_for(
+        lambda: s.stop_state == linuxcnc.STOP_STOPPING
+        and s.hold_wait == linuxcnc.HOLD_WAIT_SYSTEM_COMMAND,
+        "Stop did not wait for M101",
+        timeout=1.0,
+    )
+    if hal.get_value("spindle.0.speed-out") <= 0.0:
+        fail("Stop switched the spindle off while M101 ran")
+    wait_for(
+        lambda: s.stop_state == linuxcnc.STOP_STOPPED and s.task_paused,
+        "Stop did not complete after M101",
+    )
+    if s.hold_wait != linuxcnc.HOLD_WAIT_NONE:
+        fail("hold_wait still set once STOPPED")
+    if abs(hal.get_value("spindle.0.speed-out")) > 0.001:
+        fail("spindle not off once STOPPED")
+    time.sleep(0.3)
+    s.poll()
+    if not math.isclose(s.position[0], 0.0, abs_tol=0.001):
+        fail("program continued past M101 while stopped")
+    c.auto(linuxcnc.AUTO_RESUME)
+    wait_for_program_complete(5.0)
+    assert_outputs_stopped_after_program()
+
+
 def run_dwell_atspeed_barrier_test():
     # M3 arms motion's next-feed at-speed barrier before the dwell, and the
     # following feed is not queued until the dwell ends. Turning the spindle
@@ -1505,10 +1542,10 @@ def run_pause_while_starting_test():
     assert_outputs_stopped_after_program()
 
 
-def run_cancel_latched_resume_test(label, cancel):
-    # Resume during STOPPING is latched until Stop completes; a Pause or a
-    # second Stop after it cancels the latched Resume, so the program stays
-    # STOPPED.
+def run_refused_while_stopping_test(label, send):
+    # Resume, Run or Step during STOPPING is refused, not remembered: the
+    # operator resumes once the machine has stopped. Stop then completes and
+    # the program stays STOPPED until the next Resume.
     open_auto_program("thread-then-steps.ngc")
     c.auto(linuxcnc.AUTO_RUN, 0)
     wait_for(
@@ -1518,34 +1555,44 @@ def run_cancel_latched_resume_test(label, cancel):
         "G33 did not start",
         timeout=15.0,
     )
+    while e.poll():
+        pass
     c.program_stop()
     wait_for(
         lambda: s.stop_state == linuxcnc.STOP_STOPPING,
         "Stop did not wait for the active G33",
         timeout=1.0,
     )
-    c.auto(linuxcnc.AUTO_RESUME)
-    cancel()
+    send()
+    if c.wait_complete(2.0) != linuxcnc.RCS_ERROR:
+        fail("%s during STOPPING was not refused" % label)
+    deadline = time.time() + 2.0
+    while True:
+        err = e.poll()
+        if err and "while the program is stopping" in err[1]:
+            break
+        if time.time() > deadline:
+            fail("%s during STOPPING gave no operator error" % label)
+        time.sleep(0.02)
     s.poll()
     if s.stop_state != linuxcnc.STOP_STOPPING:
-        fail("G33 finished before Resume and %s were sent" % label)
+        fail("G33 finished before %s was sent" % label)
 
     wait_for(
         lambda: s.stop_state == linuxcnc.STOP_STOPPED
         and math.isclose(s.position[2], -5.0, abs_tol=0.01),
-        lambda: "%s after latched Resume did not leave the program "
-        "STOPPED: X=%.3f Z=%.3f stop=%d"
-        % (label, s.position[0], s.position[2], s.stop_state),
+        lambda: "Stop did not complete after a refused %s: X=%.3f Z=%.3f "
+        "stop=%d" % (label, s.position[0], s.position[2], s.stop_state),
         timeout=15.0,
     )
     time.sleep(0.4)
     s.poll()
     if s.stop_state != linuxcnc.STOP_STOPPED or not s.task_paused:
-        fail("%s after latched Resume: program left STOPPED" % label)
+        fail("refused %s: program left STOPPED" % label)
     if hal.get_value("spindle.0.on"):
-        fail("%s after latched Resume: spindle on while STOPPED" % label)
+        fail("refused %s: spindle on while STOPPED" % label)
     if abs(s.position[0]) > 0.001:
-        fail("%s after latched Resume: feed after G33 moved" % label)
+        fail("refused %s: feed after G33 moved" % label)
 
     c.auto(linuxcnc.AUTO_RESUME)
     wait_for(
@@ -1556,7 +1603,6 @@ def run_cancel_latched_resume_test(label, cancel):
         timeout=20.0,
     )
     assert_outputs_stopped_after_program()
-
 
 def run_resume_zero_speed_test():
     # A spindle restored at S0 does not spin up, so Resume does not wait for
@@ -1948,44 +1994,6 @@ def run_threading_chain_stop_resume_test():
     )
 
 
-def run_step_then_resume_while_stopping_test():
-    # Step followed by Resume while Stop waits for G33 must resume the
-    # program normally rather than single-step it.
-    open_auto_program("thread-then-steps.ngc")
-    c.auto(linuxcnc.AUTO_RUN, 0)
-    wait_for(
-        lambda: s.position[2] < -0.5
-        and s.position[2] > -3.0
-        and hal.get_value("spindle.0.speed-out") > 0.0,
-        "G33 did not start",
-        timeout=15.0,
-    )
-
-    # Stop completes only on STOPPED, so do not wait for it here.
-    c.program_stop()
-    wait_for(
-        lambda: s.stop_state == linuxcnc.STOP_STOPPING,
-        "Stop did not wait for the active G33",
-        timeout=1.0,
-    )
-    c.auto(linuxcnc.AUTO_STEP)
-    c.auto(linuxcnc.AUTO_RESUME)
-    s.poll()
-    if s.stop_state != linuxcnc.STOP_STOPPING:
-        fail("G33 finished before Step and Resume were sent")
-
-    wait_for(
-        lambda: s.interp_state == linuxcnc.INTERP_IDLE
-        and s.exec_state == linuxcnc.EXEC_DONE
-        and math.isclose(s.position[0], 10.0, abs_tol=0.01),
-        lambda: "program did not run to completion after Step and Resume: "
-        "X=%.3f interp=%d paused=%d stop=%d"
-        % (s.position[0], s.interp_state, s.task_paused, s.stop_state),
-        timeout=20.0,
-    )
-    assert_outputs_stopped_after_program()
-
-
 def run_g95_between_g33_stop_resume_test():
     # A G33 that follows velocity-synchronized G95 motion keeps the earlier
     # G33's spindle synchronization. After a Stop during the G95 move the
@@ -2089,14 +2097,15 @@ SCENARIOS = {
     "rigid-tap": run_rigid_tap_stop_resume_test,
     "orientation": run_spindle_orientation_stop_test,
     "dwell": run_dwell_stop_resume_test,
+    "system-command": run_system_command_stop_test,
     "dwell-atspeed": run_dwell_atspeed_barrier_test,
     "command-after-sync": run_command_after_sync_motion_test,
     "resume-atspeed": run_resume_atspeed_wait_test,
     "pause-starting": run_pause_while_starting_test,
-    "pause-latched-resume": lambda: run_cancel_latched_resume_test(
-        "Pause", lambda: c.auto(linuxcnc.AUTO_PAUSE)),
-    "stop-latched-resume": lambda: run_cancel_latched_resume_test(
-        "Stop", c.program_stop),
+    "resume-stopping-refused": lambda: run_refused_while_stopping_test(
+        "Resume", lambda: c.auto(linuxcnc.AUTO_RESUME)),
+    "step-stopping-refused": lambda: run_refused_while_stopping_test(
+        "Step", lambda: c.auto(linuxcnc.AUTO_STEP)),
     "pause-inflight-step": run_pause_inflight_single_step_test,
     "inflight-step-short": run_inflight_short_block_step_test,
     "resume-s0": run_resume_zero_speed_test,
@@ -2107,7 +2116,6 @@ SCENARIOS = {
     "speed-change-atspeed": run_speed_change_atspeed_test,
     "queued-feed-atspeed": run_queued_feed_atspeed_test,
     "g33-chain": run_threading_chain_stop_resume_test,
-    "step-resume-stopping": run_step_then_resume_while_stopping_test,
     "g95-between-g33": run_g95_between_g33_stop_resume_test,
     "spindle-state": run_stopped_spindle_s_word_test,
 }

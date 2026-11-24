@@ -400,6 +400,7 @@ NmlStatusPoll NmlAdapter::poll_status(NmlStatusSnapshot* snapshot) {
   task.task_paused = status->task.task_paused;
   task.delay_left = status->task.delayLeft;
   task.queued_mdi_commands = status->task.queuedMDIcommands;
+  task.hold_wait = static_cast<std::int32_t>(status->task.holdWait);
 
   auto& motion = snapshot->motion_stat;
   const auto& source_traj = status->motion.traj;

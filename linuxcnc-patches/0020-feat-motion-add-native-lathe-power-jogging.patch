@@ -600,7 +600,7 @@ index 0000000..293e1d0
 +
 +#endif
 diff --git a/src/emc/nml_intf/emc.cc b/src/emc/nml_intf/emc.cc
-index f70a5e0..b2b729a 100644
+index 54d973c..133869b 100644
 --- a/src/emc/nml_intf/emc.cc
 +++ b/src/emc/nml_intf/emc.cc
 @@ -65,6 +65,9 @@ int emcFormat(NMLTYPE type, void *buffer, CMS * cms)
@@ -639,7 +639,7 @@ index f70a5e0..b2b729a 100644
  *	NML/CMS Update function for EMC_JOG_CONT
  */
 diff --git a/src/emc/nml_intf/emc.hh b/src/emc/nml_intf/emc.hh
-index ba2bd2f..c33ee96 100644
+index 94d6a19..7d93f8a 100644
 --- a/src/emc/nml_intf/emc.hh
 +++ b/src/emc/nml_intf/emc.hh
 @@ -75,6 +75,7 @@ struct PM_CARTESIAN;
@@ -650,7 +650,7 @@ index ba2bd2f..c33ee96 100644
  
  #define EMC_JOINT_STAT_TYPE                          ((NMLTYPE) 198)
  #define EMC_AXIS_STAT_TYPE                           ((NMLTYPE) 199)
-@@ -346,6 +347,7 @@ extern int emcJointOverrideLimits(int joint);
+@@ -357,6 +358,7 @@ extern int emcJointOverrideLimits(int joint);
  extern int emcJointLoadComp(int joint, const char *file, int type);
  extern int emcJogStop(int nr, int jjogmode);
  extern int emcJogCont(int nr, double vel, int jjogmode);
@@ -659,7 +659,7 @@ index ba2bd2f..c33ee96 100644
  extern int emcJogAbs(int nr, double pos, double vel, int jjogmode);
  
 diff --git a/src/emc/nml_intf/emc_nml.hh b/src/emc/nml_intf/emc_nml.hh
-index c03bfc3..05a29fe 100644
+index feab3fb..a9fc353 100644
 --- a/src/emc/nml_intf/emc_nml.hh
 +++ b/src/emc/nml_intf/emc_nml.hh
 @@ -367,6 +367,17 @@ class EMC_JOINT_SET_AVAILABILITY:public EMC_JOINT_CMD_MSG {
@@ -681,10 +681,10 @@ index c03bfc3..05a29fe 100644
    public:
      EMC_JOG_CONT()
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index b0ece8e..9097f40 100644
+index 86385c3..20092fb 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -1464,6 +1464,7 @@ static int emcTaskPlan(void)
+@@ -1521,6 +1521,7 @@ static int emcTaskPlan(void)
  	    case EMC_JOINT_HOME_TYPE:
  	    case EMC_JOINT_UNHOME_TYPE:
  	    case EMC_JOG_CONT_TYPE:
@@ -692,7 +692,7 @@ index b0ece8e..9097f40 100644
  	    case EMC_JOG_INCR_TYPE:
  	    case EMC_JOG_ABS_TYPE:
  	    case EMC_JOG_STOP_TYPE:
-@@ -2365,6 +2366,13 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2425,6 +2426,13 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
                              jog_stop_msg->jjogmode);
  	break;
  

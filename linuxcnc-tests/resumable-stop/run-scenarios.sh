@@ -34,7 +34,7 @@ config=$(mktemp -d)
 scenario_log=$(mktemp)
 trap 'rm -rf "$config" "$scenario_log"' EXIT
 cp "$shared"/test-ui.py "$shared"/test.ini "$shared"/core_sim.hal \
-    "$shared"/tool.tbl "$shared"/*.ngc "$config"/
+    "$shared"/tool.tbl "$shared"/*.ngc "$shared"/M101 "$config"/
 sed 's/^PLANNER_TYPE = 1$/PLANNER_TYPE = 0/' "$config/test.ini" \
     > "$config/test-trapezoidal.ini"
 grep -q '^PLANNER_TYPE = 0$' "$config/test-trapezoidal.ini"

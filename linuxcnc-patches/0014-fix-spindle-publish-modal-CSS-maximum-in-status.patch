@@ -26,10 +26,10 @@ index 513c932..d6e8437 100644
  
  template <class MSG=EMC_SPINDLE_ON>
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index bb43b9c..ee88562 100644
+index 7156924..76e3cf8 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -1035,7 +1035,7 @@ static void emcTaskStopProgress()
+@@ -1078,7 +1078,7 @@ static void emcTaskStopProgress()
          bool spindle_output_active = false;
          for (int s = 0; s < emcStatus->motion.traj.spindles; ++s) {
              const auto &status = emcStatus->motion.spindle[s];
@@ -52,10 +52,10 @@ index 3328659..aa63ab4 100644
  		stat[s].feedback = emcmotStatus.spindle_status[s].spindleSpeedIn * 60.0;
  		stat[s].brake = emcmotStatus.spindle_status[s].brake;
 diff --git a/src/emc/usr_intf/axis/extensions/emcmodule.cc b/src/emc/usr_intf/axis/extensions/emcmodule.cc
-index 8e91c88..f5cc454 100644
+index 74edfa0..af63368 100644
 --- a/src/emc/usr_intf/axis/extensions/emcmodule.cc
 +++ b/src/emc/usr_intf/axis/extensions/emcmodule.cc
-@@ -1462,6 +1462,7 @@ static PyObject *Stat_spindle_one(pyStatChannel *s, int spindleno) {
+@@ -1463,6 +1463,7 @@ static PyObject *Stat_spindle_one(pyStatChannel *s, int spindleno) {
      F2("override_enabled", spindle_override_enabled);
      F(speed);
      F(feedback);

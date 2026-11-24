@@ -234,7 +234,7 @@ index 68cf5d4..ee99e8e 100644
  // it to the interp list in certain cases
  extern void ON_RESET(void);
 diff --git a/src/emc/nml_intf/emc.cc b/src/emc/nml_intf/emc.cc
-index d8d1d9d..ded71c3 100644
+index 7a02127..891516e 100644
 --- a/src/emc/nml_intf/emc.cc
 +++ b/src/emc/nml_intf/emc.cc
 @@ -212,6 +212,9 @@ int emcFormat(NMLTYPE type, void *buffer, CMS * cms)
@@ -278,7 +278,7 @@ index d8d1d9d..ded71c3 100644
  
  /*
 diff --git a/src/emc/nml_intf/emc.hh b/src/emc/nml_intf/emc.hh
-index 4c8ebac..6b3f9d9 100644
+index fb1faa8..c98adba 100644
 --- a/src/emc/nml_intf/emc.hh
 +++ b/src/emc/nml_intf/emc.hh
 @@ -145,6 +145,7 @@ struct PM_CARTESIAN;
@@ -289,7 +289,7 @@ index 4c8ebac..6b3f9d9 100644
  
  #define EMC_TASK_STAT_TYPE                           ((NMLTYPE) 599)
  
-@@ -386,7 +387,8 @@ extern int emcTrajResume();
+@@ -395,7 +396,8 @@ extern int emcTrajResume();
  extern int emcTrajDelay(double delay);
  extern int emcTrajLinearMove(const EmcPose& end, int type, double vel,
                               double ini_maxvel, double acc, double ini_maxjerk,
@@ -300,7 +300,7 @@ index 4c8ebac..6b3f9d9 100644
          normal, int turn, int type, double vel, double ini_maxvel, double acc, double ini_maxjerk,
          double vlimit_scale);
 diff --git a/src/emc/nml_intf/emc_nml.hh b/src/emc/nml_intf/emc_nml.hh
-index 89aba60..cf8bc14 100644
+index b41c212..6a5632c 100644
 --- a/src/emc/nml_intf/emc_nml.hh
 +++ b/src/emc/nml_intf/emc_nml.hh
 @@ -752,7 +752,9 @@ class EMC_TRAJ_LINEAR_MOVE:public EMC_TRAJ_CMD_MSG {
@@ -684,10 +684,10 @@ index 55fb417..90cc136 100644
  }
 -
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 6025a96..e2a7209 100644
+index 9e21ff7..e2bdf62 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -504,6 +504,22 @@ static int programStartLine = 0;	// which line to run program from
+@@ -503,6 +503,22 @@ static int programStartLine = 0;	// which line to run program from
  int stepping = 0;
  int steppingWait = 0;
  static int steppedLine = 0;
@@ -710,7 +710,7 @@ index 6025a96..e2a7209 100644
  
  // Variables to handle MDI call interrupts
  // Depth of call level before interrupted MDI call
-@@ -874,8 +890,7 @@ static void emcTaskResumeInterpreter()
+@@ -873,8 +889,7 @@ static void emcTaskResumeInterpreter()
          emcStatus->task.interpState = interpResumeState;
      }
      emcStatus->motion.traj.single_stepping = 0;
@@ -720,7 +720,7 @@ index 6025a96..e2a7209 100644
  }
  
  static void emcTaskStepInterpreter()
-@@ -1554,6 +1569,10 @@ static int emcTaskPlan(void)
+@@ -1571,6 +1586,10 @@ static int emcTaskPlan(void)
  		    emcStatus->motion.traj.single_stepping = 1;
  		    stepping = 1;	// set stepping mode in case it's not
  		    steppingWait = 0;	// clear the wait
@@ -731,7 +731,7 @@ index 6025a96..e2a7209 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1706,6 +1725,10 @@ static int emcTaskPlan(void)
+@@ -1723,6 +1742,10 @@ static int emcTaskPlan(void)
  		    emcStatus->motion.traj.single_stepping = 1;
  		    stepping = 1;	// set stepping mode in case it's not
  		    steppingWait = 0;	// clear the wait
@@ -742,7 +742,7 @@ index 6025a96..e2a7209 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1963,6 +1986,11 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
+@@ -1980,6 +2003,11 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
  	return EMC_TASK_EXEC::WAITING_FOR_MOTION_AND_IO;
  	break;
  
@@ -754,7 +754,7 @@ index 6025a96..e2a7209 100644
      case EMC_TRAJ_DELAY_TYPE:
  	return EMC_TASK_EXEC::WAITING_FOR_MOTION_AND_IO;
  	break;
-@@ -2268,7 +2296,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2285,7 +2313,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
                                     emcTrajLinearMoveMsg->type, emcTrajLinearMoveMsg->vel,
                                     emcTrajLinearMoveMsg->ini_maxvel, emcTrajLinearMoveMsg->acc, emcTrajLinearMoveMsg->ini_maxjerk,
                                     emcTrajLinearMoveMsg->vlimit_scale,
@@ -765,7 +765,7 @@ index 6025a96..e2a7209 100644
  	break;
  
      case EMC_TRAJ_CIRCULAR_MOVE_TYPE:
-@@ -2639,6 +2669,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2655,6 +2685,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	} else { // we can honour the modeswitch
  	    if (mode_msg->mode != emcStatus->task.mode) {
  		emcTaskStopClear();
@@ -774,7 +774,7 @@ index 6025a96..e2a7209 100644
  	    }
  	    if (mode_msg->mode == EMC_TASK_MODE::MANUAL &&
  		emcStatus->task.mode != EMC_TASK_MODE::MANUAL) {
-@@ -2672,8 +2704,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2688,8 +2720,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  		emcStatus->task.interpState = EMC_TASK_INTERP::IDLE;
  		emcStatus->task.execState = EMC_TASK_EXEC::DONE;
  		emcStatus->motion.traj.single_stepping = 0;
@@ -784,7 +784,7 @@ index 6025a96..e2a7209 100644
  
  		// now queue up command to resynch interpreter
  		emcTaskQueueTaskPlanSynchCmd();
-@@ -2686,6 +2717,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2702,6 +2733,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	state_msg = reinterpret_cast<EMC_TASK_SET_STATE *>(cmd);
  	if (state_msg->state != EMC_TASK_STATE::ON) {
  	    emcTaskStopClear();
@@ -793,7 +793,7 @@ index 6025a96..e2a7209 100644
  	}
  	retval = emcTaskSetState(state_msg->state);
  	break;
-@@ -2770,8 +2803,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2786,8 +2819,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_TASK_PLAN_EXECUTE_TYPE:
  	emcStatus->motion.traj.single_stepping = 0;
@@ -803,7 +803,7 @@ index 6025a96..e2a7209 100644
  	execute_msg = reinterpret_cast<EMC_TASK_PLAN_EXECUTE *>(cmd);
          if (!all_homed() && !no_force_homing) { //!no_force_homing = force homing before MDI
              emcOperatorError(_("Can't issue MDI command when not homed"));
-@@ -2866,8 +2898,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2882,8 +2914,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
              break;
          }
  	emcStatus->motion.traj.single_stepping = 0;
@@ -813,7 +813,7 @@ index 6025a96..e2a7209 100644
  	if (!taskplanopen && emcStatus->task.file[0] != 0) {
  	    emcTaskPlanOpen(emcStatus->task.file);
  	}
-@@ -2936,6 +2967,10 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2952,6 +2983,10 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	}
  	break;
  
@@ -824,7 +824,7 @@ index 6025a96..e2a7209 100644
      case EMC_TASK_PLAN_SET_OPTIONAL_STOP_TYPE:
  	os_msg = reinterpret_cast<EMC_TASK_PLAN_SET_OPTIONAL_STOP *>(cmd);
  	emcTaskPlanSetOptionalStop(os_msg->state);
-@@ -3044,6 +3079,7 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3060,6 +3095,7 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
      case EMC_TASK_PLAN_END_TYPE:
      case EMC_TASK_PLAN_INIT_TYPE:
      case EMC_TASK_PLAN_SYNCH_TYPE:
@@ -832,7 +832,7 @@ index 6025a96..e2a7209 100644
      case EMC_TASK_PLAN_EXECUTE_TYPE:
      case EMC_TASK_PLAN_OPTIONAL_STOP_TYPE:
  	return EMC_TASK_EXEC::DONE;
-@@ -3096,11 +3132,18 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3112,11 +3148,18 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
  #define STEPPING_CHECK()                                                   \
  if (stepping) {                                                            \
    if (! steppingWait) {                                                    \
@@ -854,7 +854,7 @@ index 6025a96..e2a7209 100644
        break;                                                               \
      }                                                                      \
    }                                                                        \
-@@ -3162,8 +3205,7 @@ static int emcTaskExecute(void)
+@@ -3178,8 +3221,7 @@ static int emcTaskExecute(void)
  	emcStatus->task.interpState = EMC_TASK_INTERP::IDLE;
  	emcStatus->task.execState = EMC_TASK_EXEC::DONE;
  	emcStatus->motion.traj.single_stepping = 0;
@@ -864,7 +864,7 @@ index 6025a96..e2a7209 100644
  
  	// now queue up command to resynch interpreter
  	emcTaskQueueTaskPlanSynchCmd();
-@@ -3185,6 +3227,7 @@ static int emcTaskExecute(void)
+@@ -3201,6 +3243,7 @@ static int emcTaskExecute(void)
  		if (NULL != emcTaskCommand) {
  		    emcTaskEager = 1;
  		    emcStatus->task.currentLine = interp_list.get_line_number();
@@ -872,7 +872,7 @@ index 6025a96..e2a7209 100644
  		    // callLevel is set by emcTaskUpdate() from the executing
  		    // move's StateTag; the interpreter's live level at dequeue
  		    // time leads motion by the whole read-ahead queue.
-@@ -4181,8 +4224,7 @@ int main(int argc, char *argv[])
+@@ -4197,8 +4240,7 @@ int main(int argc, char *argv[])
  	    emcStatus->task.interpState = EMC_TASK_INTERP::IDLE;
  	    emcStatus->task.execState = EMC_TASK_EXEC::DONE;
  		emcStatus->motion.traj.single_stepping = 0;

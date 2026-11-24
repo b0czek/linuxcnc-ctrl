@@ -3,9 +3,8 @@ g33
 queued-g33
 g33-chain
 trapezoidal:g33-chain
-step-resume-stopping
 g95-between-g33
 g33-no-following-rapid
 command-after-sync
-pause-latched-resume
-stop-latched-resume
+resume-stopping-refused
+step-stopping-refused

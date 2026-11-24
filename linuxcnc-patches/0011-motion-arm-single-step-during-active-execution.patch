@@ -99,10 +99,10 @@ index e347bf1..75a9f1c 100644
              emcmotStatus->stepping = 0;
              emcmotStatus->paused = 1;
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index e2a7209..f69fcbb 100644
+index e2bdf62..7185ec7 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -504,6 +504,7 @@ static int programStartLine = 0;	// which line to run program from
+@@ -503,6 +503,7 @@ static int programStartLine = 0;	// which line to run program from
  int stepping = 0;
  int steppingWait = 0;
  static int steppedLine = 0;
@@ -110,7 +110,7 @@ index e2a7209..f69fcbb 100644
  /*
   * Pass groups delimit commands that are still owned by task. Motion that was
   * already queued before resumable Stop is stepped by TP to its marked G76
-@@ -519,6 +520,7 @@ void emcTaskResetSteppingState()
+@@ -518,6 +519,7 @@ void emcTaskResetSteppingState()
      steppedLine = 0;
      currentPassGroup = 0;
      steppedPassGroup = 0;
@@ -118,7 +118,7 @@ index e2a7209..f69fcbb 100644
  }
  
  // Variables to handle MDI call interrupts
-@@ -904,6 +906,22 @@ static void emcTaskStepInterpreter()
+@@ -903,6 +905,22 @@ static void emcTaskStepInterpreter()
      emcStatus->task.task_paused = 1;
  }
  
@@ -141,7 +141,7 @@ index e2a7209..f69fcbb 100644
  static void emcTaskStopClear()
  {
      bool was_active = emcStatus &&
-@@ -1566,13 +1584,7 @@ static int emcTaskPlan(void)
+@@ -1583,13 +1601,7 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -156,7 +156,7 @@ index e2a7209..f69fcbb 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1646,17 +1658,9 @@ static int emcTaskPlan(void)
+@@ -1663,17 +1675,9 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -175,7 +175,7 @@ index e2a7209..f69fcbb 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1722,13 +1726,7 @@ static int emcTaskPlan(void)
+@@ -1739,13 +1743,7 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -190,7 +190,7 @@ index e2a7209..f69fcbb 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -4102,6 +4100,10 @@ int main(int argc, char *argv[])
+@@ -4118,6 +4116,10 @@ int main(int argc, char *argv[])
  	// update subordinate status
  
  	emcMotionUpdate(&emcStatus->motion);

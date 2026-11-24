@@ -269,7 +269,7 @@ index e08e4a6..21edbb7 100644
    for (n = 0; n < 11; n++) {
      block->m_modes[n] = -1;
 diff --git a/src/emc/rs274ngc/interp_internal.hh b/src/emc/rs274ngc/interp_internal.hh
-index 65197e8..ddae1dc 100644
+index 692b6e9..8ffadca 100644
 --- a/src/emc/rs274ngc/interp_internal.hh
 +++ b/src/emc/rs274ngc/interp_internal.hh
 @@ -479,12 +479,19 @@ struct block_struct

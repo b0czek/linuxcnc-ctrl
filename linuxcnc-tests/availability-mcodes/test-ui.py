@@ -165,9 +165,10 @@ assert abs(s.joint_position[0]-4)<.001, 'continued after M54 while stopped'
 c.auto(linuxcnc.AUTO_RESUME)
 idle()
 assert abs(s.joint_position[0]-5)<.001
-# Stop or Pause before the ACK of an unhomed joint: the ACK completes the
-# handshake, but like a queued G28.2 the acquisition home starts only after
-# Resume. Time held exceeds AVAILABILITY_TIMEOUT, which does not run then.
+# Stop or Pause before the ACK of an unhomed joint: the handshake already
+# under way runs to its ACK first (Stop stays STOPPING until then), but like
+# a queued G28.2 the acquisition home starts only after Resume. Time held
+# exceeds AVAILABILITY_TIMEOUT, which does not run then.
 for hold in (c.program_stop, lambda: c.auto(linuxcnc.AUTO_PAUSE)):
     c.mode(linuxcnc.MODE_MDI); done()
     c.mdi('M55 P2')
@@ -179,10 +180,17 @@ for hold in (c.program_stop, lambda: c.auto(linuxcnc.AUTO_PAUSE)):
     wait(lambda: hal.get_value('joint.2.availability-request'), 'held M54 request')
     hold()
     if hold == c.program_stop:
-        wait(lambda: s.stop_state == linuxcnc.STOP_STOPPED, 'Stop before ACK')
+        wait(lambda: s.stop_state == linuxcnc.STOP_STOPPING
+             and s.hold_wait == linuxcnc.HOLD_WAIT_AVAILABILITY, 'Stop before ACK')
+        time.sleep(.3); s.poll()
+        assert s.stop_state == linuxcnc.STOP_STOPPING, 'Stop did not wait for the ACK'
     else:
-        wait(lambda: s.interp_state == linuxcnc.INTERP_PAUSED, 'Pause before ACK')
+        wait(lambda: s.interp_state == linuxcnc.INTERP_PAUSED
+             and s.hold_wait == linuxcnc.HOLD_WAIT_AVAILABILITY, 'Pause before ACK')
     pin('joint.2.availability-ack', 1)
+    if hold == c.program_stop:
+        wait(lambda: s.stop_state == linuxcnc.STOP_STOPPED, 'Stop after ACK')
+    wait(lambda: s.hold_wait == linuxcnc.HOLD_WAIT_NONE, 'hold wait after ACK')
     time.sleep(2.5); s.poll()
     assert not s.joint[2]['homing'] and hal.get_value('joint.2.home-state') == 0, \
         'acquisition homing started while held'

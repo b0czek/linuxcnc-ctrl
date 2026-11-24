@@ -210,6 +210,15 @@ reaches `STOPPED`:
 - A homing cycle queued from G-code with `G28.2`. Stop is accepted during it
   and stays in `STOPPING` until homing finishes.
 
+An operation task has already handed to another subsystem also runs to its
+end, as an M function runs to its completion signal on other controls, and
+only then does Stop switch spindle and coolant off: a tool change or other
+I/O controller command, and a user `M100`-`M199` program (patches 0013 and
+0017 add executor requests and availability handshakes). These waits have no
+timeout of their own; Abort, E-stop and Machine Off end them. While Stop is
+`STOPPING`, and while a program is paused, `EMC_TASK_STAT.holdWait` (Python
+`hold_wait`, protobuf `hold_wait`) names the operation the hold waits for.
+
 `STOPPED` is reported only once the axes are at rest. While stopping, the
 planner does not start a held move from rest, so a pending spindle at-speed
 wait or a `G33` index search is not consumed while Stop has the spindle off.
@@ -230,9 +239,10 @@ connected, or tied true) does not hold Resume. A second Stop, Abort, E-stop or
 Machine Off end the wait. A next-feed at-speed wait that was pending before
 Stop still holds after Resume, and a later `S` word change still arms one.
 Resume or Run during a Stop leaves single-step mode entered by an earlier Step.
-A second Stop or a Pause while Resume is pending (in `STARTING`, or a Resume
-latched during `STOPPING`) cancels it: the program stays in or returns to
-`STOPPED` with the restored outputs off. A spindle restored at commanded speed 0 does not
+Resume, Run and Single Step during `STOPPING` are refused with an operator
+error, not remembered: the operator resumes once the machine has stopped.
+A second Stop or a Pause during `STARTING` cancels the Resume: the program
+returns to `STOPPED` with the restored outputs off. A spindle restored at commanded speed 0 does not
 hold Resume; spindle override 0 still waits for at-speed.
 
 While Stop waits for motion to come to rest, task issues only commands that
@@ -249,10 +259,11 @@ spindle-state bookkeeping of later spindle commands untouched.
 The `linuxcnc-tests/resumable-stop` LinuxCNC regressions run as four tests
 (`general`, `threading`, `g76-stop`, `g76-step`) that share one driver, so they
 run in parallel. With patches 0009 and 0011 they hold 42 scenarios with the
-jerk-limited planner and four re-runs with the trapezoidal planner. They cover
+jerk-limited planner and five with the trapezoidal planner. They cover
 Stop/Resume and Stop/Single-Step preserving the queued program, spindle and
 coolant handling, the at-speed wait on Resume including a stale at-speed
-signal, Stop and Pause while Resume is pending, Pause during an in-flight Step, Resume of a spindle restored at S0, commands queued behind a thread, `G33` threading including a chain of
+signal, Pause while Resume is pending, Resume and Step refused while
+stopping, Stop waiting for a running user M-code, Pause during an in-flight Step, Resume of a spindle restored at S0, commands queued behind a thread, `G33` threading including a chain of
 `G33` moves and `G33`/`G95`/`G33`, `G33.1` rigid tapping, Stop during and after
 an interrupted `G28.2`, and that `STOPPED` is never reported while moving.
 
@@ -493,6 +504,13 @@ continues program execution. The default timeout is 10 seconds. A request
 starts only after everything queued before it has finished, so in AUTO it
 does not run ahead of earlier moves while the interpreter reads ahead.
 
+A request already started runs to its end when a resumable Stop (patch 0004)
+or a Pause arrives, like any other M function: task keeps running the remap
+that polls it while the program holds, reads nothing past it, and reports
+`hold_wait` `EXECUTOR` meanwhile. Its timeout keeps counting, and a failure
+or timeout while held ends the program as an execution error, which also
+clears the Stop. A request that has not started yet starts after Resume.
+
 The supplied `HalExecutor` endpoint adds namespaced request and response pins
 to a HAL component provided and owned by the machine configuration. It neither
 constructs the component nor calls `ready()`, allowing multiple endpoints and
@@ -503,8 +521,9 @@ endpoint and an in-memory endpoint.
 Python remap generators are closed during interpreter unwind so their
 `finally` cleanup runs on task or operator abort. The regression also covers
 success, raw failure handling, standard failure policy, timeout, stale
-responses, monotonic request IDs, request release, cancellation, and a request
-read ahead of a running AUTO move. Headless
+responses, monotonic request IDs, request release, cancellation, a request
+read ahead of a running AUTO move, Stop and Pause during a request, and a
+timeout while stopping. Headless
 installs now include the curated `stdglue`.
 
 ### 0014 — Publish modal CSS maximum in spindle status
@@ -591,10 +610,11 @@ that begins and ends between two task status reads counts as run; this also
 applies to `G28.2` and is covered by `linuxcnc-tests/interp/g28.2/instant-home`),
 and restores the task mode afterwards. Abort, E-stop and Machine Off cancel it
 as they cancel a `G28.2`, and a resumable Stop (patch 0004) during it is
-accepted and stays `STOPPING` until homing ends. Stop or Pause before the
-hardware acknowledgment of an unhomed joint does not hold `STOPPING`: the
-acknowledgment completes the handshake and the acquisition home starts only
-after Resume. Once acknowledged, the home must start within
+accepted and stays `STOPPING` until homing ends. A handshake waiting for its
+hardware acknowledgment also runs to its end: Stop stays `STOPPING`, with
+`hold_wait` `AVAILABILITY`, until the acknowledgment arrives (Abort ends the
+wait). For an unhomed joint the acquisition home then starts only after
+Resume. Once acknowledged, the home must start within
 `AVAILABILITY_TIMEOUT`, not counting time paused or stopped; if it does not,
 the trajectory mode is restored once Abort has cancelled the acquisition. A failed acquisition homing
 reports the `G28.2` homing messages; the motion fault code is set as before.
