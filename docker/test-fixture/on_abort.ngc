@@ -1,0 +1,9 @@
+(Abort handler that fails on request, so tests can raise an error from it)
+o<on_abort> sub
+o100 if [EXISTS[#<_on_abort_fails>]]
+  o101 if [#<_on_abort_fails> NE 0]
+    (abort, linuxcnc-grpc live on-abort failure)
+  o101 endif
+o100 endif
+o<on_abort> endsub
+m2
