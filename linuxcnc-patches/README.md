@@ -542,3 +542,21 @@ are not supported.
 
 Known limitation, shared with the existing thread `tmax` and `time` handling:
 a failure while creating the parameters leaves a partially created thread.
+
+### 0024 — Identify the command an operator error rejects
+
+`EMC_OPERATOR_ERROR` gains `command_serial`. While task plans or issues a new
+command read from the command channel, operator errors it raises carry that
+command's serial number. This includes the interpreter error for an MDI line
+that fails when it is issued and errors that refuse a command while LinuxCNC
+still reports it done, such as a mode switch during an AUTO program. Errors
+raised elsewhere carry 0: program readahead, queued MDI and subroutine
+continuation, execution of queued interpreter commands, motion and IO faults,
+and operator messages relayed from the command channel. The configured
+`ON_ABORT_COMMAND` also raises its errors with 0, because it runs after the
+abort, machine-off, or E-stop that triggered it has taken effect. The field is
+serialized through NML. Python's `error_channel.poll()` keeps its two-element
+result.
+
+The corresponding transport field is `LinuxCNCError.command_sequence`, which
+lets the server resolve a refused command with LinuxCNC's own reason.

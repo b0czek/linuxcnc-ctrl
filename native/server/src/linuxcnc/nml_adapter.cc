@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -118,6 +119,10 @@ void fill_tool(const CANON_TOOL_TABLE& source, NmlToolEntry* result) {
 
 #ifdef LINUXCNC_GRPC_HAS_NML
 namespace {
+// Error-channel messages beyond this many unpublished are left in the
+// channel.
+constexpr std::size_t kMaxQueuedErrors = 256;
+
 template <std::size_t Size>
 std::string nml_text(const char (&source)[Size]) {
   return {source, static_cast<std::size_t>(
@@ -181,161 +186,6 @@ struct NmlAdapter::Impl {
     RetryState retry_;
   };
 
-  class CommandCompletionTracker {
-   public:
-    using Completion = std::function<void()>;
-    using Failure = std::function<void(std::string)>;
-
-    explicit CommandCompletionTracker(std::chrono::milliseconds timeout)
-        : timeout_(timeout) {}
-
-    void track(int serial, Completion completed, Failure failed) {
-      const auto now = std::chrono::steady_clock::now();
-      Pending pending{serial,
-                      timeout_ == std::chrono::milliseconds::zero()
-                          ? std::chrono::steady_clock::time_point::max()
-                          : now + timeout_,
-                      0, std::move(completed), std::move(failed)};
-      Resolution resolution = Resolution::Pending;
-      {
-        std::lock_guard lock(mutex_);
-        pending.after_observation = observation_sequence_;
-        if (!channel_healthy_) {
-          resolution = Resolution::Unavailable;
-        } else if (have_snapshot_) {
-          resolution =
-              resolve(pending, latest_, std::chrono::steady_clock::now(),
-                      observation_sequence_);
-        }
-        if (resolution == Resolution::Pending) {
-          pending_.push_back(std::move(pending));
-          return;
-        }
-      }
-      finish(pending, resolution);
-    }
-
-    void channel_failed() {
-      std::vector<Pending> failed;
-      {
-        std::lock_guard lock(mutex_);
-        channel_healthy_ = false;
-        failed.swap(pending_);
-      }
-      for (auto& pending : failed)
-        pending.failed("LinuxCNC NML status channel is unavailable");
-    }
-
-    void observe(const NmlStatusSnapshot& snapshot) {
-      std::vector<std::pair<Pending, Resolution>> ready;
-      {
-        std::lock_guard lock(mutex_);
-        latest_ = snapshot;
-        have_snapshot_ = true;
-        channel_healthy_ = true;
-        observed_at_ = std::chrono::steady_clock::now();
-        ++observation_sequence_;
-        collect_ready(observed_at_, &ready);
-      }
-      for (const auto& item : ready) finish(item.first, item.second);
-    }
-
-    void tick() {
-      std::vector<std::pair<Pending, Resolution>> ready;
-      {
-        std::lock_guard lock(mutex_);
-        collect_ready(std::chrono::steady_clock::now(), &ready);
-      }
-      for (const auto& item : ready) finish(item.first, item.second);
-    }
-
-    bool fresh() const {
-      std::lock_guard lock(mutex_);
-      return channel_healthy_ && have_snapshot_ &&
-             std::chrono::steady_clock::now() - observed_at_ <
-                 std::chrono::seconds(1);
-    }
-
-   private:
-    struct Pending {
-      int serial;
-      std::chrono::steady_clock::time_point deadline;
-      std::uint64_t after_observation;
-      Completion completed;
-      Failure failed;
-    };
-
-    enum class Resolution {
-      Pending,
-      Completed,
-      Rejected,
-      TimedOut,
-      Unavailable
-    };
-
-    static Resolution resolve(const Pending& pending,
-                              const NmlStatusSnapshot& snapshot,
-                              std::chrono::steady_clock::time_point now,
-                              std::uint64_t observation_sequence) {
-      if (observation_sequence <= pending.after_observation)
-        return now >= pending.deadline ? Resolution::TimedOut
-                                       : Resolution::Pending;
-      if (detail::nml_serial_after(snapshot.echo_serial_number, pending.serial))
-        return Resolution::Completed;
-      if (snapshot.echo_serial_number == pending.serial) {
-        if (snapshot.rcs_status == static_cast<std::int32_t>(RCS_STATUS::DONE))
-          return Resolution::Completed;
-        if (snapshot.rcs_status == static_cast<std::int32_t>(RCS_STATUS::ERROR))
-          return Resolution::Rejected;
-      }
-      return now >= pending.deadline ? Resolution::TimedOut
-                                     : Resolution::Pending;
-    }
-
-    void collect_ready(std::chrono::steady_clock::time_point now,
-                       std::vector<std::pair<Pending, Resolution>>* ready) {
-      auto pending = pending_.begin();
-      while (pending != pending_.end()) {
-        const auto resolution =
-            resolve(*pending, latest_, now, observation_sequence_);
-        if (resolution == Resolution::Pending) {
-          ++pending;
-          continue;
-        }
-        ready->emplace_back(std::move(*pending), resolution);
-        pending = pending_.erase(pending);
-      }
-    }
-
-    static void finish(const Pending& pending, Resolution resolution) {
-      switch (resolution) {
-        case Resolution::Completed:
-          pending.completed();
-          break;
-        case Resolution::Rejected:
-          pending.failed("LinuxCNC rejected the command");
-          break;
-        case Resolution::TimedOut:
-          pending.failed("timed out waiting for LinuxCNC command completion");
-          break;
-        case Resolution::Unavailable:
-          pending.failed("LinuxCNC NML status channel is unavailable");
-          break;
-        case Resolution::Pending:
-          break;
-      }
-    }
-
-    mutable std::mutex mutex_;
-    NmlStatusSnapshot latest_;
-    std::vector<Pending> pending_;
-    std::chrono::steady_clock::time_point observed_at_{};
-    bool have_snapshot_ = false;
-    bool channel_healthy_ = false;
-    std::uint64_t observation_sequence_ = 0;
-    std::chrono::milliseconds timeout_{};
-  };
-
   std::unique_ptr<RCS_CMD_CHANNEL> make_command_channel() const {
     if (nml_file.empty()) return {};
     return std::make_unique<RCS_CMD_CHANNEL>(emcFormat, "emcCommand", "xemc",
@@ -363,11 +213,72 @@ struct NmlAdapter::Impl {
   OwnedChannel<RCS_STAT_CHANNEL> status_channel;
   OwnedChannel<RCS_STAT_CHANNEL> position_status_channel;
   OwnedChannel<NML> error_channel;
-  CommandCompletionTracker completions{command_completion_timeout};
+  // Error-channel messages read but not yet returned by poll_error(), in
+  // channel order. Owned by the polling thread.
+  std::deque<NmlErrorEvent> errors;
+  NmlCommandCompletionTracker completions{command_completion_timeout};
 
   void fail_status_channel() {
     status_channel.failed();
     completions.channel_failed();
+  }
+
+  // Reads one message from the error channel into the publication queue
+  // and hands an error LinuxCNC tied to a command to command resolution.
+  // Returns false when nothing was read.
+  bool read_error() {
+    if (errors.size() >= kMaxQueuedErrors) return false;
+    auto* channel = error_channel.get([this] { return make_error_channel(); });
+    if (!channel) return false;
+    const auto type = channel->read();
+    if (type == -1) {
+      error_channel.failed();
+      return false;
+    }
+    if (type == 0) return false;
+    auto* address = channel->get_address();
+    if (!address) {
+      error_channel.failed();
+      return false;
+    }
+    NmlErrorEvent event;
+    event.type = static_cast<std::int32_t>(type);
+    switch (type) {
+      case EMC_OPERATOR_ERROR_TYPE: {
+        const auto* error = static_cast<EMC_OPERATOR_ERROR*>(address);
+        event.message = nml_text(error->error);
+        event.command_sequence =
+            static_cast<std::uint32_t>(error->command_serial);
+        completions.error_read(error->command_serial, event.message);
+        break;
+      }
+      case EMC_OPERATOR_TEXT_TYPE:
+        event.message =
+            nml_text(static_cast<EMC_OPERATOR_TEXT*>(address)->text);
+        break;
+      case EMC_OPERATOR_DISPLAY_TYPE:
+        event.message =
+            nml_text(static_cast<EMC_OPERATOR_DISPLAY*>(address)->display);
+        break;
+      case NML_ERROR_TYPE:
+        event.message = nml_text(static_cast<NML_ERROR*>(address)->error);
+        break;
+      case NML_TEXT_TYPE:
+        event.message = nml_text(static_cast<NML_TEXT*>(address)->text);
+        break;
+      case NML_DISPLAY_TYPE:
+        event.message = nml_text(static_cast<NML_DISPLAY*>(address)->display);
+        break;
+      default: {
+        char message[64] = {};
+        std::snprintf(message, sizeof(message), "NML message type %d",
+                      static_cast<int>(type));
+        event.message = message;
+        break;
+      }
+    }
+    errors.push_back(std::move(event));
+    return true;
   }
 
   bool write_command(RCS_CMD_MSG* message) {
@@ -556,7 +467,20 @@ NmlStatusPoll NmlAdapter::poll_status(NmlStatusSnapshot* snapshot) {
       }
     }
   }
-  impl_->completions.observe(*snapshot);
+  // LinuxCNC writes the errors of a task cycle before the status of that
+  // cycle. Draining the error channel after reading the status hands the
+  // tracker every error stamped with a command this status reports on before
+  // it resolves commands from it.
+  while (impl_->read_error()) {
+  }
+  const auto rcs_status = snapshot->rcs_status;
+  NmlCommandEcho echo{snapshot->echo_serial_number,
+                      NmlCommandEcho::State::Other};
+  if (rcs_status == static_cast<std::int32_t>(RCS_STATUS::DONE))
+    echo.state = NmlCommandEcho::State::Done;
+  else if (rcs_status == static_cast<std::int32_t>(RCS_STATUS::ERROR))
+    echo.state = NmlCommandEcho::State::Error;
+  impl_->completions.observe(echo);
   return NmlStatusPoll::Updated;
 #else
   (void)snapshot;
@@ -597,52 +521,10 @@ NmlStatusPoll NmlAdapter::poll_position(NmlPositionSnapshot* snapshot) {
 
 std::optional<NmlErrorEvent> NmlAdapter::poll_error() {
 #ifdef LINUXCNC_GRPC_HAS_NML
-  auto* channel =
-      impl_->error_channel.get([this] { return impl_->make_error_channel(); });
-  if (!channel) return std::nullopt;
-  const auto type = channel->read();
-  if (type == -1) {
-    impl_->error_channel.failed();
-    return std::nullopt;
-  }
-  if (type == 0) return std::nullopt;
-  auto* address = channel->get_address();
-  if (!address) {
-    impl_->error_channel.failed();
-    return std::nullopt;
-  }
-  NmlErrorEvent result;
-  result.type = static_cast<std::int32_t>(type);
-  switch (type) {
-    case EMC_OPERATOR_ERROR_TYPE:
-      result.message =
-          nml_text(static_cast<EMC_OPERATOR_ERROR*>(address)->error);
-      break;
-    case EMC_OPERATOR_TEXT_TYPE:
-      result.message = nml_text(static_cast<EMC_OPERATOR_TEXT*>(address)->text);
-      break;
-    case EMC_OPERATOR_DISPLAY_TYPE:
-      result.message =
-          nml_text(static_cast<EMC_OPERATOR_DISPLAY*>(address)->display);
-      break;
-    case NML_ERROR_TYPE:
-      result.message = nml_text(static_cast<NML_ERROR*>(address)->error);
-      break;
-    case NML_TEXT_TYPE:
-      result.message = nml_text(static_cast<NML_TEXT*>(address)->text);
-      break;
-    case NML_DISPLAY_TYPE:
-      result.message = nml_text(static_cast<NML_DISPLAY*>(address)->display);
-      break;
-    default: {
-      char message[64] = {};
-      std::snprintf(message, sizeof(message), "NML message type %d",
-                    static_cast<int>(type));
-      result.message = message;
-      break;
-    }
-  }
-  return result;
+  if (impl_->errors.empty() && !impl_->read_error()) return std::nullopt;
+  auto event = std::move(impl_->errors.front());
+  impl_->errors.pop_front();
+  return event;
 #else
   return std::nullopt;
 #endif

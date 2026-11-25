@@ -29,6 +29,7 @@ set(LINUXCNC_GRPC_DOMAIN_SOURCES
     src/program/workspace.cc
     src/program/workspace_archive.cc
     src/scope/telemetry.cc
+    src/linuxcnc/command_completion_tracker.cc
     src/linuxcnc/command_validation.cc
     src/linuxcnc/machine_health.cc
     src/linuxcnc/nml_adapter.cc
@@ -455,6 +456,16 @@ if(LINUXCNC_GRPC_BUILD_TESTS)
         -Wall -Wextra -Wpedantic)
     add_test(NAME linuxcnc-grpc-native-edge-tests
              COMMAND linuxcnc-grpc-native-edge-tests)
+    add_executable(linuxcnc-grpc-command-completion-tests
+        tests/command_completion_tracker_tests.cc)
+    target_compile_features(linuxcnc-grpc-command-completion-tests PRIVATE
+        cxx_std_20)
+    target_link_libraries(linuxcnc-grpc-command-completion-tests PRIVATE
+        linuxcnc-grpc-domain Threads::Threads)
+    target_compile_options(linuxcnc-grpc-command-completion-tests PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME linuxcnc-grpc-command-completion-tests
+             COMMAND linuxcnc-grpc-command-completion-tests)
     add_executable(linuxcnc-grpc-callback-runtime-tests
         tests/callback_runtime_tests.cc)
     target_compile_features(linuxcnc-grpc-callback-runtime-tests PRIVATE

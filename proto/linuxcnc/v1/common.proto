@@ -60,6 +60,17 @@ message LinuxCNCError {
   NmlMessageType type = 1;
   string message = 2;
   uint64 sequence = 3;
+  // LinuxCNC's serial for the command it was planning or issuing when it
+  // raised this error, the value ExecuteCommandResponse.command_sequence
+  // reports for that command. Serials are assigned by LinuxCNC and shared by
+  // all clients of the instance. Zero when the error was not raised while
+  // handling a command: motion and IO faults, the configured abort handler,
+  // errors from a running program or other execution after the command was
+  // issued, and messages not tied to a command. For a command written by this server, its
+  // ExecuteCommandResponse fails with this error's message, joined by "; "
+  // with any others carrying the same value. That does not hold if the
+  // command timed out first or the error was read too long before the
+  // server began tracking the command.
   uint64 command_sequence = 4;
 }
 

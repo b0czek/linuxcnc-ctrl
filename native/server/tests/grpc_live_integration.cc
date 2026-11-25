@@ -382,6 +382,9 @@ int main(int argc, char** argv) {
   }
   assert(tool_deleted);
 
+  verify_command_error_attribution(machine.get());
+  verify_abort_handler_errors(machine.get());
+
   expect_command_error(machine.get(), ExecuteCommandRequest{},
                        grpc::StatusCode::INVALID_ARGUMENT);
   ExecuteCommandRequest missing_tool;

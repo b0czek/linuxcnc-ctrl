@@ -284,6 +284,183 @@ void expect_command_error(linuxcnc::v1::MachineService::Stub* machine,
   assert(status.error_code() == expected);
 }
 
+namespace {
+
+ExecuteCommandResponse execute_until_resolved(
+    linuxcnc::v1::MachineService::Stub* machine,
+    ExecuteCommandRequest request) {
+  request.set_wait_policy(linuxcnc::v1::WAIT_POLICY_COMPLETED);
+  const auto deadline =
+      std::chrono::system_clock::now() + std::chrono::seconds(5);
+  // The live server admits one queued command, so a concurrent submission
+  // retries until the queue has room.
+  while (true) {
+    grpc::ClientContext context;
+    context.set_deadline(deadline);
+    ExecuteCommandResponse response;
+    const auto status = machine->ExecuteCommand(&context, request, &response);
+    if (status.ok()) return response;
+    if (status.error_code() != grpc::StatusCode::RESOURCE_EXHAUSTED) {
+      std::cerr << "ExecuteCommand failed: " << status.error_message() << "\n";
+      std::abort();
+    }
+  }
+}
+
+ExecuteCommandRequest mdi_request() {
+  ExecuteCommandRequest request;
+  request.mutable_mdi()->set_command("G0 X0");
+  return request;
+}
+
+void expect_rejected_with(const ExecuteCommandResponse& response,
+                          const std::string& reason) {
+  assert(response.status() == linuxcnc::v1::RCS_STATUS_ERROR);
+  assert(response.command_sequence() != 0);
+  assert(response.error().command_sequence() == response.command_sequence());
+  if (response.error().message() != reason) {
+    std::cerr << "rejected command reported \"" << response.error().message()
+              << "\" instead of \"" << reason << "\"\n";
+    std::abort();
+  }
+}
+
+}  // namespace
+
+void verify_command_error_attribution(
+    linuxcnc::v1::MachineService::Stub* machine) {
+  // LinuxCNC refuses MDI outside MDI mode and says why on its error channel.
+  const std::string mdi_rejection = "Must be in MDI mode to issue MDI command";
+  const std::string operator_error = "linuxcnc-grpc live operator error";
+
+  grpc::ClientContext errors_context;
+  errors_context.set_deadline(std::chrono::system_clock::now() +
+                              std::chrono::seconds(10));
+  auto errors = machine->WatchErrors(&errors_context, {});
+
+  ExecuteCommandRequest auto_mode;
+  auto_mode.mutable_set_task_mode()->set_mode(linuxcnc::v1::TASK_MODE_AUTO);
+  (void)execute_completed(machine, std::move(auto_mode));
+
+  const auto rejected = execute_until_resolved(machine, mdi_request());
+  expect_rejected_with(rejected, mdi_rejection);
+
+  // A command written right behind a rejected one. LinuxCNC's task handles
+  // one command per cycle, much faster than the server reads status, so the
+  // first status read usually already echoes the second command. The delay
+  // only makes the rejected command likely to be submitted first; the
+  // outcomes below hold in either order.
+  ExecuteCommandResponse back_to_back_rejected;
+  std::thread first([&] {
+    back_to_back_rejected = execute_until_resolved(machine, mdi_request());
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  ExecuteCommandRequest feed;
+  feed.mutable_set_feed_rate()->set_scale(1.0);
+  const auto following = execute_until_resolved(machine, std::move(feed));
+  first.join();
+  expect_rejected_with(back_to_back_rejected, mdi_rejection);
+  assert(following.status() == linuxcnc::v1::RCS_STATUS_DONE);
+  assert(!following.has_error());
+
+  // An operator error relayed from the command channel is not raised by
+  // handling a command: it carries no command and does not fail its own.
+  ExecuteCommandRequest relay;
+  relay.mutable_send_operator_error()->set_message(operator_error);
+  (void)execute_completed(machine, std::move(relay));
+
+  // Retained errors from earlier steps may be replayed first. The relayed
+  // error is published last.
+  bool rejected_published = false;
+  bool back_to_back_published = false;
+  bool relay_published = false;
+  linuxcnc::v1::LinuxCNCError error;
+  while (!relay_published && errors->Read(&error)) {
+    const auto sequence = error.command_sequence();
+    assert(sequence == 0 || sequence != following.command_sequence());
+    if (sequence == rejected.command_sequence()) {
+      assert(error.message() == mdi_rejection);
+      rejected_published = true;
+    } else if (sequence == back_to_back_rejected.command_sequence()) {
+      assert(error.message() == mdi_rejection);
+      back_to_back_published = true;
+    } else if (error.message() == operator_error) {
+      assert(sequence == 0);
+      relay_published = true;
+    }
+  }
+  if (!rejected_published || !back_to_back_published || !relay_published) {
+    std::cerr << "WatchErrors did not publish the expected command errors\n";
+    std::abort();
+  }
+  errors_context.TryCancel();
+  (void)errors->Finish();
+
+  ExecuteCommandRequest mdi_mode;
+  mdi_mode.mutable_set_task_mode()->set_mode(linuxcnc::v1::TASK_MODE_MDI);
+  (void)execute_completed(machine, std::move(mdi_mode));
+}
+
+void verify_abort_handler_errors(linuxcnc::v1::MachineService::Stub* machine) {
+  // The fixture's ON_ABORT_COMMAND fails while #<_on_abort_fails> is set.
+  // LinuxCNC runs it after carrying out an abort, a machine-off or an
+  // E-stop, so its error must not fail the command that triggered it.
+  const std::string handler_error = "linuxcnc-grpc live on-abort failure";
+  const std::string end_marker = "linuxcnc-grpc live abort handler end";
+
+  grpc::ClientContext errors_context;
+  errors_context.set_deadline(std::chrono::system_clock::now() +
+                              std::chrono::seconds(20));
+  auto errors = machine->WatchErrors(&errors_context, {});
+
+  ExecuteCommandRequest fail_on_abort;
+  fail_on_abort.mutable_mdi()->set_command("#<_on_abort_fails>=1");
+  (void)execute_completed(machine, std::move(fail_on_abort));
+
+  std::vector<ExecuteCommandResponse> triggers;
+  ExecuteCommandRequest abort;
+  abort.mutable_abort_task();
+  triggers.push_back(execute_completed(machine, std::move(abort)));
+  for (const auto state :
+       {linuxcnc::v1::TASK_STATE_OFF, linuxcnc::v1::TASK_STATE_ESTOP,
+        linuxcnc::v1::TASK_STATE_ESTOP_RESET, linuxcnc::v1::TASK_STATE_ON}) {
+    ExecuteCommandRequest set_state;
+    set_state.mutable_set_state()->set_state(state);
+    triggers.push_back(execute_completed(machine, std::move(set_state)));
+  }
+  for (const auto& response : triggers) assert(!response.has_error());
+
+  ExecuteCommandRequest mdi_mode;
+  mdi_mode.mutable_set_task_mode()->set_mode(linuxcnc::v1::TASK_MODE_MDI);
+  (void)execute_completed(machine, std::move(mdi_mode));
+  ExecuteCommandRequest stop_failing;
+  stop_failing.mutable_mdi()->set_command("#<_on_abort_fails>=0");
+  (void)execute_completed(machine, std::move(stop_failing));
+
+  ExecuteCommandRequest relay;
+  relay.mutable_send_operator_error()->set_message(end_marker);
+  (void)execute_completed(machine, std::move(relay));
+
+  // Retained errors from earlier steps may be replayed first. The relayed
+  // marker is published last.
+  bool handler_error_published = false;
+  bool end_published = false;
+  linuxcnc::v1::LinuxCNCError error;
+  while (!end_published && errors->Read(&error)) {
+    if (error.message().find(handler_error) != std::string::npos) {
+      assert(error.command_sequence() == 0);
+      handler_error_published = true;
+    }
+    end_published = error.message() == end_marker;
+  }
+  if (!handler_error_published || !end_published) {
+    std::cerr << "WatchErrors did not publish the abort handler's error\n";
+    std::abort();
+  }
+  errors_context.TryCancel();
+  (void)errors->Finish();
+}
+
 void verify_priority_admission(linuxcnc::v1::MachineService::Stub* machine) {
   constexpr int kSubmitters = 256;
   std::atomic<int> ready{0};
