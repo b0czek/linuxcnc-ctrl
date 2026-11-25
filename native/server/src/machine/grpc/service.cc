@@ -142,7 +142,7 @@ class CommandTaskReactor final : public ::grpc::ServerUnaryReactor {
         reactor.response_->mutable_error()->set_type(
             NML_MESSAGE_TYPE_NML_ERROR);
         reactor.response_->mutable_error()->set_command_sequence(
-            result.sequence);
+            result.accepted_sequence);
         reactor.response_->mutable_error()->set_message(result.error);
       } else if (result.state == CommandState::Accepted) {
         reactor.response_->set_status(RCS_STATUS_EXEC);
@@ -946,6 +946,7 @@ class MachineServiceImpl final : public MachineService::CallbackService,
       message_.set_type(static_cast<NmlMessageType>(entry.event.type));
       message_.set_message(entry.event.message);
       message_.set_sequence(entry.sequence);
+      message_.set_command_sequence(entry.event.command_sequence);
       writing_sequence_ = entry.sequence;
       if (!write_finish_.try_start_write()) return;
       StartWrite(&message_);

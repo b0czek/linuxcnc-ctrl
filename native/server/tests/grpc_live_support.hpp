@@ -42,6 +42,9 @@ void verify_moving_status_cadence(linuxcnc::v1::MachineService::Stub* machine);
 void expect_command_error(linuxcnc::v1::MachineService::Stub* machine,
                           const linuxcnc::v1::ExecuteCommandRequest& request,
                           grpc::StatusCode expected);
+void verify_command_error_attribution(
+    linuxcnc::v1::MachineService::Stub* machine);
+void verify_abort_handler_errors(linuxcnc::v1::MachineService::Stub* machine);
 void verify_priority_admission(linuxcnc::v1::MachineService::Stub* machine);
 
 std::string read_file(const std::string& path);

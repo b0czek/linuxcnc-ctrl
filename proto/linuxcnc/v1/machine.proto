@@ -548,6 +548,10 @@ message ExecuteCommandRequest {
 }
 
 message ExecuteCommandResponse {
+  // LinuxCNC's serial for the written command, shared by all clients of the
+  // instance. Errors LinuxCNC raised while handling this command carry the
+  // same value in LinuxCNCError.command_sequence (uint64), as does error when
+  // the command failed.
   uint32 command_sequence = 1;
   RcsStatus status = 2;
   LinuxCNCError error = 3;

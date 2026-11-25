@@ -107,10 +107,11 @@ if [[ ! -x "$linuxcnc_root/scripts/rip-environment" ]]; then
   exit 77
 fi
 
-mkdir -p "$root/active" "$root/workspaces" "$root/health"
+mkdir -p "$root/active" "$root/workspaces" "$root/health" "$root/subroutines"
 chmod 700 "$root/workspaces" "$root/health"
 cp "$fixture_dir/sim_mm.var" "$root/sim_mm.var"
 cp "$fixture_dir/sim_mm.tbl" "$root/sim_mm.tbl"
+cp "$fixture_dir/on_abort.ngc" "$root/subroutines/on_abort.ngc"
 cp "$linuxcnc_root/configs/common/linuxcnc.nml" "$root/live.nml"
 sed -i \
   -e "s/TCP=5005/TCP=$nml_port/g" \
@@ -121,6 +122,7 @@ sed -i \
 sed \
   -e "s#__NML_FILE__#$root/live.nml#g" \
   -e "s#__ACTIVE_PROGRAM_DIRECTORY__#$root/active#g" \
+  -e "s#__SUBROUTINE_DIRECTORY__#$root/subroutines#g" \
   "$fixture_dir/sim_grpc.ini.in" > "$root/live.ini"
 
 setsid "$linuxcnc_root/scripts/rip-environment" linuxcnc -r "$root/live.ini" \

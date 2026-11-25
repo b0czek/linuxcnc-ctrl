@@ -12,18 +12,12 @@
 #include <vector>
 
 #include "linuxcnc_grpc/command_coordinator.hpp"
+#include "linuxcnc_grpc/linuxcnc/command_completion_tracker.hpp"
 
 namespace linuxcnc::server {
 
 // LinuxCNC's EMC_TASK_PLAN_OPEN::file is a LINELEN-sized C string.
 inline constexpr std::size_t kNmlProgramPathCapacity = 255;
-
-namespace detail {
-constexpr bool nml_serial_after(std::int32_t lhs, std::int32_t rhs) {
-  return static_cast<std::int32_t>(static_cast<std::uint32_t>(lhs) -
-                                   static_cast<std::uint32_t>(rhs)) > 0;
-}
-}  // namespace detail
 
 enum class NmlCommandKind {
   SetTaskMode,
@@ -293,11 +287,6 @@ struct NmlPositionSnapshot {
   std::array<double, 9> commanded{};
   std::array<double, 9> tool_offset{};
   std::int32_t motion_type = 0;
-};
-
-struct NmlErrorEvent {
-  std::int32_t type = 0;
-  std::string message;
 };
 
 enum class NmlStatusPoll {
