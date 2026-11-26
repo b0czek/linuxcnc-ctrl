@@ -105,6 +105,20 @@ wait_for(lambda: s.task_state == linuxcnc.STATE_ESTOP, "task to start")
 # Task is still busy with its startup work for a few cycles.
 wait_idle("task startup to finish")
 
+# Startup work that status does not show (the interpreter synch task queues)
+# can still refuse the first reset on a loaded machine; retry until it ends.
+deadline = time.time() + 10.0
+while True:
+    drain_errors()
+    c.reset_interpreter()
+    c.wait_complete()
+    time.sleep(0.2)
+    msg = e.poll()
+    if not msg:
+        break
+    if "interpreter reset refused" not in msg[1] or time.time() > deadline:
+        fail("startup: unexpected error %r" % msg[1])
+
 # Resets of a machine at rest are allowed in every state and mode.
 mdi_g91 = lambda: mdi("G91")
 expect_reset_accepted("E-stop")
