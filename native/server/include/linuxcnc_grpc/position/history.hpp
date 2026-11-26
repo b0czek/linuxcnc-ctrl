@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
-#include <optional>
 #include <vector>
 
 namespace linuxcnc::server {
@@ -22,16 +21,22 @@ struct PositionHistoryBatch {
   // A replacement is always emitted by snapshot(). Delta consumers compare
   // this generation with the generation they last acknowledged.
   std::uint64_t generation = 0;
+  // Sequence of the first packed point. Point i of packed has sequence
+  // first_sequence + i; sequences are contiguous and never reassigned.
   std::uint64_t first_sequence = 0;
   std::uint64_t next_sequence = 0;
-  // Delta consumers remove this many points from their current tail before
-  // appending packed. Replacement snapshots always leave this at zero.
-  std::uint32_t replace_count = 0;
+  // Sequence of the oldest point the history still retains. Delta consumers
+  // drop their points before it instead of receiving a replacement.
+  std::uint64_t oldest_sequence = 0;
   std::vector<double> packed;
 };
 
 // Bounded, cursor-addressable history used by both the gRPC position service
 // and local consumers. It stores the stable ten-double wire layout.
+//
+// Collinear samples are coalesced into the tail point only while no read has
+// returned it. snapshot() and since() seal every point they return, so a
+// point a consumer has seen never changes and keeps its sequence.
 class PositionHistory {
  public:
   explicit PositionHistory(std::size_t max_samples = 10000,
@@ -40,10 +45,10 @@ class PositionHistory {
   void configure(std::size_t max_samples, double epsilon = 1e-6);
   void clear();
   bool append(const PositionSample& sample);
-  PositionHistoryBatch snapshot() const;
+  PositionHistoryBatch snapshot();
   PositionHistoryBatch since(std::uint64_t sequence,
                              std::size_t max_samples = 0,
-                             std::uint64_t after_generation = 0) const;
+                             std::uint64_t after_generation = 0);
   std::size_t size() const;
   std::uint64_t next_sequence() const;
 
@@ -51,10 +56,6 @@ class PositionHistory {
   struct Entry {
     std::uint64_t sequence = 0;
     PositionSample sample;
-    // The first sequence in a chain of tail replacements. This lets a
-    // coalesced delta distinguish replacing a point the consumer has seen
-    // from replacing an intermediate point it has not seen.
-    std::optional<std::uint64_t> replacement_root;
   };
 
   static bool changed(const PositionSample& a, const PositionSample& b,
@@ -70,6 +71,8 @@ class PositionHistory {
   std::size_t max_samples_;
   double epsilon_;
   std::uint64_t next_sequence_ = 0;
+  // Points before this sequence have been returned by a read and are final.
+  std::uint64_t sealed_sequence_ = 0;
   std::uint64_t generation_ = 1;
 };
 

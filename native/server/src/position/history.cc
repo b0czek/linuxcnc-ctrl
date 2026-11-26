@@ -28,85 +28,59 @@ bool PositionHistory::append(const PositionSample& sample) {
   if (!entries_.empty() && !changed(entries_.back().sample, sample, epsilon_)) {
     return false;
   }
-  const auto sequence = next_sequence_++;
-  if (entries_.size() >= 2 &&
+  // Only a tail no read has returned may absorb a collinear sample; it keeps
+  // its sequence, so sequences stay contiguous.
+  if (entries_.size() >= 2 && entries_.back().sequence >= sealed_sequence_ &&
       sample.motion_type == entries_.back().sample.motion_type &&
       sample.motion_type == entries_[entries_.size() - 2].sample.motion_type &&
       collinear(sample, entries_.back().sample,
                 entries_[entries_.size() - 2].sample)) {
-    const auto replacement_root =
-        entries_.back().replacement_root.value_or(entries_.back().sequence);
-    entries_.back() = Entry{sequence, sample, replacement_root};
+    entries_.back().sample = sample;
   } else {
-    entries_.push_back(Entry{sequence, sample, std::nullopt});
+    entries_.push_back(Entry{next_sequence_++, sample});
   }
-  if (entries_.size() > max_samples_) {
-    entries_.pop_front();
-    // A cursor only identifies the next append; it cannot describe which
-    // bounded prefix the consumer still retains. Force synchronized consumers
-    // to replace their local history whenever capacity evicts that prefix.
-    ++generation_;
-  }
+  if (entries_.size() > max_samples_) entries_.pop_front();
   return true;
 }
 
-PositionHistoryBatch PositionHistory::snapshot() const {
-  std::lock_guard lock(mutex_);
-  PositionHistoryBatch result;
-  result.reset = true;
-  result.generation = generation_;
-  result.first_sequence =
-      entries_.empty() ? next_sequence_ : entries_.front().sequence;
-  result.next_sequence = next_sequence_;
-  result.packed.reserve(entries_.size() * kPositionStride);
-  for (const auto& entry : entries_)
-    append_packed(entry.sample, &result.packed);
-  return result;
+PositionHistoryBatch PositionHistory::snapshot() {
+  // Cursor zero is either the oldest retained point or behind it, so this
+  // always reads the whole retained history.
+  auto batch = since(0);
+  batch.reset = true;
+  return batch;
 }
 
-PositionHistoryBatch PositionHistory::since(
-    std::uint64_t sequence, std::size_t max_samples,
-    std::uint64_t after_generation) const {
+PositionHistoryBatch PositionHistory::since(std::uint64_t sequence,
+                                            std::size_t max_samples,
+                                            std::uint64_t after_generation) {
   std::lock_guard lock(mutex_);
   PositionHistoryBatch result;
   result.generation = generation_;
   result.next_sequence = next_sequence_;
-  const auto oldest_sequence =
+  result.oldest_sequence =
       entries_.empty() ? next_sequence_ : entries_.front().sequence;
-  result.first_sequence = oldest_sequence;
-  if (entries_.empty()) {
-    result.reset = (after_generation != 0 && after_generation != generation_) ||
-                   sequence != next_sequence_;
-    return result;
-  }
-
   const bool generation_changed =
       after_generation != 0 && after_generation != generation_;
-  const bool rolled = sequence < oldest_sequence;
-  result.reset = generation_changed || rolled;
-  const auto first =
-      (generation_changed || rolled)
-          ? entries_.begin()
-          : std::lower_bound(entries_.begin(), entries_.end(), sequence,
-                             [](const Entry& entry, std::uint64_t value) {
-                               return entry.sequence < value;
-                             });
+  // A cursor before the oldest retained point cannot be continued, and one
+  // beyond next_sequence_ was not issued by this history.
+  result.reset = generation_changed || sequence < result.oldest_sequence ||
+                 sequence > next_sequence_;
+  const auto first_sequence = result.reset ? result.oldest_sequence : sequence;
+  const auto available =
+      static_cast<std::size_t>(next_sequence_ - first_sequence);
   const auto count =
-      max_samples == 0
-          ? static_cast<std::size_t>(entries_.end() - first)
-          : std::min(max_samples,
-                     static_cast<std::size_t>(entries_.end() - first));
-  result.first_sequence =
-      first == entries_.end() ? next_sequence_ : first->sequence;
-  if (!result.reset && first != entries_.end() &&
-      first->replacement_root.value_or(sequence) < sequence) {
-    result.replace_count = 1;
-  }
+      max_samples == 0 ? available : std::min(max_samples, available);
+  result.first_sequence = first_sequence;
   result.packed.reserve(count * kPositionStride);
+  const auto first =
+      entries_.begin() +
+      static_cast<std::ptrdiff_t>(first_sequence - result.oldest_sequence);
   for (auto it = first; it != first + static_cast<std::ptrdiff_t>(count);
        ++it) {
     append_packed(it->sample, &result.packed);
   }
+  sealed_sequence_ = std::max(sealed_sequence_, first_sequence + count);
   return result;
 }
 

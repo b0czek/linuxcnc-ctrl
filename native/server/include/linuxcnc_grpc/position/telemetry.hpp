@@ -19,9 +19,8 @@ class PositionTelemetry {
   void configure(std::size_t max_samples);
   void clear();
   bool append(const PositionSample& sample);
-  PositionHistoryBatch snapshot() const;
-  PositionHistoryBatch since(std::uint64_t sequence,
-                             std::uint64_t generation) const;
+  PositionHistoryBatch snapshot();
+  PositionHistoryBatch since(std::uint64_t sequence, std::uint64_t generation);
   Subscription subscribe(SubscriptionHub<std::uint64_t>::Callback callback);
   void close();
 

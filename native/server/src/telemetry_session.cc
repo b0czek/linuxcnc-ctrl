@@ -66,7 +66,7 @@ std::string encode_position_frame(const PositionHistoryBatch& batch,
   frame.set_generation(batch.generation);
   frame.set_first_sequence(batch.first_sequence);
   frame.set_next_sequence(batch.next_sequence);
-  frame.set_replacement_count(replacement ? 0 : batch.replace_count);
+  frame.set_oldest_sequence(batch.oldest_sequence);
   for (const auto value : batch.packed) frame.add_values(value);
   return frame.SerializeAsString();
 }

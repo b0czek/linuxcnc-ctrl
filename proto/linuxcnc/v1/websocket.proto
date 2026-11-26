@@ -15,12 +15,17 @@ enum FrameKind {
   FRAME_KIND_DELTA = 2;
 }
 
+// Points carry contiguous sequences: the point at index i of values has
+// sequence first_sequence + i, and a point keeps its sequence and value once
+// delivered. A replacement holds the whole retained history and replaces the
+// consumer's copy; a delta appends. Consumers drop points before
+// oldest_sequence, which capacity eviction advances without a replacement.
 message PositionHistoryFrame {
   FrameKind kind = 1;
   uint64 generation = 2;
   uint64 first_sequence = 3;
   uint64 next_sequence = 4;
-  uint32 replacement_count = 5;
+  uint64 oldest_sequence = 5;
   repeated double values = 6 [packed = true];
 }
 
