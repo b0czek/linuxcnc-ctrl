@@ -1,0 +1,7 @@
+; M61 Q2 (and its automatic offset) is interpreted while the slow move
+; runs; the test aborts before the move ends, so neither executes.
+G21 G90
+G1 X100 F60
+M61 Q2
+G0 X0 Z0
+M2

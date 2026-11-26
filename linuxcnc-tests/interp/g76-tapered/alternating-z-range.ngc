@@ -1,0 +1,31 @@
+(G76.1 feeds must stay between the start Z and the programmed end Z)
+(Each cycle is preceded by a "range" comment giving those two Z values)
+
+g20 g18 g8
+s100 m3
+
+(range 0 -1)
+g0 x1 z0
+g76.1 p.1 z-1 i-.1 j.03 k.1 r1 h1 q30
+
+(range 0 -1)
+g0 x1 z0
+g76.1 p.1 x.8 z-1 i-.1 j.03 k.1 r1 h1 q30
+
+(range 0 -1)
+g0 x1 z0
+g76.1 p.1 z-1 i-.1 j.03 k.1 r1 h1 q30 e.1 l3
+
+(range -1 0)
+g0 x1 z-1
+g76.1 p.1 z0 i-.1 j.03 k.1 r1 h1 q30 e.1 l3
+
+(range 0 -1)
+g0 x.5 z0
+g76.1 p.1 z-1 i.1 j.03 k.1 r1 h1 q30
+
+(range 0 -1)
+g0 x1 z0
+g76.1 p.1 x.8 z-1 i-.1 j.02 k.1 r2 h0 q45 e.1 l3
+
+m2

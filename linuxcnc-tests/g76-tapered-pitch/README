@@ -1,0 +1,34 @@
+Check that a tapered G76 (an X endpoint) is rejected before it cuts when any
+synchronized move of any pass needs an axis to run faster than its maximum
+velocity, and that a thread just inside the limit is accepted.  The pitch check
+needs real axis limits, which the standalone interpreter does not have, so the
+test runs milltask with a simulated XZ lathe and drives it over MDI.
+
+The X axis allows 0.5 mm/s (30 mm/min) and Z 10 mm/s (600 mm/min).  A
+synchronized move with lead L along a direction (dx, dz) at N RPM needs
+L * N * |dx| / hypot(dx, dz) per minute of X.  Every tapered move is built so
+its Z advance per revolution is the programmed pitch P, so that X rate is
+P * N * |dx / dz|.
+
+- Drive line X10 Z0 to X8 Z-20 (G8): |dx/dz| = 0.1, so X needs 0.15 mm/min per
+  RPM and the limit is 200 RPM (Z alone would allow 400).  S199 is accepted,
+  S201 rejected.  The internal thread (X5 to X7) and the same thread in G7
+  (X20 to X16, I-2 J1 K2) have the same slope and limit.  A cylindrical G76 at
+  S201 is accepted: its synchronized moves are along Z only.
+- G96 without D: the smallest radius of any synchronized move is 6 mm, at the
+  end of the full-depth pass (8 - |I| - K).  200 RPM there is
+  S = 200 * 2 * pi * 6 / 1000 = 7.5398 m/min, so S7.5 is accepted and S7.6
+  (201.596 RPM) rejected.
+- G96 S100 with D: radius 6 would give 2653 RPM, so D bounds the speed.  D199
+  is accepted, D201 rejected, also for a later block using G76.1 (the G96
+  limit is modal).
+- E2 L1: a tapered entry first feeds in along X alone, from the clearance to
+  the thread crest, at the entry lead 1.5 * hypot(1.199, 1.990) / 1.990 =
+  1.75121, where 1.199 = K + 0.0995 * E is the X travel and 1.990 = 0.995 * E
+  the Z travel of the angled entry.  X limits that to 30 / 1.75121 = 17.13 RPM:
+  S17 is accepted, S18 rejected.
+- E2 L2: the exit leaves the decreasing drive line outwards, so its X travel is
+  K - 0.0995 * E = 0.801 over Z 1.990; the limit is 30 / (1.5 * 0.4025) =
+  49.69 RPM: S49 is accepted, S50 rejected.
+
+An accepted G76 is aborted as soon as its moves are queued.

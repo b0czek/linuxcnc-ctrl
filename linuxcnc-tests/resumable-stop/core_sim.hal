@@ -1,0 +1,50 @@
+# core HAL config file for simulation
+
+loadrt [KINS]KINEMATICS
+loadrt [EMCMOT]EMCMOT base_period_nsec=[EMCMOT]BASE_PERIOD servo_period_nsec=[EMCMOT]SERVO_PERIOD num_joints=[KINS]JOINTS num_spindles=[TRAJ]SPINDLES
+loadrt encoder names=encoder_0
+loadrt sim_encoder names=sim_encoder_0
+
+addf motion-command-handler servo-thread
+addf motion-controller servo-thread
+
+net Xpos joint.0.motor-pos-cmd => joint.0.motor-pos-fb
+net Ypos joint.1.motor-pos-cmd => joint.1.motor-pos-fb
+net Zpos joint.2.motor-pos-cmd => joint.2.motor-pos-fb
+
+net estop-loop iocontrol.0.user-enable-out iocontrol.0.emc-enable-in
+
+net tool-prepare <= iocontrol.0.tool-prepare
+net tool-prepared => iocontrol.0.tool-prepared
+
+net tool-change <= iocontrol.0.tool-change
+net tool-changed => iocontrol.0.tool-changed
+
+net spindle-speed-cmd spindle.0.speed-out => sim_encoder_0.speed
+setp sim_encoder_0.ppr 12
+setp sim_encoder_0.scale 60
+
+net spindle-phase-A sim_encoder_0.phase-A => encoder_0.phase-A
+net spindle-phase-B sim_encoder_0.phase-B => encoder_0.phase-B
+net spindle-phase-Z sim_encoder_0.phase-Z => encoder_0.phase-Z
+setp encoder_0.position-scale 48
+
+net spindle-index-enable spindle.0.index-enable <=> encoder_0.index-enable
+net spindle-pos encoder_0.position => spindle.0.revs
+net spindle-rps encoder_0.velocity => spindle.0.speed-in
+
+addf encoder.capture-position servo-thread
+addf sim-encoder.update-speed servo-thread
+addf sim-encoder.make-pulses servo-thread
+addf encoder.update-counters servo-thread
+
+setp spindle.0.at-speed true
+setp spindle.1.at-speed true
+
+# Peak tangential deceleration, read by the short-block in-flight Step scenario.
+loadrt ddt names=vel-ddt
+loadrt minmax names=accel-peak
+net tp-vel motion.current-vel => vel-ddt.in
+net tp-accel vel-ddt.out => accel-peak.in
+addf vel-ddt servo-thread
+addf accel-peak servo-thread

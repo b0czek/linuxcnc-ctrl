@@ -1,0 +1,17 @@
+loadrt trivkins coordinates=XYZ
+loadrt motmod base_period_nsec=0 servo_period_nsec=1000000 traj_period_nsec=4000000 num_joints=3 num_spindles=1
+loadrt mux2 count=2
+addf mux2.0 servo-thread
+addf mux2.1 servo-thread
+addf motion-command-handler servo-thread
+addf motion-controller servo-thread
+net Xpos joint.0.motor-pos-cmd => joint.0.motor-pos-fb
+net Ycmd joint.1.motor-pos-cmd => mux2.0.in0
+net Yfb mux2.0.out => joint.1.motor-pos-fb
+net Zcmd joint.2.motor-pos-cmd => mux2.1.in0
+net Zfb mux2.1.out => joint.2.motor-pos-fb
+net estop-loop iocontrol.0.user-enable-out iocontrol.0.emc-enable-in
+setp spindle.0.at-speed true
+loadrt flipflop count=1
+addf flipflop.0 servo-thread
+net enable-seen motion.motion-enabled => flipflop.0.set

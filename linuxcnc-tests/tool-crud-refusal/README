@@ -1,0 +1,7 @@
+EMC_TOOL_UPDATE and EMC_TOOL_DELETE have no Python binding, so tool-cmd.cc sends
+them over NML the way the native server does and reports the result from the
+echoed serial number and the RCS status.
+
+A refused update or delete fails that command with an operator error. The
+machine keeps its state: no abort, spindle and coolant stay on, an open program
+stays open, and the next command succeeds.

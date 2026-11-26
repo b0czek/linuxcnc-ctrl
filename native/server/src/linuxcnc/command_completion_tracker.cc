@@ -10,13 +10,17 @@ NmlCommandCompletionTracker::NmlCommandCompletionTracker(
     : timeout_(timeout) {}
 
 void NmlCommandCompletionTracker::track(std::int32_t serial,
+                                        NmlCompletionRule rule,
                                         Completion completed, Failure failed) {
   const auto now = std::chrono::steady_clock::now();
   Pending pending{serial,
+                  rule,
                   timeout_ == std::chrono::milliseconds::zero()
                       ? std::chrono::steady_clock::time_point::max()
                       : now + timeout_,
-                  0, std::move(completed), std::move(failed)};
+                  0,
+                  std::move(completed),
+                  std::move(failed)};
   {
     std::lock_guard lock(mutex_);
     if (channel_healthy_) {
@@ -75,6 +79,11 @@ void NmlCommandCompletionTracker::tick() {
   for (const auto& item : ready) finish(item);
 }
 
+bool NmlCommandCompletionTracker::has_pending() const {
+  std::lock_guard lock(mutex_);
+  return !pending_.empty();
+}
+
 bool NmlCommandCompletionTracker::fresh() const {
   std::lock_guard lock(mutex_);
   return channel_healthy_ && have_snapshot_ &&
@@ -99,7 +108,11 @@ NmlCommandCompletionTracker::Resolution NmlCommandCompletionTracker::resolve(
       *reason += error.message;
     }
     if (stamped) return Resolution::Rejected;
-    if (latest_.serial != pending.serial) return Resolution::Completed;
+    if (latest_.serial != pending.serial) {
+      return pending.rule == NmlCompletionRule::ExactEcho
+                 ? Resolution::Superseded
+                 : Resolution::Completed;
+    }
     if (latest_.state == NmlCommandEcho::State::Done)
       return Resolution::Completed;
     if (latest_.state == NmlCommandEcho::State::Error)
@@ -150,6 +163,11 @@ void NmlCommandCompletionTracker::finish(const Ready& ready) {
     case Resolution::Rejected:
       ready.pending.failed(ready.reason.empty() ? kRejectedMessage
                                                 : ready.reason);
+      break;
+    case Resolution::Superseded:
+      ready.pending.failed(
+          "LinuxCNC moved on to a later command before reporting this "
+          "command's result; its outcome is unknown");
       break;
     case Resolution::TimedOut:
       ready.pending.failed("timed out waiting for LinuxCNC command completion");

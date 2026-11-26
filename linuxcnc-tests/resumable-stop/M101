@@ -1,0 +1,4 @@
+#!/bin/sh
+# A user M-code that takes a while, for Stop to wait for.
+sleep 2
+exit 0

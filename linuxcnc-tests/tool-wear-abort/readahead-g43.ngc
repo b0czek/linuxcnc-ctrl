@@ -1,0 +1,6 @@
+; The same for a plain G43 H2: upstream's read-ahead case.
+G21 G90
+G1 X100 F60
+G43 H2
+G0 X0 Z0
+M2

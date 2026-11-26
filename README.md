@@ -11,6 +11,24 @@ INI, program, HAL, and scope services over gRPC, plus binary WebSocket streams
 for position history, selected HAL values, and G-code preview. See the
 [architecture document](./docs/native-grpc-architecture.md).
 
+## Scope
+
+LinuxCNC runs here as a headless backend, and clients use the APIs this
+repository provides. LinuxCNC's own GUIs and GUI tools (AXIS, Touchy, gmoccapy,
+QtDragon, `tooledit` and similar) are out of scope: we do not add features to
+them, fix them, test them, or keep patches compatible with them. `halui` is a
+headless HAL interface and stays in scope.
+
+The older remote interfaces (`linuxcncrsh`, `halrmt`, `schedrmt`), tool database
+programs (`[EMCIO]DB_PROGRAM`), and RTAI or other kernel-module realtime are out
+of scope in the same way: clients use this repository's gRPC APIs, tool data
+lives in the file-backed tool table, and LinuxCNC runs with `uspace` realtime,
+including on PREEMPT_RT kernels.
+
+Out of scope means we do not care about these features. It does not mean we
+remove them: patches neither fix them nor strip them out, and code a patch
+already touches stays as it is unless other work requires a change.
+
 ## Repository layout
 
 - `proto/`: canonical versioned protobuf wire contract and its existing license.

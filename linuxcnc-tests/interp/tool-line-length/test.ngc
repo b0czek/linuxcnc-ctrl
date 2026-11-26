@@ -1,0 +1,12 @@
+; Tool table lines up to 510 characters load whole; longer ones are refused
+; with an error rather than cut. G43 H applies geometry plus wear, so the
+; applied offset shows every number of a loaded line.
+; test.tbl: T1's line is 510 characters, T2's 511, T3's 600, T4's 521 (a
+; 511-byte read would cut its closing WZ number), T5's ordinary. Each long
+; line ends in WZ, so a cut line would lose or shorten its Z wear.
+g21
+g43 h1
+(debug,T1 510 chars: #5081 #5083)
+g43 h5
+(debug,T5 after the long lines: #5081 #5083)
+m2

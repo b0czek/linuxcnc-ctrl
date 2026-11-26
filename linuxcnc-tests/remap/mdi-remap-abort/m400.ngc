@@ -1,0 +1,5 @@
+o<m400> sub
+  (wait up to 3 s for digital input 0, which nothing sets)
+  M66 P0 L3 Q3
+o<m400> endsub
+M2

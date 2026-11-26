@@ -108,6 +108,7 @@ void fill_status(const NmlStatusSnapshot& source, LinuxCNCStat* target) {
   task->set_task_paused(task_source.task_paused);
   task->set_delay_left(task_source.delay_left);
   task->set_queued_mdi_commands(task_source.queued_mdi_commands);
+  task->set_hold_wait(static_cast<HoldWait>(task_source.hold_wait));
 
   const auto& motion_source = source.motion_stat;
   auto* trajectory = target->mutable_motion()->mutable_traj();
@@ -278,6 +279,7 @@ bool copy_task_delta(const TaskStat& previous, const TaskStat& current,
   COPY_TASK_SCALAR(task_paused)
   COPY_TASK_SCALAR(delay_left)
   COPY_TASK_SCALAR(queued_mdi_commands)
+  COPY_TASK_SCALAR(hold_wait)
 #undef COPY_TASK_SCALAR
 
 #define COPY_TASK_MESSAGE(name)                          \

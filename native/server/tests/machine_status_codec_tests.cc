@@ -68,6 +68,7 @@ void delta_preserves_wire_changes() {
   auto changed = status_sample();
   changed.echo_serial_number = 18;
   changed.task_stat.optional_stop_state = true;
+  changed.task_stat.hold_wait = linuxcnc::v1::HOLD_WAIT_EXECUTOR;
   changed.motion_stat.traj.actual_position.values[0] = 15.0;
   changed.motion_stat.joints[0].homed = false;
   changed.motion_stat.digital_input = {1, 0};
@@ -80,6 +81,7 @@ void delta_preserves_wire_changes() {
   assert(delta->sequence() == 23);
   assert(delta->echo_serial_number() == 18);
   assert(delta->task().optional_stop_state());
+  assert(delta->task().hold_wait() == linuxcnc::v1::HOLD_WAIT_EXECUTOR);
   assert(!delta->task().has_mode());
   assert(delta->motion().traj().actual_position().values(0) == 15.0);
   assert(!delta->motion().traj().has_linear_units());

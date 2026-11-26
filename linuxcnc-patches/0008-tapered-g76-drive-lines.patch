@@ -4,38 +4,64 @@ Date: Sat, 15 Aug 2026 22:14:12 +0200
 Subject: [PATCH] interp: extend G76 with tapered threads and alternating
  infeed
 
+Ported to v2.10.0-pre2, where G76 checks its synchronized feed against
+the axis velocity limits and holds the spindle override for the cycle.
+A tapered cycle now checks every synchronized move of every pass at the
+lead it is commanded with: the drive line, the X-only feed in and the
+angled move of an entry taper, and the angled move of an exit taper,
+each with its own X and Z components and, in G96, its own smallest
+radius.  Upstream's cylindrical checks are kept unchanged for a G76
+without X.  The pass geometry is computed once and used both for the
+checks and for the moves.  G76.1 is G76 with alternating infeed; D stays
+unavailable on G76, as upstream later gives it another meaning there.
+tests/g76-tapered-pitch exercises the check on a simulated lathe.
 ---
- docs/src/gcode/g-code.adoc                    |  39 +-
- src/emc/rs274ngc/interp_check.cc              |  11 +-
- src/emc/rs274ngc/interp_convert.cc            | 142 ++++++-
- tests/interp/g76-tapered/README               |   8 +
- tests/interp/g76-tapered/expected             | 377 ++++++++++++++++++
- .../interp/g76-tapered/invalid-d-fraction.ngc |   5 +
- tests/interp/g76-tapered/invalid-d2.ngc       |   5 +
- tests/interp/g76-tapered/invalid-g96-d.ngc    |   5 +
- tests/interp/g76-tapered/invalid-y.ngc        |   5 +
- tests/interp/g76-tapered/test.ngc             |  63 +++
- tests/interp/g76-tapered/test.sh              |  14 +
- 11 files changed, 653 insertions(+), 21 deletions(-)
- create mode 100644 tests/interp/g76-tapered/README
- create mode 100644 tests/interp/g76-tapered/expected
- create mode 100644 tests/interp/g76-tapered/invalid-d-fraction.ngc
- create mode 100644 tests/interp/g76-tapered/invalid-d2.ngc
- create mode 100644 tests/interp/g76-tapered/invalid-g96-d.ngc
- create mode 100644 tests/interp/g76-tapered/invalid-y.ngc
- create mode 100644 tests/interp/g76-tapered/test.ngc
- create mode 100644 tests/interp/g76-tapered/test.sh
+ docs/src/gcode/g-code.adoc          |  55 ++++--
+ src/emc/rs274ngc/interp_convert.cc  | 273 ++++++++++++++++++++++++----
+ src/emc/rs274ngc/interp_internal.cc |   1 +
+ src/emc/rs274ngc/interp_internal.hh |   2 +
+ src/emc/rs274ngc/interp_read.cc     |   5 +
+ src/emc/rs274ngc/rs274ngc_interp.hh |   4 +
+ 6 files changed, 293 insertions(+), 47 deletions(-)
 
 diff --git a/docs/src/gcode/g-code.adoc b/docs/src/gcode/g-code.adoc
-index fa46049723..4160cfb4a2 100644
+index f8f9d01..6f196b6 100644
 --- a/docs/src/gcode/g-code.adoc
 +++ b/docs/src/gcode/g-code.adoc
-@@ -1900,15 +1900,24 @@ In example S100 with 1.25MM per revolution thread pitch gives a feed of F125.
+@@ -98,7 +98,7 @@ as the 'L number', and so on for any other letter.
+ |<<gcode:g71-g72,G71-G72>>         |Lathe roughing cycle
+ |<<gcode:g73,G73>>                 |Drilling Cycle with Chip Breaking
+ |<<gcode:g74,G74>>                 |Left-hand Tapping Cycle with Dwell
+-|<<gcode:g76,G76>>                 |Multi-pass Threading Cycle (Lathe)
++|<<gcode:g76,G76, G76.1>>          |Multi-pass Threading Cycle (Lathe)
+ |<<gcode:g80,G80>>                 |Cancel Motion Modes
+ |<<gcode:g81,G81>>                 |Drilling Cycle
+ |<<gcode:g82,G82>>                 |Drilling Cycle with Dwell
+@@ -1390,7 +1390,11 @@ It is an error if:
+   this command is executed.
+ * The pitch and the spindle speed together ask an axis to move faster than
+   its maximum velocity. See <<gcode:g33,G33>> for how the speed is determined
+-  in constant surface speed mode.
++  in constant surface speed mode. With an 'X-' endpoint every synchronized
++  move of every pass is checked at the lead it is commanded with: the tapered
++  drive line, the feed in along X and the angled move of an entry taper, and
++  the angled move of an exit taper, each at the spindle speed reached at its
++  own smallest radius in constant surface speed mode.
+ 
+ [[gcode:g38]]
+ == G38._n_ Straight Probe(((G38.n Probe)))
+@@ -2213,19 +2217,29 @@ The feed rate 'F-' is spindle speed multiplied by distance per revolution
+ In example S100 with 1.25MM per revolution thread pitch gives a feed of F125.
+ 
+ [[gcode:g76]]
+-== G76 Threading Cycle(((G76 Threading Cycle)))
++== G76, G76.1 Threading Cycle(((G76 Threading Cycle)))
  
  [source,ngc]
  ----
 -G76 P- Z- I- J- R- K- Q- H- E- L- $-
-+G76 P- Z- I- J- K- [X-] [D-] [R-] [Q-] [H-] [E-] [L-] [$-]
++G76 P- Z- I- J- K- [X-] [R-] [Q-] [H-] [E-] [L-] [$-]
++G76.1 P- Z- I- J- K- [X-] [R-] [Q-] [H-] [E-] [L-] [$-]
  ----
  
  .G76 Threading
@@ -59,7 +85,7 @@ index fa46049723..4160cfb4a2 100644
  
  [NOTE]
  When G7 'Lathe Diameter Mode' is in force the values for 'I', 'J' and 'K' are diameter measurements.
-@@ -1937,7 +1946,17 @@ Unnecessarily high degression values will produce an unnecessarily high number o
+@@ -2254,11 +2268,22 @@ Unnecessarily high degression values will produce an unnecessarily high number o
  
  * 'Q-' - The 'compound slide angle' is the angle (in degrees) describing to what extent successive passes should be offset along the drive line.
    This is used to cause one side of the tool to remove more material than the other.
@@ -67,18 +93,23 @@ index fa46049723..4160cfb4a2 100644
 +  A positive 'Q' value causes the leading edge of the tool to cut more heavily
 +  on the first pass. Typical values are 29, 29.5 or 30. 'Q0' keeps every pass
 +  on the centered final thread line.
-+* 'D-' - Selects the compound-infeed mode. 'D0' (the default) uses the
-+  existing fixed compound-infeed direction, with the side selected by the
-+  sign of Q. 'D1' alternates
-+  roughing passes across the centered final thread line, starting on the flank
-+  selected by the sign of Q. The alternating offset decreases with remaining
-+  cut depth. The full-depth pass and all H spring passes use the centered final
-+  path. Program G96 and its D spindle-speed limit in a separate block from a
-+  G76 D infeed selection.
  * 'H-' - The number of 'spring passes'.
    Spring passes are additional passes at full thread depth.
    If no additional passes are desired, program 'H0'.
-@@ -1957,8 +1976,10 @@ Thread entries and exits can be programmed tapered with the 'E' and 'L' values.
+ 
++'G76' uses a fixed compound-infeed direction, with the side selected by the
++sign of 'Q'. 'G76.1' takes the same words and alternates roughing passes across
++the centered final thread line, starting on the flank selected by the sign of
++'Q'. The alternating offset decreases with remaining cut depth. A pass on the
++opposite flank starts with its offset but ends where the final pass ends, so no
++pass cuts past the programmed 'Z'. The full-depth
++pass and all 'H' spring passes use the centered final path. Status reports
++'G76.1' as the active motion code 'G76'.
++
+ Thread entries and exits can be programmed tapered with the 'E' and 'L' values.
+ 
+ * 'E-' - Specifies the distance along the drive line used for the taper.
+@@ -2274,8 +2299,10 @@ Thread entries and exits can be programmed tapered with the 'E' and 'L' values.
    cut depth then synchronize and begin the cut.
  
  The tool is moved to the initial X and Z positions prior to issuing
@@ -91,141 +122,218 @@ index fa46049723..4160cfb4a2 100644
  
  The tool will pause briefly for synchronization before each threading
  pass, so a relief groove will be required at the entry unless the
-@@ -1981,7 +2002,9 @@ from the hole.
+@@ -2298,14 +2325,18 @@ from the hole.
  It is an error if:
  
  * The active plane is not the ZX plane.
 -* Other axis words, such as X- or Y-, are specified.
 +* A Y- word is specified, or another axis besides X or Z is moved.
-+* A 'D-' infeed mode other than 0 or 1 is specified.
-+* 'G96' and 'G76' use 'D-' in the same block.
  * The 'R-' degression value is less than 1.0.
  * All the required words are not specified.
  * 'P-', 'J-', 'K-' or 'H-' is negative.
-diff --git a/src/emc/rs274ngc/interp_check.cc b/src/emc/rs274ngc/interp_check.cc
-index cf3b8050c9..3b139a0ca6 100644
---- a/src/emc/rs274ngc/interp_check.cc
-+++ b/src/emc/rs274ngc/interp_check.cc
-@@ -256,9 +256,9 @@ int Interp::check_other_codes(block_pointer block)       //!< pointer to a block
-         (block->g_modes[7] != G_41_1) && (block->g_modes[7] != G_42_1) &&
-         (motion != G_70) && (motion != G_71) && (motion != G_71_1) &&
-         (motion != G_71_2) && (motion != G_72) && (motion != G_72_1) &&
--        (motion != G_72_2) && (motion != G_73) && (motion != G_83) &&
-+        (motion != G_72_2) && (motion != G_73) && (motion != G_76) && (motion != G_83) &&
-         (block->g_modes[14] != G_96)),
--        _("D word with no G41, G41.1, G42, G42.1, G71, G71.1, G71.2 G73, G83 or G96 to use it"));
-+        _("D word with no G41, G41.1, G42, G42.1, G71, G71.1, G71.2 G73, G76, G83 or G96 to use it"));
-   }
+ * 'E-' is greater than half the drive line length.
+ * The pitch and the spindle speed together ask an axis to move faster than
+   its maximum velocity. See <<gcode:g33,G33>> for how the speed is determined
+-  in constant surface speed mode.
++  in constant surface speed mode. With an 'X-' endpoint every synchronized
++  move of every pass is checked at the lead it is commanded with: the tapered
++  drive line, the feed in along X and the angled move of an entry taper, and
++  the angled move of an exit taper, each at the spindle speed reached at its
++  own smallest radius in constant surface speed mode.
  
-   if (block->dollar_flag) {
-@@ -383,6 +383,13 @@ int Interp::check_other_codes(block_pointer block)       //!< pointer to a block
- 
-     CHKS((!block->i_flag || !block->j_flag || !block->k_flag),
-             NCE_I_J_OR_K_WORDS_MISSING_WITH_G76);
-+
-+    if (block->d_flag) {
-+      CHKS((block->d_number_float != 0.0 && block->d_number_float != 1.0),
-+           _("In G76, D must be 0 or 1"));
-+      CHKS((block->g_modes[GM_SPINDLE_MODE] == G_96),
-+           _("D cannot select both G76 infeed mode and G96 spindle limit in the same block"));
-+    }
-   }
- 
-   return INTERP_OK;
+ [NOTE]
+ The spindle speed override is held for the whole G76 cycle at the value in
 diff --git a/src/emc/rs274ngc/interp_convert.cc b/src/emc/rs274ngc/interp_convert.cc
-index 99f9e6fdb8..373916cfb0 100644
+index ab502ad..6d051a2 100644
 --- a/src/emc/rs274ngc/interp_convert.cc
 +++ b/src/emc/rs274ngc/interp_convert.cc
-@@ -5659,6 +5659,88 @@ threading_pass(setup_pointer settings, block_pointer block,
+@@ -5944,7 +5944,8 @@ int Interp::issue_straight_index(int axis, int jnum, double target, int lineno,
+ static void
+ threading_pass(setup_pointer settings, block_pointer block,
+ 	       int boring, double safe_x, double depth, double end_depth,
+-	       double start_y, double start_z, double zoff, double taper_dist,
++	       double start_y, double start_z, double zoff, double end_zoff,
++	       double taper_dist,
+ 	       int entry_taper, int exit_taper, double taper_pitch,
+ 	       double pitch, double full_threadheight, double target_z) {
+     STRAIGHT_TRAVERSE(block->line_number, boring?
+@@ -5970,24 +5971,171 @@ threading_pass(setup_pointer settings, block_pointer block,
+ 
+     if(taper_dist && exit_taper) {
+ 	STRAIGHT_FEED(block->line_number, boring? safe_x + depth: safe_x - depth,  //over
+-		      start_y, target_z - zoff + taper_dist, AABBCC);
++		      start_y, target_z - end_zoff + taper_dist, AABBCC);
+ 	START_SPEED_FEED_SYNCH(settings->active_spindle, taper_pitch, 0);
+ 	STRAIGHT_FEED(block->line_number, boring?
+ 		      safe_x + depth - full_threadheight:
+ 		      safe_x - depth + full_threadheight,
+-		      start_y, target_z - zoff, AABBCC); //angled out
++		      start_y, target_z - end_zoff, AABBCC); //angled out
+     } else {
+ 	STRAIGHT_FEED(block->line_number, boring? safe_x + depth: safe_x - depth,
+-		      start_y, target_z - zoff, AABBCC); //over
++		      start_y, target_z - end_zoff, AABBCC); //over
+     }
+     STOP_SPEED_FEED_SYNCH();
+     STRAIGHT_TRAVERSE(block->line_number, boring?
+ 		      safe_x + depth - end_depth:
+ 		      safe_x - depth + end_depth,
+-		      start_y, target_z - zoff, AABBCC); //out
++		      start_y, target_z - end_zoff, AABBCC); //out
      ENABLE_FEED_OVERRIDE();
  }
  
-+// Make one threading pass along a tapered XZ drive line.  X coordinates are
-+// offset from the drive line just as they are for a cylindrical thread, while
-+// compound offsets and entry/exit distances are measured along that line.
-+static void
-+tapered_threading_pass(setup_pointer settings, block_pointer block,
-+	       int boring, double start_x, double start_z,
-+	       double end_x, double end_z, double depth, double end_depth,
-+	       double start_y, double compound_offset,
-+	       double full_compound_offset, double taper_dist,
-+	       int entry_taper, int exit_taper, double pitch,
-+	       double full_threadheight) {
++// Geometry of one threading pass along a tapered XZ drive line.  X coordinates
++// are offset from the drive line just as they are for a cylindrical thread,
++// while compound offsets and entry/exit distances are measured along that line.
++// It is computed once per pass and used both to check every synchronized lead
++// the pass commands and to issue its moves, so the two cannot disagree.
++struct tapered_pass_geometry {
++    double drive_pitch;                 // synchronized lead along the drive line
++    double pass_start_z, pass_end_z;
++    double back_x, out_x;               // clearance before and after the cut
++    double cut_start_x, cut_end_x;      // drive line offset to the pass depth
++    bool entry;                         // tapered entry
++    double crest_start_x, entry_end_x, entry_end_z, entry_pitch;
++    bool exit;                          // tapered exit
++    double exit_start_x, exit_start_z, crest_end_x, exit_pitch;
++};
++
++static tapered_pass_geometry
++tapered_pass(int boring, double start_x, double start_z,
++	     double end_x, double end_z, double depth, double end_depth,
++	     double compound_offset, double end_compound_offset,
++	     double full_compound_offset,
++	     double taper_dist, int entry_taper, int exit_taper, double pitch,
++	     double full_threadheight) {
++    tapered_pass_geometry g = {};
 +    const double drive_dx = end_x - start_x;
 +    const double drive_dz = end_z - start_z;
 +    const double drive_length = hypot(drive_dx, drive_dz);
 +    const double drive_x = drive_dx / drive_length;
 +    const double drive_z = drive_dz / drive_length;
 +    const double depth_direction = boring ? 1.0 : -1.0;
-+    const double drive_pitch = pitch * drive_length / fabs(drive_dz);
++    g.drive_pitch = pitch * drive_length / fabs(drive_dz);
 +
 +    const double pass_start_x = start_x + drive_x * compound_offset;
-+    const double pass_start_z = start_z + drive_z * compound_offset;
++    g.pass_start_z = start_z + drive_z * compound_offset;
 +    const double pass_end_x = end_x + drive_x *
-+	(compound_offset - full_compound_offset);
-+    const double pass_end_z = end_z + drive_z *
-+	(compound_offset - full_compound_offset);
-+    const double cut_start_x = pass_start_x + depth_direction * depth;
-+    const double cut_end_x = pass_end_x + depth_direction * depth;
++	(end_compound_offset - full_compound_offset);
++    g.pass_end_z = end_z + drive_z *
++	(end_compound_offset - full_compound_offset);
++    g.cut_start_x = pass_start_x + depth_direction * depth;
++    g.cut_end_x = pass_end_x + depth_direction * depth;
++    g.back_x = g.cut_start_x - depth_direction * end_depth;
++    g.out_x = g.cut_end_x - depth_direction * end_depth;
 +
-+    STRAIGHT_TRAVERSE(block->line_number,
-+		      cut_start_x - depth_direction * end_depth,
-+		      start_y, pass_start_z, AABBCC); // back
-+
-+    if(taper_dist && entry_taper) {
-+	const double entry_end_x = cut_start_x + drive_x * taper_dist;
-+	const double entry_end_z = pass_start_z + drive_z * taper_dist;
-+	const double crest_start_x =
-+	    cut_start_x - depth_direction * full_threadheight;
-+	const double entry_pitch = pitch *
-+	    hypot(entry_end_x - crest_start_x,
-+		  entry_end_z - pass_start_z) /
-+	    fabs(entry_end_z - pass_start_z);
-+
-+	DISABLE_FEED_OVERRIDE();
-+	START_SPEED_FEED_SYNCH(settings->active_spindle, entry_pitch, 0);
-+	STRAIGHT_FEED(block->line_number, crest_start_x,
-+		      start_y, pass_start_z, AABBCC); // in
-+	STRAIGHT_FEED(block->line_number, entry_end_x,
-+		      start_y, entry_end_z, AABBCC); // angled in
-+	START_SPEED_FEED_SYNCH(settings->active_spindle, drive_pitch, 0);
-+    } else {
-+	STRAIGHT_TRAVERSE(block->line_number, cut_start_x,
-+			  start_y, pass_start_z, AABBCC); // in
-+	DISABLE_FEED_OVERRIDE();
-+	START_SPEED_FEED_SYNCH(settings->active_spindle, drive_pitch, 0);
++    g.entry = taper_dist && entry_taper;
++    if(g.entry) {
++	g.entry_end_x = g.cut_start_x + drive_x * taper_dist;
++	g.entry_end_z = g.pass_start_z + drive_z * taper_dist;
++	g.crest_start_x = g.cut_start_x - depth_direction * full_threadheight;
++	g.entry_pitch = pitch *
++	    hypot(g.entry_end_x - g.crest_start_x,
++		  g.entry_end_z - g.pass_start_z) /
++	    fabs(g.entry_end_z - g.pass_start_z);
 +    }
 +
-+    if(taper_dist && exit_taper) {
-+	const double exit_start_x = cut_end_x - drive_x * taper_dist;
-+	const double exit_start_z = pass_end_z - drive_z * taper_dist;
-+	const double crest_end_x =
-+	    cut_end_x - depth_direction * full_threadheight;
-+	const double exit_pitch = pitch *
-+	    hypot(crest_end_x - exit_start_x,
-+		  pass_end_z - exit_start_z) /
-+	    fabs(pass_end_z - exit_start_z);
++    g.exit = taper_dist && exit_taper;
++    if(g.exit) {
++	g.exit_start_x = g.cut_end_x - drive_x * taper_dist;
++	g.exit_start_z = g.pass_end_z - drive_z * taper_dist;
++	g.crest_end_x = g.cut_end_x - depth_direction * full_threadheight;
++	g.exit_pitch = pitch *
++	    hypot(g.crest_end_x - g.exit_start_x,
++		  g.pass_end_z - g.exit_start_z) /
++	    fabs(g.pass_end_z - g.exit_start_z);
++    }
++    return g;
++}
 +
-+	STRAIGHT_FEED(block->line_number, exit_start_x,
-+		      start_y, exit_start_z, AABBCC); // over
-+	START_SPEED_FEED_SYNCH(settings->active_spindle, exit_pitch, 0);
-+	STRAIGHT_FEED(block->line_number, crest_end_x,
-+		      start_y, pass_end_z, AABBCC); // angled out
++// Make one threading pass along a tapered XZ drive line.
++static void
++tapered_threading_pass(setup_pointer settings, block_pointer block,
++		       const tapered_pass_geometry &g, double start_y) {
++    STRAIGHT_TRAVERSE(block->line_number, g.back_x,
++		      start_y, g.pass_start_z, AABBCC); // back
++
++    if(g.entry) {
++	DISABLE_FEED_OVERRIDE();
++	START_SPEED_FEED_SYNCH(settings->active_spindle, g.entry_pitch, 0);
++	STRAIGHT_FEED(block->line_number, g.crest_start_x,
++		      start_y, g.pass_start_z, AABBCC); // in
++	STRAIGHT_FEED(block->line_number, g.entry_end_x,
++		      start_y, g.entry_end_z, AABBCC); // angled in
++	START_SPEED_FEED_SYNCH(settings->active_spindle, g.drive_pitch, 0);
 +    } else {
-+	STRAIGHT_FEED(block->line_number, cut_end_x,
-+		      start_y, pass_end_z, AABBCC); // over
++	STRAIGHT_TRAVERSE(block->line_number, g.cut_start_x,
++			  start_y, g.pass_start_z, AABBCC); // in
++	DISABLE_FEED_OVERRIDE();
++	START_SPEED_FEED_SYNCH(settings->active_spindle, g.drive_pitch, 0);
++    }
++
++    if(g.exit) {
++	STRAIGHT_FEED(block->line_number, g.exit_start_x,
++		      start_y, g.exit_start_z, AABBCC); // over
++	START_SPEED_FEED_SYNCH(settings->active_spindle, g.exit_pitch, 0);
++	STRAIGHT_FEED(block->line_number, g.crest_end_x,
++		      start_y, g.pass_end_z, AABBCC); // angled out
++    } else {
++	STRAIGHT_FEED(block->line_number, g.cut_end_x,
++		      start_y, g.pass_end_z, AABBCC); // over
 +    }
 +    STOP_SPEED_FEED_SYNCH();
-+    STRAIGHT_TRAVERSE(block->line_number,
-+		      cut_end_x - depth_direction * end_depth,
-+		      start_y, pass_end_z, AABBCC); // out
++    STRAIGHT_TRAVERSE(block->line_number, g.out_x,
++		      start_y, g.pass_end_z, AABBCC); // out
 +    ENABLE_FEED_OVERRIDE();
++}
++
++int Interp::check_tapered_threading_pass(setup_pointer settings,
++					 const tapered_pass_geometry &g) {
++    // Every move the pass makes while synchronized, at the lead it is
++    // commanded with.  The Z advance per revolution of each is the programmed
++    // pitch, but X moves too, and a tapered entry first feeds in along X alone
++    // at the entry lead.  In G96 the spindle speed is bounded by each move's
++    // own smallest radius.
++    struct sync_move {
++	const char *what;
++	double lead, x0, z0, x1, z1;
++    } moves[4];
++    int count = 0;
++    double drive_x0 = g.cut_start_x, drive_z0 = g.pass_start_z;
++    double drive_x1 = g.cut_end_x, drive_z1 = g.pass_end_z;
++
++    if(g.entry) {
++	moves[count++] = {"G76 entry taper", g.entry_pitch,
++			  g.back_x, g.pass_start_z, g.crest_start_x, g.pass_start_z};
++	moves[count++] = {"G76 entry taper", g.entry_pitch,
++			  g.crest_start_x, g.pass_start_z, g.entry_end_x, g.entry_end_z};
++	drive_x0 = g.entry_end_x;
++	drive_z0 = g.entry_end_z;
++    }
++    if(g.exit) {
++	drive_x1 = g.exit_start_x;
++	drive_z1 = g.exit_start_z;
++    }
++    moves[count++] = {"G76 tapered thread", g.drive_pitch,
++		      drive_x0, drive_z0, drive_x1, drive_z1};
++    if(g.exit)
++	moves[count++] = {"G76 exit taper", g.exit_pitch,
++			  g.exit_start_x, g.exit_start_z, g.crest_end_x, g.pass_end_z};
++
++    for(int i = 0; i < count; i++) {
++	const sync_move &m = moves[i];
++	double delta[9] = {m.x1 - m.x0, 0.0, m.z1 - m.z0, 0, 0, 0, 0, 0, 0};
++	CHP(check_spindle_sync_feed(settings, m.lead, m.what, delta,
++				    min_abs_over_range(m.x0, m.x1)));
++    }
++    return INTERP_OK;
 +}
 +
  int Interp::convert_threading_cycle(block_pointer block,
  				    setup_pointer settings,
  				    double end_x, double end_y, double end_z) {
-@@ -5666,6 +5748,8 @@ int Interp::convert_threading_cycle(block_pointer block,
+@@ -5995,6 +6143,8 @@ int Interp::convert_threading_cycle(block_pointer block,
  
      CHKS((settings->cutter_comp_side != CUTTER_COMP::OFF),
           (_("Cannot use G76 threading cycle with cutter radius compensation on")));
@@ -234,13 +342,12 @@ index 99f9e6fdb8..373916cfb0 100644
  
      CHKS((block->i_number == 0),
          (_("In G76, I must not be 0")));
-@@ -5705,7 +5789,18 @@ int Interp::convert_threading_cycle(block_pointer block,
+@@ -6034,7 +6184,17 @@ int Interp::convert_threading_cycle(block_pointer block,
      double compound_angle = block->q_number;
      if(compound_angle == -1) compound_angle = 0;
      compound_angle *= M_PIl/180.0;
 -    if(end_z > start_z) compound_angle = -compound_angle;
-+    const bool alternating_infeed =
-+	block->d_flag && block->d_number_float == 1.0;
++    const bool alternating_infeed = block->g76_alternating_infeed;
 +
 +    const bool tapered_drive_line = block->x_flag;
 +    CHKS((tapered_drive_line && end_z == start_z),
@@ -254,7 +361,7 @@ index 99f9e6fdb8..373916cfb0 100644
  
      int spring_cuts = block->h_flag ? block->h_number: 0;
  
-@@ -5717,7 +5812,8 @@ int Interp::convert_threading_cycle(block_pointer block,
+@@ -6046,7 +6206,8 @@ int Interp::convert_threading_cycle(block_pointer block,
      double taper_pitch = taper_dist > 0.0?
  	pitch * hypot(taper_dist, full_threadheight)/taper_dist: pitch;
  
@@ -264,13 +371,47 @@ index 99f9e6fdb8..373916cfb0 100644
  
      int taper_flags = block->l_number;
      if(taper_flags < 0) taper_flags = 0;
-@@ -5728,25 +5824,49 @@ int Interp::convert_threading_cycle(block_pointer block,
+@@ -6057,44 +6218,86 @@ int Interp::convert_threading_cycle(block_pointer block,
      double depth, zoff;
      int pass = 1;
  
 +    const double compound_tangent = tan(compound_angle);
 +    const double full_compound_offset = full_threadheight * compound_tangent;
      double target_z = end_z + fabs(k_number) * tan(compound_angle);
+ 
+-    // A taper also moves X by the thread height over the taper distance, at
+-    // the correspondingly larger pitch.
+-    double plain_pass[9] = {0.0, 0.0, target_z - start_z, 0, 0, 0, 0, 0, 0};
+-    /* the passes run between the first and last cut depth, so the tightest
+-       radius is the last cut outside, the first cut boring */
+-    double thread_min_x = boring
+-        ? min_abs_over_range(safe_x + start_depth, safe_x + end_depth)
+-        : min_abs_over_range(safe_x - end_depth, safe_x - start_depth);
+-    CHP(check_spindle_sync_feed(settings, pitch, "G76", plain_pass,
+-                                thread_min_x));
+-    if (taper_dist != 0.0 && (entry_taper || exit_taper)) {
+-        double taper_pass[9] = {full_threadheight, 0.0, taper_dist,
+-                                0, 0, 0, 0, 0, 0};
+-        CHP(check_spindle_sync_feed(settings, taper_pitch, "G76", taper_pass,
+-                                    thread_min_x));
+-    }
+-
+-    lock_speed_override(settings);
++    // The depth and compound offset of every pass, roughing passes first,
++    // then the full-depth pass and the spring passes.
++    // end_zoff is the offset applied to the end of the pass.  It equals zoff
++    // except on a mirrored pass, whose offset lies beyond the final one:
++    // shifting its end as far would cut past the programmed Z, so the end
++    // stops where the final pass ends.  The start keeps the full offset,
++    // because that is what moves the cut onto the other flank.
++    struct threading_pass_plan {
++	double depth, zoff, end_zoff;
++    };
++    const auto end_offset = [&](double offset) {
++	return fabs(offset) > fabs(full_compound_offset) ?
++	    full_compound_offset : offset;
++    };
++    std::vector<threading_pass_plan> passes;
  
      depth = start_depth;
 -    zoff = (depth - full_dia_depth) * tan(compound_angle);
@@ -284,18 +425,7 @@ index 99f9e6fdb8..373916cfb0 100644
 +	// passes always use the same centered final path.
 +	if(alternating_infeed && !(pass & 1))
 +	    zoff = 2.0 * full_compound_offset - zoff;
-+	if(tapered_drive_line) {
-+	    tapered_threading_pass(settings, block, boring, start_x, start_z,
-+			    end_x, end_z, depth, end_depth, start_y, zoff,
-+			    full_compound_offset,
-+			    taper_dist, entry_taper, exit_taper, pitch,
-+			    full_threadheight);
-+	} else {
-+	    threading_pass(settings, block, boring, safe_x, depth, end_depth,
-+			   start_y, start_z, zoff, taper_dist, entry_taper,
-+			   exit_taper, taper_pitch, pitch, full_threadheight,
-+			   target_z);
-+	}
++	passes.push_back({depth, zoff, end_offset(zoff)});
          depth = full_dia_depth + cut_increment * pow(++pass, 1.0/degression);
 -        zoff = (depth - full_dia_depth) * tan(compound_angle);
 +        zoff = (depth - full_dia_depth) * compound_tangent;
@@ -303,553 +433,126 @@ index 99f9e6fdb8..373916cfb0 100644
      // full specified depth now
      depth = end_depth;
 -    zoff = (depth - full_dia_depth) * tan(compound_angle);
-+    zoff = full_compound_offset;
++    zoff = (tapered_drive_line || alternating_infeed) ? full_compound_offset :
++	(depth - full_dia_depth) * compound_tangent;
      // cut at least once -- more if spring cuts.
-     for(int i = 0; i<spring_cuts+1; i++) {
+-    for(int i = 0; i<spring_cuts+1; i++) {
 -	threading_pass(settings, block, boring, safe_x, depth, end_depth, start_y,
 -		       start_z, zoff, taper_dist, entry_taper, exit_taper,
 -		       taper_pitch, pitch, full_threadheight, target_z);
++    for(int i = 0; i<spring_cuts+1; i++)
++	passes.push_back({depth, zoff, zoff});
++
++    std::vector<tapered_pass_geometry> tapered_passes;
++    if(tapered_drive_line) {
++	for(const threading_pass_plan &p : passes) {
++	    tapered_passes.push_back(
++		tapered_pass(boring, start_x, start_z, end_x, end_z, p.depth,
++			     end_depth, p.zoff, p.end_zoff, full_compound_offset,
++			     taper_dist, entry_taper, exit_taper, pitch,
++			     full_threadheight));
++	    CHP(check_tapered_threading_pass(settings, tapered_passes.back()));
++	}
++    } else {
++	// A taper also moves X by the thread height over the taper distance, at
++	// the correspondingly larger pitch.
++	double plain_pass[9] = {0.0, 0.0, target_z - start_z, 0, 0, 0, 0, 0, 0};
++	/* the passes run between the first and last cut depth, so the tightest
++	   radius is the last cut outside, the first cut boring */
++	double thread_min_x = boring
++	    ? min_abs_over_range(safe_x + start_depth, safe_x + end_depth)
++	    : min_abs_over_range(safe_x - end_depth, safe_x - start_depth);
++	CHP(check_spindle_sync_feed(settings, pitch, "G76", plain_pass,
++				    thread_min_x));
++	if (taper_dist != 0.0 && (entry_taper || exit_taper)) {
++	    double taper_pass[9] = {full_threadheight, 0.0, taper_dist,
++				    0, 0, 0, 0, 0, 0};
++	    CHP(check_spindle_sync_feed(settings, taper_pitch, "G76", taper_pass,
++					thread_min_x));
++	}
++    }
++
++    lock_speed_override(settings);
++
++    for(size_t i = 0; i < passes.size(); i++) {
 +	if(tapered_drive_line) {
-+	    tapered_threading_pass(settings, block, boring, start_x, start_z,
-+			    end_x, end_z, depth, end_depth, start_y, zoff,
-+			    zoff, taper_dist, entry_taper, exit_taper, pitch,
-+			    full_threadheight);
++	    tapered_threading_pass(settings, block, tapered_passes[i], start_y);
 +	} else {
-+	    threading_pass(settings, block, boring, safe_x, depth, end_depth,
-+			   start_y, start_z, zoff, taper_dist, entry_taper,
-+			   exit_taper, taper_pitch, pitch, full_threadheight,
-+			   target_z);
++	    threading_pass(settings, block, boring, safe_x, passes[i].depth,
++			   end_depth, start_y, start_z, passes[i].zoff,
++			   passes[i].end_zoff, taper_dist, entry_taper, exit_taper, taper_pitch,
++			   pitch, full_threadheight, target_z);
 +	}
      }
+     restore_speed_override(settings);
      STRAIGHT_TRAVERSE(block->line_number, end_x, end_y, end_z, AABBCC);
-     settings->current_x = end_x;
-diff --git a/tests/interp/g76-tapered/README b/tests/interp/g76-tapered/README
-new file mode 100644
-index 0000000000..645af3ae97
---- /dev/null
-+++ b/tests/interp/g76-tapered/README
-@@ -0,0 +1,8 @@
-+Verify that optional G76 X endpoints produce tapered XZ drive lines while
-+preserving axial P pitch.  The canonical trace covers absolute and incremental
-+endpoints, radius and diameter mode, internal and external threads, both drive
-+line slopes, entry/exit taper in both Z directions, compound infeed, and spring
-+passes. Compound-infeed coverage verifies fixed-direction D0 and
-+alternating-flank D1 on tapered and cylindrical drive lines, plus centered Q0
-+paths. Negative tests verify that G76 rejects a Y endpoint, invalid D modes,
-+and an ambiguous same-block G96 D word.
-diff --git a/tests/interp/g76-tapered/expected b/tests/interp/g76-tapered/expected
-new file mode 100644
-index 0000000000..ec0ccc9fb4
---- /dev/null
-+++ b/tests/interp/g76-tapered/expected
-@@ -0,0 +1,377 @@
-+ N..... USE_LENGTH_UNITS(CANON_UNITS_MM)
-+ N..... SET_G5X_OFFSET(1, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... SET_G92_OFFSET(0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... SET_XY_ROTATION(0.0000)
-+ N..... SET_FEED_REFERENCE(CANON_XYZ)
-+ N..... ON_RESET()
-+ N..... COMMENT("Test tapered G76 drive lines")
-+ N..... SELECT_PLANE(CANON_PLANE_XZ)
-+ N..... USE_LENGTH_UNITS(CANON_UNITS_INCHES)
-+ N..... SET_SPINDLE_SPEED(0, 100.0000)
-+ N..... START_SPINDLE_CLOCKWISE(0)
-+ N..... COMMENT("basic external, decreasing X")
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... COMMENT("basic external, increasing X")
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.6100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.8100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.6000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... COMMENT("incremental endpoint")
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... COMMENT("interpreter: distance mode changed to incremental")
-+ N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... COMMENT("interpreter: distance mode changed to absolute")
-+ N..... COMMENT("diameter mode endpoint and depths")
-+ N..... COMMENT("interpreter: Lathe diameter mode changed to diameter")
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... COMMENT("radius mode endpoint and depths")
-+ N..... COMMENT("interpreter: Lathe diameter mode changed to radius")
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... COMMENT("internal thread")
-+ N..... STRAIGHT_TRAVERSE(0.5000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.4900, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.6900, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.8900, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.6900, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.5000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.7000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.9000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.7000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.7000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... COMMENT("entry and exit taper")
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.157731,0)
-+ N..... STRAIGHT_FEED(0.9100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_FEED(0.7904, 0.0000, -0.0981, 0.0000, 0.0000, 0.0000)
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6296, 0.0000, -0.9019, 0.0000, 0.0000, 0.0000)
-+ N..... START_SPEED_FEED_SYNC(0.129309,0)
-+ N..... STRAIGHT_FEED(0.7100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.157731,0)
-+ N..... STRAIGHT_FEED(0.9000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_FEED(0.7804, 0.0000, -0.0981, 0.0000, 0.0000, 0.0000)
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6196, 0.0000, -0.9019, 0.0000, 0.0000, 0.0000)
-+ N..... START_SPEED_FEED_SYNC(0.129309,0)
-+ N..... STRAIGHT_FEED(0.7000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... COMMENT("positive Z entry and exit taper")
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.157731,0)
-+ N..... STRAIGHT_FEED(0.9100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_FEED(0.7904, 0.0000, 0.0981, 0.0000, 0.0000, 0.0000)
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6296, 0.0000, 0.9019, 0.0000, 0.0000, 0.0000)
-+ N..... START_SPEED_FEED_SYNC(0.129309,0)
-+ N..... STRAIGHT_FEED(0.7100, 0.0000, 1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, 1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.157731,0)
-+ N..... STRAIGHT_FEED(0.9000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_FEED(0.7804, 0.0000, 0.0981, 0.0000, 0.0000, 0.0000)
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6196, 0.0000, 0.9019, 0.0000, 0.0000, 0.0000)
-+ N..... START_SPEED_FEED_SYNC(0.129309,0)
-+ N..... STRAIGHT_FEED(0.7000, 0.0000, 1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... COMMENT("fixed-direction compound infeed")
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.9998, 0.0000, -0.0510, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.7998, 0.0000, -0.0510, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6111, 0.0000, -0.9943, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8111, 0.0000, -0.9943, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.9887, 0.0000, -0.0566, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.7887, 0.0000, -0.0566, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... COMMENT("alternating-flank compound infeed")
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(1.0666, 0.0000, -0.0170, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8666, 0.0000, -0.0170, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6779, 0.0000, -0.9604, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8779, 0.0000, -0.9604, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0241, 0.0000, -0.0793, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8241, 0.0000, -0.0793, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6355, 0.0000, -1.0226, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8355, 0.0000, -1.0226, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.9998, 0.0000, -0.0510, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.7998, 0.0000, -0.0510, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6111, 0.0000, -0.9943, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8111, 0.0000, -0.9943, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.9887, 0.0000, -0.0566, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.7887, 0.0000, -0.0566, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.9887, 0.0000, -0.0566, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.7887, 0.0000, -0.0566, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.9887, 0.0000, -0.0566, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.7887, 0.0000, -0.0566, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... COMMENT("alternating mode with centered Q0 infeed")
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(1.0700, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8700, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.100000,0)
-+ N..... STRAIGHT_FEED(0.8700, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(1.0700, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0400, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8400, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.100000,0)
-+ N..... STRAIGHT_FEED(0.8400, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(1.0400, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.100000,0)
-+ N..... STRAIGHT_FEED(0.8100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.100000,0)
-+ N..... STRAIGHT_FEED(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... COMMENT("cylindrical alternating-flank compound infeed")
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(1.0700, 0.0000, -0.0173, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8700, 0.0000, -0.0173, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.100000,0)
-+ N..... STRAIGHT_FEED(0.8700, 0.0000, -0.9596, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(1.0700, 0.0000, -0.9596, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0400, 0.0000, -0.0808, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8400, 0.0000, -0.0808, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.100000,0)
-+ N..... STRAIGHT_FEED(0.8400, 0.0000, -1.0231, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(1.0400, 0.0000, -1.0231, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, -0.0520, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, -0.0520, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.100000,0)
-+ N..... STRAIGHT_FEED(0.8100, 0.0000, -0.9942, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, -0.9942, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -0.0577, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -0.0577, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.100000,0)
-+ N..... STRAIGHT_FEED(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -0.0577, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -0.0577, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.100000,0)
-+ N..... STRAIGHT_FEED(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... COMMENT("spring passes")
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(1.0100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8100, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... DISABLE_FEED_OVERRIDE()
-+ N..... START_SPEED_FEED_SYNC(0.101980,0)
-+ N..... STRAIGHT_FEED(0.6000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPEED_FEED_SYNCH()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... ENABLE_FEED_OVERRIDE()
-+ N..... STRAIGHT_TRAVERSE(0.8000, 0.0000, -1.0000, 0.0000, 0.0000, 0.0000)
-+ N..... STOP_SPINDLE_TURNING(0)
-+ N..... SET_G5X_OFFSET(1, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000)
-+ N..... SET_XY_ROTATION(0.0000)
-+ N..... SELECT_PLANE(CANON_PLANE_XY)
-+ N..... SET_FEED_MODE(0, 0)
-+ N..... SET_FEED_RATE(0.0000)
-+ N..... STOP_SPINDLE_TURNING(0)
-+ N..... SET_SPINDLE_MODE(0 0.0000)
-+ N..... PROGRAM_END()
-+ N..... ON_RESET()
-+ N..... ON_RESET()
-diff --git a/tests/interp/g76-tapered/invalid-d-fraction.ngc b/tests/interp/g76-tapered/invalid-d-fraction.ngc
-new file mode 100644
-index 0000000000..6eb002dc8a
---- /dev/null
-+++ b/tests/interp/g76-tapered/invalid-d-fraction.ngc
-@@ -0,0 +1,5 @@
-+g20 g18 g8
-+s100 m3
-+g0 x1 z0
-+g76 p.1 x.8 z-1 i-.1 j.09 k.1 h0 q30 d.5
-+m2
-diff --git a/tests/interp/g76-tapered/invalid-d2.ngc b/tests/interp/g76-tapered/invalid-d2.ngc
-new file mode 100644
-index 0000000000..87e80949f9
---- /dev/null
-+++ b/tests/interp/g76-tapered/invalid-d2.ngc
-@@ -0,0 +1,5 @@
-+g20 g18 g8
-+s100 m3
-+g0 x1 z0
-+g76 p.1 x.8 z-1 i-.1 j.09 k.1 h0 q30 d2
-+m2
-diff --git a/tests/interp/g76-tapered/invalid-g96-d.ngc b/tests/interp/g76-tapered/invalid-g96-d.ngc
-new file mode 100644
-index 0000000000..66e30e804a
---- /dev/null
-+++ b/tests/interp/g76-tapered/invalid-g96-d.ngc
-@@ -0,0 +1,5 @@
-+g20 g18 g8
-+s100 m3
-+g0 x1 z0
-+g96 s100 d1 g76 p.1 x.8 z-1 i-.1 j.09 k.1 h0 q30
-+m2
-diff --git a/tests/interp/g76-tapered/invalid-y.ngc b/tests/interp/g76-tapered/invalid-y.ngc
-new file mode 100644
-index 0000000000..f79aa85850
---- /dev/null
-+++ b/tests/interp/g76-tapered/invalid-y.ngc
-@@ -0,0 +1,5 @@
-+g20 g18 g8
-+s100 m3
-+g0 x1 y0 z0
-+g76 p.1 x.8 y.1 z-1 i-.1 j.09 k.1 h0 q0
-+m2
-diff --git a/tests/interp/g76-tapered/test.ngc b/tests/interp/g76-tapered/test.ngc
-new file mode 100644
-index 0000000000..fc3f9a5545
---- /dev/null
-+++ b/tests/interp/g76-tapered/test.ngc
-@@ -0,0 +1,63 @@
-+(Test tapered G76 drive lines)
+diff --git a/src/emc/rs274ngc/interp_internal.cc b/src/emc/rs274ngc/interp_internal.cc
+index 4ec4f7a..e08e4a6 100644
+--- a/src/emc/rs274ngc/interp_internal.cc
++++ b/src/emc/rs274ngc/interp_internal.cc
+@@ -274,6 +274,7 @@ int Interp::init_block(block_pointer block)      //!< pointer to a block to be i
+   block->dollar_flag = false;
+   block->e_flag = false;
+   block->f_flag = false;
++  block->g76_alternating_infeed = false;
+   for (n = 0; n < GM_MAX_MODAL_GROUPS; n++) {
+     block->g_modes[n] = -1;
+   }
+diff --git a/src/emc/rs274ngc/interp_internal.hh b/src/emc/rs274ngc/interp_internal.hh
+index 6f90dbe..210b4db 100644
+--- a/src/emc/rs274ngc/interp_internal.hh
++++ b/src/emc/rs274ngc/interp_internal.hh
+@@ -287,6 +287,7 @@ enum GCodes
+     G_73 = 730,
+     G_74 = 740,
+     G_76 = 760,
++    G_76_1 = 761,
+     G_80 = 800,
+     G_81 = 810,
+     G_82 = 820,
+@@ -488,6 +489,7 @@ struct block_struct
+   bool b_flag{};
+   bool c_flag{};
+   bool d_flag{};
++  bool g76_alternating_infeed{}; // the block programs G76.1
+   bool e_flag{};
+   bool f_flag{};
+   bool h_flag{};
+diff --git a/src/emc/rs274ngc/interp_read.cc b/src/emc/rs274ngc/interp_read.cc
+index 6e58d16..b397cc0 100644
+--- a/src/emc/rs274ngc/interp_read.cc
++++ b/src/emc/rs274ngc/interp_read.cc
+@@ -593,6 +593,11 @@ int Interp::read_g(char *line,   //!< string: line of RS274/NGC code being proce
+       block->g_modes[mode] = value;
+       return INTERP_OK;
+   }
++  // G76.1 is G76 with alternating infeed
++  if (value == G_76_1) {
++      block->g76_alternating_infeed = true;
++      value = G_76;
++  }
+   mode = gees[value];
+   CHKS((mode == -1), NCE_UNKNOWN_G_CODE_USED);
+   if ((value == G_80) && (block->g_modes[mode] != -1));
+diff --git a/src/emc/rs274ngc/rs274ngc_interp.hh b/src/emc/rs274ngc/rs274ngc_interp.hh
+index e834041..2fb074a 100644
+--- a/src/emc/rs274ngc/rs274ngc_interp.hh
++++ b/src/emc/rs274ngc/rs274ngc_interp.hh
+@@ -21,6 +21,8 @@
+ #include "interp_internal.hh"
+ #include "nml_intf/interp_return.hh"
+ 
++struct tapered_pass_geometry;
 +
-+g20 g18 g8
-+s100 m3
-+
-+(basic external, decreasing X)
-+g0 x1 z0
-+g76 p.1 x.8 z-1 i-.1 j.09 k.1 h0 q0
-+
-+(basic external, increasing X)
-+g0 x.8 z0
-+g76 p.1 x1 z-1 i-.1 j.09 k.1 h0 q0
-+
-+(incremental endpoint)
-+g0 x1 z0
-+g91
-+g76 p.1 x-.2 z-1 i-.1 j.09 k.1 h0 q0
-+g90
-+
-+(diameter mode endpoint and depths)
-+g7
-+g0 x2 z0
-+g76 p.1 x1.6 z-1 i-.2 j.18 k.2 h0 q0
-+
-+(radius mode endpoint and depths)
-+g8
-+g0 x1 z0
-+g76 p.1 x.8 z-1 i-.1 j.09 k.1 h0 q0
-+
-+(internal thread)
-+g0 x.5 z0
-+g76 p.1 x.7 z-1 i.1 j.09 k.1 h0 q0
-+
-+(entry and exit taper)
-+g0 x1 z0
-+g76 p.1 x.8 z-1 i-.1 j.09 k.1 h0 q0 e.1 l3
-+
-+(positive Z entry and exit taper)
-+g0 x1 z0
-+g76 p.1 x.8 z1 i-.1 j.09 k.1 h0 q0 e.1 l3
-+
-+(fixed-direction compound infeed)
-+g0 x1 z0
-+g76 p.1 x.8 z-1 i-.1 j.09 k.1 h0 q30 d0
-+
-+(alternating-flank compound infeed)
-+g0 x1 z0
-+g76 p.1 x.8 z-1 i-.1 j.03 k.1 r1 h2 q30 d1
-+
-+(alternating mode with centered Q0 infeed)
-+g0 x1 z0
-+g76 p.1 z-1 i-.1 j.03 k.1 r1 h0 q0 d1
-+
-+(cylindrical alternating-flank compound infeed)
-+g0 x1 z0
-+g76 p.1 z-1 i-.1 j.03 k.1 r1 h1 q30 d1
-+
-+(spring passes)
-+g0 x1 z0
-+g76 p.1 x.8 z-1 i-.1 j.09 k.1 h2 q0
-+
-+m5
-+m2
-diff --git a/tests/interp/g76-tapered/test.sh b/tests/interp/g76-tapered/test.sh
-new file mode 100644
-index 0000000000..949e9fdf47
---- /dev/null
-+++ b/tests/interp/g76-tapered/test.sh
-@@ -0,0 +1,14 @@
-+#!/bin/bash
-+
-+rs274 -g test.ngc | awk '{$1=""; print}'
-+result=${PIPESTATUS[0]}
-+if (( result != 0 )); then
-+    exit "$result"
-+fi
-+
-+for invalid_program in invalid-*.ngc; do
-+    if rs274 -g "$invalid_program" >/dev/null 2>&1; then
-+        echo "$invalid_program unexpectedly succeeded" >&2
-+        exit 1
-+    fi
-+done
+ class Interp : public InterpBase {
+ 
+ public:
+@@ -363,6 +365,8 @@ public:
+                             double u_end, double v_end, double w_end);
+  int convert_threading_cycle(block_pointer block, setup_pointer settings,
+                              double end_x, double end_y, double end_z);
++ int check_tapered_threading_pass(setup_pointer settings,
++                                  const tapered_pass_geometry &pass);
+  int convert_tool_change(setup_pointer settings);
+  int convert_tool_length_offset(int g_code, block_pointer block,
+                                       setup_pointer settings);

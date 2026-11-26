@@ -8,6 +8,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -16,6 +17,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -33,6 +35,165 @@ namespace asio = boost::asio;
 namespace beast = boost::beast;
 namespace websocket = beast::websocket;
 using tcp = asio::ip::tcp;
+
+namespace {
+
+constexpr std::int64_t kBeyondS32 = 30000000000LL;
+
+linuxcnc::v1::HalScalar s64_value(std::int64_t value) {
+  linuxcnc::v1::HalScalar scalar;
+  scalar.set_type(linuxcnc::v1::HAL_TYPE_S64);
+  scalar.set_s64(value);
+  return scalar;
+}
+
+grpc::StatusCode write_item(linuxcnc::v1::HalService::Stub* hal,
+                            linuxcnc::v1::HalItemKind kind,
+                            const std::string& name, std::int64_t value) {
+  linuxcnc::v1::HalWrite request;
+  auto* write = request.add_writes();
+  write->mutable_item()->set_kind(kind);
+  write->mutable_item()->set_name(name);
+  *write->mutable_value() = s64_value(value);
+  linuxcnc::v1::HalWriteResponse response;
+  grpc::ClientContext context;
+  return hal->Write(&context, request, &response).error_code();
+}
+
+// A value within S32 is written and one beyond it is refused.
+void require_narrow(linuxcnc::v1::HalService::Stub* hal,
+                    linuxcnc::v1::HalItemKind kind, const std::string& name,
+                    const char* description) {
+  live_require(write_item(hal, kind, name, 5) == grpc::StatusCode::OK,
+               description);
+  live_require(write_item(hal, kind, name, kBeyondS32) ==
+                   grpc::StatusCode::FAILED_PRECONDITION,
+               description);
+}
+
+void run_halcmd(const char* halcmd, const std::string& arguments) {
+  const auto command = std::string(halcmd) + " " + arguments;
+  // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing here changes the environment
+  live_require(std::system(command.c_str()) == 0, command.c_str());
+}
+
+class NarrowComponent {
+ public:
+  explicit NarrowComponent(linuxcnc::v1::HalService::Stub* hal) {
+    context_.set_deadline(std::chrono::system_clock::now() +
+                          std::chrono::seconds(10));
+    stream_ = hal->RunComponent(&context_);
+    linuxcnc::v1::HalComponentClientMessage open;
+    auto* create = open.mutable_create();
+    create->set_name("grpc-live-narrow");
+    create->set_prefix("grpc-live-narrow");
+    for (const char* name : {"direct", "aliased", "linked"}) {
+      auto* pin = create->add_pins();
+      pin->set_name(name);
+      pin->set_type(linuxcnc::v1::HAL_TYPE_S32);
+      pin->set_direction(linuxcnc::v1::HAL_PIN_DIRECTION_IN);
+    }
+    auto* parameter = create->add_parameters();
+    parameter->set_name("limit");
+    parameter->set_type(linuxcnc::v1::HAL_TYPE_S32);
+    parameter->set_direction(linuxcnc::v1::HAL_PARAM_DIRECTION_RW);
+    live_require(stream_->Write(open), "narrow component create is sent");
+    linuxcnc::v1::HalComponentServerMessage message;
+    live_require(stream_->Read(&message) && message.has_attached(),
+                 "narrow component attaches");
+    generation_ = message.attached().generation();
+    linuxcnc::v1::HalComponentClientMessage activate;
+    activate.mutable_activate()->set_generation(generation_);
+    auto* initial = activate.mutable_activate()->add_values();
+    initial->mutable_item()->set_kind(linuxcnc::v1::HAL_ITEM_KIND_PARAM);
+    initial->mutable_item()->set_name("grpc-live-narrow.limit");
+    initial->mutable_value()->set_type(linuxcnc::v1::HAL_TYPE_S32);
+    initial->mutable_value()->set_s32(0);
+    live_require(stream_->Write(activate), "narrow component activate is sent");
+    live_require(stream_->Read(&message) && message.has_active(),
+                 "narrow component activates");
+  }
+
+  void destroy() {
+    linuxcnc::v1::HalComponentClientMessage close;
+    close.mutable_close()->set_generation(generation_);
+    close.mutable_close()->set_mode(
+        linuxcnc::v1::HAL_COMPONENT_CLOSE_MODE_DESTROY);
+    live_require(stream_->Write(close), "narrow component close is sent");
+    stream_->WritesDone();
+    linuxcnc::v1::HalComponentServerMessage message;
+    bool closed = false;
+    while (!closed && stream_->Read(&message)) closed = message.has_closed();
+    live_require(closed, "narrow component closes");
+    live_require(stream_->Finish().ok(), "narrow component stream finishes");
+  }
+
+ private:
+  grpc::ClientContext context_;
+  std::unique_ptr<
+      grpc::ClientReaderWriter<linuxcnc::v1::HalComponentClientMessage,
+                               linuxcnc::v1::HalComponentServerMessage>>
+      stream_;
+  std::uint64_t generation_ = 0;
+};
+
+// Covers every route by which a write reaches an owned S32 item, and that the
+// check ends with the component.
+void verify_narrow_write_paths(linuxcnc::v1::HalService::Stub* hal) {
+  constexpr auto kPin = linuxcnc::v1::HAL_ITEM_KIND_PIN;
+  constexpr auto kParam = linuxcnc::v1::HAL_ITEM_KIND_PARAM;
+  constexpr auto kSignalKind = linuxcnc::v1::HAL_ITEM_KIND_SIGNAL;
+  const std::string signal = "grpc-live-narrow-signal";
+
+  NarrowComponent component(hal);
+  require_narrow(hal, kPin, "grpc-live-narrow.direct", "direct pin write");
+  require_narrow(hal, kParam, "grpc-live-narrow.limit", "parameter write");
+
+  linuxcnc::v1::CreateHalSignalRequest create_signal;
+  create_signal.set_name(signal);
+  create_signal.set_type(linuxcnc::v1::HAL_TYPE_S64);
+  linuxcnc::v1::CreateHalSignalResponse created_signal;
+  grpc::ClientContext create_signal_context;
+  live_require(
+      hal->CreateSignal(&create_signal_context, create_signal, &created_signal)
+          .ok(),
+      "the narrow test signal is created");
+  live_require(
+      write_item(hal, kSignalKind, signal, kBeyondS32) == grpc::StatusCode::OK,
+      "an unlinked 64-bit signal takes a 64-bit value");
+  live_require(write_item(hal, kSignalKind, signal, 0) == grpc::StatusCode::OK,
+               "the unlinked signal is reset");
+
+  // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing here changes the environment
+  const char* halcmd = std::getenv("LINUXCNC_GRPC_LIVE_HALCMD");
+  if (halcmd) {
+    run_halcmd(halcmd, "linkps grpc-live-narrow.linked " + signal);
+    require_narrow(hal, kSignalKind, signal, "write through a linked signal");
+    run_halcmd(halcmd,
+               "alias pin grpc-live-narrow.aliased grpc-live-narrow-pin-alias");
+    require_narrow(hal, kPin, "grpc-live-narrow-pin-alias",
+                   "write to a pin through its alias");
+    run_halcmd(halcmd,
+               "alias param grpc-live-narrow.limit grpc-live-narrow-par-alias");
+    require_narrow(hal, kParam, "grpc-live-narrow-par-alias",
+                   "write to a parameter through its alias");
+  } else {
+    std::cout << "LINUXCNC_GRPC_LIVE_HALCMD is unset; skipping linked signal "
+                 "and alias write checks\n";
+  }
+  component.destroy();
+
+  // A stale registry entry would stop the new component's pins from being
+  // registered, leaving them unchecked.
+  NarrowComponent recreated(hal);
+  require_narrow(hal, kPin, "grpc-live-narrow.direct",
+                 "direct pin write after re-creation");
+  require_narrow(hal, kParam, "grpc-live-narrow.limit",
+                 "parameter write after re-creation");
+  recreated.destroy();
+}
+
+}  // namespace
 
 bool verify_hal_and_scope(const std::shared_ptr<grpc::Channel>& channel,
                           const std::string& telemetry_endpoint) {
@@ -207,6 +368,26 @@ bool verify_hal_and_scope(const std::shared_ptr<grpc::Channel>& channel,
     assert(create_signal_response.signal().type() == type);
   }
 
+  // HAL (2.10+) has 64-bit integer signals only: a signal requested as S32 or
+  // U32 is created as, and reported with, the 64-bit type of the same
+  // signedness.
+  for (const auto& [name, requested, reported] :
+       {std::tuple{"grpc-live-s32", linuxcnc::v1::HAL_TYPE_S32,
+                   linuxcnc::v1::HAL_TYPE_S64},
+        std::tuple{"grpc-live-u32", linuxcnc::v1::HAL_TYPE_U32,
+                   linuxcnc::v1::HAL_TYPE_U64}}) {
+    linuxcnc::v1::CreateHalSignalRequest create_signal_request;
+    create_signal_request.set_name(name);
+    create_signal_request.set_type(requested);
+    linuxcnc::v1::CreateHalSignalResponse create_signal_response;
+    grpc::ClientContext create_signal_context;
+    const auto create_signal_status = hal->CreateSignal(
+        &create_signal_context, create_signal_request, &create_signal_response);
+    assert(create_signal_status.ok());
+    assert(create_signal_response.signal().name() == name);
+    assert(create_signal_response.signal().type() == reported);
+  }
+
   linuxcnc::v1::CreateHalSignalRequest conflicting_signal;
   conflicting_signal.set_name("grpc-live-s64");
   conflicting_signal.set_type(linuxcnc::v1::HAL_TYPE_U64);
@@ -292,6 +473,10 @@ bool verify_hal_and_scope(const std::shared_ptr<grpc::Channel>& channel,
   component_input->set_name("input");
   component_input->set_type(linuxcnc::v1::HAL_TYPE_S32);
   component_input->set_direction(linuxcnc::v1::HAL_PIN_DIRECTION_IN);
+  auto* component_unsigned_input = component_create->add_pins();
+  component_unsigned_input->set_name("unsigned-input");
+  component_unsigned_input->set_type(linuxcnc::v1::HAL_TYPE_U32);
+  component_unsigned_input->set_direction(linuxcnc::v1::HAL_PIN_DIRECTION_IN);
   assert(component->Write(component_open));
   linuxcnc::v1::HalComponentServerMessage component_response;
   assert(component->Read(&component_response));
@@ -384,6 +569,101 @@ bool verify_hal_and_scope(const std::shared_ptr<grpc::Channel>& channel,
   }
   assert(saw_input_delta);
 
+  // Items declared S32/U32 are 64-bit in HAL and topology reports them as
+  // S64/U64, but their owner reads them as 32-bit values. A write outside the
+  // declared range is refused like a mistyped write, instead of being
+  // acknowledged and then silently clamped for the owner. A batch containing
+  // such a write applies nothing.
+  const auto narrow_write =
+      [&](const std::vector<std::pair<std::string, linuxcnc::v1::HalScalar>>&
+              writes,
+          linuxcnc::v1::HalWriteResponse* response) {
+        linuxcnc::v1::HalWrite request;
+        for (const auto& [name, value] : writes) {
+          auto* write = request.add_writes();
+          write->mutable_item()->set_kind(linuxcnc::v1::HAL_ITEM_KIND_PIN);
+          write->mutable_item()->set_name(name);
+          *write->mutable_value() = value;
+        }
+        grpc::ClientContext context;
+        return hal->Write(&context, request, response);
+      };
+  const auto s64_scalar = [](std::int64_t value) {
+    linuxcnc::v1::HalScalar scalar;
+    scalar.set_type(linuxcnc::v1::HAL_TYPE_S64);
+    scalar.set_s64(value);
+    return scalar;
+  };
+  const auto u64_scalar = [](std::uint64_t value) {
+    linuxcnc::v1::HalScalar scalar;
+    scalar.set_type(linuxcnc::v1::HAL_TYPE_U64);
+    scalar.set_u64(value);
+    return scalar;
+  };
+  constexpr auto kS32Min = std::numeric_limits<std::int32_t>::min();
+  constexpr auto kS32Max = std::numeric_limits<std::int32_t>::max();
+  constexpr auto kU32Max = std::numeric_limits<std::uint32_t>::max();
+  const std::string signed_input = "grpc-live-component.input";
+  const std::string unsigned_input = "grpc-live-component.unsigned-input";
+  for (const auto& rejected :
+       {std::pair{signed_input, s64_scalar(30000000000LL)},
+        std::pair{signed_input, s64_scalar(std::int64_t{kS32Max} + 1)},
+        std::pair{signed_input, s64_scalar(std::int64_t{kS32Min} - 1)},
+        std::pair{unsigned_input, u64_scalar(std::uint64_t{kU32Max} + 1)}}) {
+    linuxcnc::v1::HalWriteResponse response;
+    const auto status = narrow_write({rejected}, &response);
+    assert(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+    assert(response.values_size() == 0);
+  }
+  {
+    linuxcnc::v1::HalWriteResponse response;
+    const auto status =
+        narrow_write({{signed_input, s64_scalar(7)},
+                      {unsigned_input, u64_scalar(std::uint64_t{kU32Max} + 1)}},
+                     &response);
+    assert(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  }
+  {
+    linuxcnc::v1::HalReadRequest request;
+    auto* read_item = request.add_items();
+    read_item->set_kind(linuxcnc::v1::HAL_ITEM_KIND_PIN);
+    read_item->set_name(signed_input);
+    linuxcnc::v1::HalReadResponse response;
+    grpc::ClientContext context;
+    assert(hal->Read(&context, request, &response).ok());
+    assert(response.values_size() == 1);
+    assert(response.values(0).value().type() == linuxcnc::v1::HAL_TYPE_S64);
+    assert(response.values(0).value().s64() == 55);
+  }
+  {
+    linuxcnc::v1::HalWriteResponse response;
+    const auto status = narrow_write({{signed_input, s64_scalar(kS32Min)},
+                                      {unsigned_input, u64_scalar(kU32Max)}},
+                                     &response);
+    assert(status.ok());
+    assert(response.values_size() == 2);
+    assert(response.values(0).value().s64() == kS32Min);
+    assert(response.values(1).value().u64() == kU32Max);
+  }
+  bool saw_signed_limit = false;
+  bool saw_unsigned_limit = false;
+  while (component->Read(&component_response)) {
+    if (!component_response.has_delta()) continue;
+    for (const auto& value : component_response.delta().values()) {
+      if (value.item().name() == signed_input) {
+        assert(value.value().type() == linuxcnc::v1::HAL_TYPE_S32);
+        assert(value.value().s32() == kS32Min);
+        saw_signed_limit = true;
+      } else if (value.item().name() == unsigned_input) {
+        assert(value.value().type() == linuxcnc::v1::HAL_TYPE_U32);
+        assert(value.value().u32() == kU32Max);
+        saw_unsigned_limit = true;
+      }
+    }
+    if (saw_signed_limit && saw_unsigned_limit) break;
+  }
+  assert(saw_signed_limit && saw_unsigned_limit);
+
   linuxcnc::v1::HalComponentClientMessage component_close;
   component_close.mutable_close()->set_generation(component_generation);
   component_close.mutable_close()->set_mode(
@@ -407,6 +687,7 @@ bool verify_hal_and_scope(const std::shared_ptr<grpc::Channel>& channel,
   for (const auto& item : cleanup_topology.topology().pins()) {
     assert(item.name() != "grpc-live-component.value");
     assert(item.name() != "grpc-live-component.input");
+    assert(item.name() != "grpc-live-component.unsigned-input");
     assert(item.name() != "grpc-live-component.online");
   }
 
@@ -572,6 +853,8 @@ bool verify_hal_and_scope(const std::shared_ptr<grpc::Channel>& channel,
   assert(timeout_destroy->Read(&component_response));
   assert(timeout_destroy->Finish().ok());
 
+  verify_narrow_write_paths(hal.get());
+
   // Scope controls use the shared gRPC control plane while capture data uses
   // the shared WebSocket telemetry listener.
   auto scope = linuxcnc::v1::ScopeService::NewStub(channel);
@@ -583,16 +866,19 @@ bool verify_hal_and_scope(const std::shared_ptr<grpc::Channel>& channel,
   assert(scope_response.has_status());
   assert(!scope_response.websocket_path().empty());
 
+  // Sample one integer pin (HAL reports integers as S64/U64 only) and one
+  // bit/float pin, so both the 64-bit integer and the other sample paths run.
+  const linuxcnc::v1::HalPinInfo* scope_integer_pin = nullptr;
   const linuxcnc::v1::HalPinInfo* scope_pin = nullptr;
   for (const auto& candidate : topology.topology().pins()) {
-    if (candidate.type() == linuxcnc::v1::HAL_TYPE_BIT ||
-        candidate.type() == linuxcnc::v1::HAL_TYPE_FLOAT ||
-        candidate.type() == linuxcnc::v1::HAL_TYPE_S32 ||
-        candidate.type() == linuxcnc::v1::HAL_TYPE_U32) {
+    if (!scope_integer_pin && (candidate.type() == linuxcnc::v1::HAL_TYPE_S64 ||
+                               candidate.type() == linuxcnc::v1::HAL_TYPE_U64))
+      scope_integer_pin = &candidate;
+    if (!scope_pin && (candidate.type() == linuxcnc::v1::HAL_TYPE_BIT ||
+                       candidate.type() == linuxcnc::v1::HAL_TYPE_FLOAT))
       scope_pin = &candidate;
-      break;
-    }
   }
+  assert(scope_integer_pin != nullptr);
   assert(scope_pin != nullptr);
   linuxcnc::v1::ScopeConfigure scope_configure;
   auto* acquisition = scope_configure.mutable_config();
@@ -603,7 +889,13 @@ bool verify_hal_and_scope(const std::shared_ptr<grpc::Channel>& channel,
   scope_channel->set_index(0);
   scope_channel->set_enabled(true);
   scope_channel->mutable_item()->set_kind(linuxcnc::v1::HAL_ITEM_KIND_PIN);
-  scope_channel->mutable_item()->set_name(scope_pin->name());
+  scope_channel->mutable_item()->set_name(scope_integer_pin->name());
+  auto* scope_second_channel = acquisition->add_channels();
+  scope_second_channel->set_index(1);
+  scope_second_channel->set_enabled(true);
+  scope_second_channel->mutable_item()->set_kind(
+      linuxcnc::v1::HAL_ITEM_KIND_PIN);
+  scope_second_channel->mutable_item()->set_name(scope_pin->name());
   grpc::ClientContext configure_context;
   assert(scope->Configure(&configure_context, scope_configure, &scope_response)
              .ok());
@@ -630,6 +922,12 @@ bool verify_hal_and_scope(const std::shared_ptr<grpc::Channel>& channel,
   assert(scope_frame.ParseFromArray(scope_bytes.data(),
                                     static_cast<int>(scope_bytes.size())));
   assert(scope_frame.has_capture() || scope_frame.has_roll());
+  const auto& scope_channels = scope_frame.has_capture()
+                                   ? scope_frame.capture().channels()
+                                   : scope_frame.roll().channels();
+  assert(scope_channels.size() >= 2);
+  assert(scope_channels.Get(0).index() == 0 && scope_channels.Get(0).enabled());
+  assert(scope_channels.Get(1).index() == 1 && scope_channels.Get(1).enabled());
 
   grpc::ClientContext trigger_context;
   assert(scope->Trigger(&trigger_context, {}, &scope_response).ok());

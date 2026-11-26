@@ -1,0 +1,5 @@
+o<m502> sub
+(debug, positional n_args=#<n_args> P=#1 spindle=#2)
+o<m502> endsub
+m2
+%

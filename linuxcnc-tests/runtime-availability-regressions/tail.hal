@@ -1,0 +1,30 @@
+source core.hal
+# Observe the interpolation tail every servo cycle, after motion-controller.
+# Tail: the axis planner stopped but the joint interpolator still has velocity.
+loadrt near count=2
+loadrt not count=2
+loadrt and2 count=3
+addf near.0 servo-thread
+addf near.1 servo-thread
+addf not.0 servo-thread
+addf and2.0 servo-thread
+addf and2.1 servo-thread
+addf not.1 servo-thread
+addf and2.2 servo-thread
+addf flipflop.2 servo-thread
+addf flipflop.3 servo-thread
+addf flipflop.4 servo-thread
+setp near.0.difference 1e-12
+setp near.1.difference 1e-12
+net axis-velocity axis.y.teleop-vel-cmd => near.0.in1
+net joint-velocity joint.1.vel-cmd => near.1.in1
+net axis-stopped near.0.out => and2.0.in0
+net joint-stopped near.1.out => not.0.in
+net joint-moving not.0.out => and2.0.in1
+net interpolation-tail and2.0.out => flipflop.2.set and2.1.in0
+net motion-inpos motion.in-position => and2.1.in1
+net premature-inpos and2.1.out => flipflop.3.set
+net amp-seen => not.1.in
+net amplifier-off not.1.out => and2.2.in0
+net joint-owned joint.1.availability-request => and2.2.in1
+net premature-amplifier-off and2.2.out => flipflop.4.set

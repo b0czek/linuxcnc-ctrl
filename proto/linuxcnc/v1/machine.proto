@@ -75,6 +75,23 @@ enum StopState {
   STOP_STATE_STARTING = 3;
 }
 
+// While a Stop is STOPPING or the program is paused: the operation the hold
+// waits for. An operation already handed to another subsystem runs to its
+// end before the machine holds; Abort ends it.
+enum HoldWait {
+  HOLD_WAIT_NONE = 0;
+  // A queued G28.2 homing cycle.
+  HOLD_WAIT_HOMING = 1;
+  // A tool change or other I/O controller command.
+  HOLD_WAIT_IO = 2;
+  // A user M100-M199 program.
+  HOLD_WAIT_SYSTEM_COMMAND = 3;
+  // A request started by an executor remap.
+  HOLD_WAIT_EXECUTOR = 4;
+  // A joint or spindle availability handshake waiting for its acknowledgment.
+  HOLD_WAIT_AVAILABILITY = 5;
+}
+
 enum TrajMode {
   TRAJ_MODE_UNSPECIFIED = 0;
   TRAJ_MODE_FREE = 1;
@@ -201,6 +218,7 @@ message TaskStat {
   bool task_paused = 30;
   double delay_left = 31;
   int32 queued_mdi_commands = 32;
+  HoldWait hold_wait = 35;
 }
 
 message JointStat {
@@ -379,6 +397,7 @@ message TaskStatDelta {
   optional bool task_paused = 30;
   optional double delay_left = 31;
   optional int32 queued_mdi_commands = 32;
+  optional HoldWait hold_wait = 35;
 }
 
 message TrajectoryStatDelta {
@@ -495,8 +514,12 @@ message ExecuteCommandRequest {
   WaitPolicy wait_policy = 1;
   oneof command {
     SetTaskMode set_task_mode = 2;
+    // E-stop and machine off, like abort_task, cancel every command still
+    // waiting in this server's queue when they arrive.
     SetTaskState set_state = 3;
     EmptyCommand task_plan_synch = 4;
+    // Restores the interpreter's startup modes. Refused with an error response
+    // unless the machine is idle; abort and wait for it to stop first.
     EmptyCommand reset_interpreter = 5;
     ProgramOpen program_open = 6;
     EmptyCommand program_close = 7;
@@ -507,6 +530,9 @@ message ExecuteCommandRequest {
     EmptyCommand reverse_program = 12;
     EmptyCommand forward_program = 13;
     EmptyCommand stop_program = 14;
+    // Goes ahead of queued commands and cancels them; each cancelled command
+    // is answered with an error and never reaches LinuxCNC. Commands sent
+    // after the abort are kept.
     EmptyCommand abort_task = 15;
     SetBool set_optional_stop = 16;
     SetBool set_block_delete = 17;

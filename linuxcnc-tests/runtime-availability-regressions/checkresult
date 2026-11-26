@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+for scenario in ${AVAILABILITY_REGRESSION_CASES:-fault wheel tail amp power index jogstop joghome atspeed extra sequence}; do
+    grep -q "^availability regression $scenario ok$" "$1"
+done

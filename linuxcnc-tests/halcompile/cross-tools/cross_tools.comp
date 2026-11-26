@@ -1,0 +1,6 @@
+component cross_tools;
+pin out bool ready;
+function _;
+license "GPL";
+;;
+ready_set(1);

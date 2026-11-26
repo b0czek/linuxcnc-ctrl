@@ -3,26 +3,46 @@ From: Dariusz Majnert <dariusz.majnert@gmail.com>
 Date: Thu, 27 Aug 2026 16:58:14 +0200
 Subject: [PATCH] emc: own transactional tool CRUD in task
 
+Ported to v2.10.0-pre2. Task reads the changer's HAL pins through
+upstream's hal_get_bool()/hal_get_si32(). The read-only mmap remapping
+uses upstream's mmap_is_creator and mmap_fd (8c8e048) instead of its own
+creator flag and closed descriptor; a replaced or vanished mapping also
+closes its descriptor.
+
+Kept from the tool wear patch: a tool line is at most 510 characters,
+and a table whose line is too long is not written (the temporary file is
+dropped, so the table file stays as it was) and the edit is not
+published. A table loaded with lines refused as too long is not saved
+over until a table without them is loaded; tooldata_load_snapshot()
+reports refused lines and the caller records them when it publishes the
+table. G10 tool edits whose save fails are still rolled back.
+tooldata_save() keeps upstream's message for a missing [EMCIO]TOOL_TABLE.
+
+Upstream's G10 db_program notification (b53e523) stays in place but is a
+no-op, since IO initialization now refuses [EMCIO]DB_PROGRAM; the
+tests/tooldb tests, which need a db program, are skipped.
 ---
- src/emc/nml_intf/emc.cc                       |  33 +++
+ src/emc/nml_intf/emc.cc                       |  33 ++
  src/emc/nml_intf/emc.hh                       |   5 +
- src/emc/nml_intf/emc_nml.hh                   |  44 ++++
- src/emc/task/emctaskmain.cc                   |  61 ++++-
- src/emc/task/taskclass.cc                     | 232 ++++++++++++++++--
- src/emc/task/taskclass.hh                     |   5 +-
- src/emc/tooldata/tooldata.hh                  |   8 +
- src/emc/tooldata/tooldata_common.cc           | 186 ++++++++------
- src/emc/tooldata/tooldata_mmap.cc             |  97 +++++++-
- src/emc/tooldata/tooldata_nml.cc              |  16 ++
- .../reload-tool/non-random/test-ui.py         |  14 ++
+ src/emc/nml_intf/emc_nml.hh                   |  44 ++
+ src/emc/task/emctaskmain.cc                   |  72 +++-
+ src/emc/task/taskclass.cc                     | 372 ++++++++++++++++-
+ src/emc/task/taskclass.hh                     |   7 +-
+ src/emc/tooldata/tooldata.hh                  |  21 +
+ src/emc/tooldata/tooldata_common.cc           | 386 ++++++++++++++----
+ src/emc/tooldata/tooldata_mmap.cc             | 102 ++++-
+ src/emc/tooldata/tooldata_nml.cc              |  16 +
+ .../reload-tool/non-random/test-ui.py         |  14 +
  .../toolchanger/reload-tool/random/test-ui.py |   3 +-
- 12 files changed, 601 insertions(+), 103 deletions(-)
+ tests/tooldb/db-g10-offset/skip               |   3 +
+ 13 files changed, 950 insertions(+), 128 deletions(-)
+ create mode 100644 tests/tooldb/db-g10-offset/skip
 
 diff --git a/src/emc/nml_intf/emc.cc b/src/emc/nml_intf/emc.cc
-index da68282b6d..7663c33f7e 100644
+index 891516e..61fa3b6 100644
 --- a/src/emc/nml_intf/emc.cc
 +++ b/src/emc/nml_intf/emc.cc
-@@ -256,6 +256,12 @@ int emcFormat(NMLTYPE type, void *buffer, CMS * cms)
+@@ -254,6 +254,12 @@ int emcFormat(NMLTYPE type, void *buffer, CMS * cms)
      case EMC_TOOL_SET_NUMBER_TYPE:
  	((EMC_TOOL_SET_NUMBER *) buffer)->update(cms);
  	break;
@@ -35,7 +55,7 @@ index da68282b6d..7663c33f7e 100644
      case EMC_TOOL_STAT_TYPE:
  	((EMC_TOOL_STAT *) buffer)->update(cms);
  	break;
-@@ -503,6 +509,10 @@ const char *emc_symbol_lookup(uint32_t type)
+@@ -504,6 +510,10 @@ const char *emc_symbol_lookup(uint32_t type)
  	return "EMC_TOOL_SET_OFFSET";
      case EMC_TOOL_SET_NUMBER_TYPE:
  	return "EMC_TOOL_SET_NUMBER";
@@ -46,7 +66,7 @@ index da68282b6d..7663c33f7e 100644
      case EMC_TOOL_STAT_TYPE:
  	return "EMC_TOOL_STAT";
      case EMC_TOOL_UNLOAD_TYPE:
-@@ -1018,6 +1028,29 @@ void EMC_TOOL_SET_OFFSET::update(CMS * cms)
+@@ -1024,6 +1034,29 @@ void EMC_TOOL_SET_OFFSET::update(CMS * cms)
      cms->update(orientation);
  }
  
@@ -77,7 +97,7 @@ index da68282b6d..7663c33f7e 100644
  /*
  *	NML/CMS Update function for EMC_TOOL_SET_NUMBER
 diff --git a/src/emc/nml_intf/emc.hh b/src/emc/nml_intf/emc.hh
-index d2ab16d3ba..0dca92c7e0 100644
+index c98adba..d035390 100644
 --- a/src/emc/nml_intf/emc.hh
 +++ b/src/emc/nml_intf/emc.hh
 @@ -28,6 +28,7 @@ class EMC_TRAJ_STAT;
@@ -88,7 +108,7 @@ index d2ab16d3ba..0dca92c7e0 100644
  class EMC_AUX_STAT;
  class EMC_SPINDLE_STAT;
  class EMC_COOLANT_STAT;
-@@ -158,6 +159,8 @@ struct PM_CARTESIAN;
+@@ -159,6 +160,8 @@ struct PM_CARTESIAN;
  #define EMC_TOOL_LOAD_TOOL_TABLE_TYPE                ((NMLTYPE) 1107)
  #define EMC_TOOL_SET_OFFSET_TYPE                     ((NMLTYPE) 1108)
  #define EMC_TOOL_SET_NUMBER_TYPE                     ((NMLTYPE) 1109)
@@ -97,20 +117,20 @@ index d2ab16d3ba..0dca92c7e0 100644
  
  #define EMC_TOOL_STAT_TYPE                           ((NMLTYPE) 1199)
  
-@@ -426,6 +429,8 @@ extern int emcToolSetOffset(int pocket, int toolno, const EmcPose& offset,
-                             double diameter, double frontangle, double backangle,
-                             int orientation);
- extern int emcToolSetNumber(int number);
+@@ -453,6 +456,8 @@ extern void emcToolSetChangeOffset(bool apply, const EmcPose& offset);
+ extern int emcToolApplyOffset(const EmcPose& offset);
+ // how the IO side applies a completed change's offset (milltask)
+ extern void emcToolRegisterApplyOffset(int (*fn)(const EmcPose&));
 +extern int emcToolUpdate(const EMC_TOOL_UPDATE &update);
 +extern int emcToolDelete(int toolno);
  
  // implementation functions for EMC_AUX types
  
 diff --git a/src/emc/nml_intf/emc_nml.hh b/src/emc/nml_intf/emc_nml.hh
-index e9a2be99fa..225b549d38 100644
+index 6a5632c..e4a04b1 100644
 --- a/src/emc/nml_intf/emc_nml.hh
 +++ b/src/emc/nml_intf/emc_nml.hh
-@@ -1642,6 +1642,50 @@ class EMC_TOOL_SET_OFFSET:public EMC_TOOL_CMD_MSG {
+@@ -1732,6 +1732,50 @@ class EMC_TOOL_SET_OFFSET:public EMC_TOOL_CMD_MSG {
      int    orientation;
  };
  
@@ -162,10 +182,10 @@ index e9a2be99fa..225b549d38 100644
    public:
      EMC_TOOL_SET_NUMBER()
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index e01ef50ce8..0be1c528c2 100644
+index 635418d..6c57192 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -1129,7 +1129,18 @@ static int emcTaskPlan(void)
+@@ -1285,7 +1285,18 @@ static int emcTaskPlan(void)
  		emcTaskQueueTaskPlanSynchCmd();
  		break;
  	    }
@@ -185,7 +205,7 @@ index e01ef50ce8..0be1c528c2 100644
  	    case EMC_TOOL_SET_NUMBER_TYPE: {
  		// send to IO
  		emcTaskQueueCommand(std::make_unique<EMC_TOOL_SET_NUMBER>(*static_cast<EMC_TOOL_SET_NUMBER*>(emcCommand)));
-@@ -1258,6 +1269,18 @@ static int emcTaskPlan(void)
+@@ -1414,6 +1425,18 @@ static int emcTaskPlan(void)
  		emcTaskQueueTaskPlanSynchCmd();
  		break;
  	    }
@@ -204,7 +224,7 @@ index e01ef50ce8..0be1c528c2 100644
  
  	    case EMC_TOOL_SET_NUMBER_TYPE: {
  		// send to IO
-@@ -1383,6 +1406,18 @@ static int emcTaskPlan(void)
+@@ -1539,6 +1562,18 @@ static int emcTaskPlan(void)
  		    emcTaskQueueTaskPlanSynchCmd();
  		    break;
  	        }
@@ -223,7 +243,7 @@ index e01ef50ce8..0be1c528c2 100644
  
  		// otherwise we can't handle it
  	    	default:
-@@ -1718,6 +1753,18 @@ static int emcTaskPlan(void)
+@@ -1874,6 +1909,18 @@ static int emcTaskPlan(void)
  		emcTaskQueueTaskPlanSynchCmd();
  		break;
  	    }
@@ -242,7 +262,7 @@ index e01ef50ce8..0be1c528c2 100644
  
  		// otherwise we can't handle it
  	    default:
-@@ -1821,6 +1868,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
+@@ -1977,6 +2024,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
  
      case EMC_TOOL_LOAD_TOOL_TABLE_TYPE:
      case EMC_TOOL_SET_OFFSET_TYPE:
@@ -251,7 +271,7 @@ index e01ef50ce8..0be1c528c2 100644
  	return EMC_TASK_EXEC::WAITING_FOR_MOTION_AND_IO;
  	break;
  
-@@ -2357,6 +2406,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2609,6 +2658,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
                                    emc_tool_set_offset_msg->orientation);
  	break;
  
@@ -266,7 +286,7 @@ index e01ef50ce8..0be1c528c2 100644
      case EMC_TOOL_SET_NUMBER_TYPE:
  	emc_tool_set_number_msg = reinterpret_cast<EMC_TOOL_SET_NUMBER *>(cmd);
  	retval = emcToolSetNumber(emc_tool_set_number_msg->tool);
-@@ -2816,6 +2873,8 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3082,6 +3139,8 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
      case EMC_TOOL_UNLOAD_TYPE:
      case EMC_TOOL_LOAD_TOOL_TABLE_TYPE:
      case EMC_TOOL_SET_OFFSET_TYPE:
@@ -275,20 +295,57 @@ index e01ef50ce8..0be1c528c2 100644
      case EMC_TOOL_SET_NUMBER_TYPE:
      case EMC_SPINDLE_SPEED_TYPE:
      case EMC_SPINDLE_ON_TYPE:
+@@ -3266,10 +3325,19 @@ static int emcTaskExecute(void)
+ 		// emcTaskCheckPostconditions(), i.e. the only one whose commands
+ 		// can reach a WAITING_FOR_* state. See issuingQueuedCommand.
+ 		issuingQueuedCommand = true;
++		// read first: an abort while issuing clears emcTaskCommand
++		const NMLTYPE issued_type = emcTaskCommand->_type;
+ 		const int issue_retval = emcTaskIssueCommand(emcTaskCommand.get());
+ 		issuingQueuedCommand = false;
+ 		if (0 != issue_retval) {
+-		    emcStatus->task.execState = EMC_TASK_EXEC::ERROR;
++		    // A refused tool edit changed nothing: it fails its own
++		    // command (retval reaches the RCS status) and the machine
++		    // carries on. Everything else aborts.
++		    emcStatus->task.execState =
++			issued_type == EMC_TOOL_UPDATE_TYPE ||
++			issued_type == EMC_TOOL_DELETE_TYPE ||
++			issued_type == EMC_TOOL_LOAD_TOOL_TABLE_TYPE
++			? EMC_TASK_EXEC::DONE : EMC_TASK_EXEC::ERROR;
+ 		    retval = -1;
+ 		} else {
+ 		    emcStatus->task.execState = emcTaskCheckPostconditions(emcTaskCommand.get());
 diff --git a/src/emc/task/taskclass.cc b/src/emc/task/taskclass.cc
-index 2869ee6fb7..bbdff026a4 100644
+index 0d076c8..b4ec501 100644
 --- a/src/emc/task/taskclass.cc
 +++ b/src/emc/task/taskclass.cc
-@@ -110,6 +110,8 @@ int emcToolSetOffset(int pocket, int toolno, const EmcPose& offset,
+@@ -17,6 +17,7 @@
+ #include <float.h>		// DBL_MAX
+ #include <string.h>		// memcpy() strncpy()
+ #include <stdlib.h>		// malloc()
++#include <sys/stat.h>
+ #include <sys/wait.h>
+ 
+ #include "libnml/rcs/rcs.hh"		// RCS_CMD_CHANNEL, etc.
+@@ -26,6 +27,7 @@
+ 
+ #include "pythonplugin/python_plugin.hh"
+ #include "taskclass.hh"
++#include <rtapi_string.h>
+ 
+ using namespace linuxcnc;
+ 
+@@ -122,6 +124,8 @@ int emcToolSetOffset(int pocket, int toolno, const EmcPose& offset,
                                            wear_offset_valid, diameter, frontangle,
                                            backangle, orientation); }
  int emcToolSetNumber(int number) { return task_methods->emcToolSetNumber(number); }
 +int emcToolUpdate(const EMC_TOOL_UPDATE &update) { return task_methods->emcToolUpdate(update); }
 +int emcToolDelete(int toolno) { return task_methods->emcToolDelete(toolno); }
  
- int emcTaskOnce(const char * /*filename*/, EMC_IO_STAT &emcioStatus)
- {
-@@ -147,15 +149,10 @@ Task::Task(EMC_IO_STAT & emcioStatus_in) :
+ // The tool offset a tool change carries (EMC_TOOL_LOAD.apply_offset): held
+ // while the change is pending and applied in the same cycle the new tool
+@@ -205,15 +209,10 @@ Task::Task(EMC_IO_STAT & emcioStatus_in) :
          if (auto t = inifile.findString("TOOL_TABLE", "EMCIO"))
              tooltable_filename = strdup(t->c_str());
  
@@ -308,7 +365,7 @@ index 2869ee6fb7..bbdff026a4 100644
          }
      }
  
-@@ -168,14 +165,6 @@ Task::Task(EMC_IO_STAT & emcioStatus_in) :
+@@ -226,14 +225,6 @@ Task::Task(EMC_IO_STAT & emcioStatus_in) :
  #endif //}
  
      tooldata_init(random_toolchanger);
@@ -323,27 +380,66 @@ index 2869ee6fb7..bbdff026a4 100644
      emcioStatus.status = RCS_STATUS::DONE;//TODO??
      emcioStatus.tool.pocketPrepped = -1;
  
-@@ -188,7 +177,7 @@ Task::Task(EMC_IO_STAT & emcioStatus_in) :
+@@ -246,8 +237,12 @@ Task::Task(EMC_IO_STAT & emcioStatus_in) :
          }
      }
  
 -    if (0 != tooldata_load(tooltable_filename)) {
-+    if (!unsupported_db_program && 0 != tooldata_load(tooltable_filename)) {
-         rcs_print_error("can't load tool table.\n");
+-        rcs_print_error("can't load tool table.\n");
++    if (!unsupported_db_program) {
++        if (0 == tooldata_load(tooltable_filename)) {
++            have_tool_table = true;
++        } else {
++            rcs_print_error("can't load tool table.\n");
++        }
      }
  
-@@ -351,6 +340,10 @@ void Task::reload_tool_number(int toolno) {
+     if (random_toolchanger) {
+@@ -399,6 +394,21 @@ int Task::load_tool(int idx) {
+     return 0;
+ } // load_tool()
+ 
++// A table has just been published. On a random changer the table says which
++// tool is in the spindle; until one has loaded nothing was known, so the
++// first one to load decides, as it would have at startup.
++void Task::tool_table_loaded(void) {
++    const bool first = !have_tool_table;
++    have_tool_table = true;
++    if (!first || !random_toolchanger) return;
++    CANON_TOOL_TABLE tdata;
++    if (tooldata_get(&tdata,0) != IDX_OK) {
++        UNEXPECTED_MSG; return;
++    }
++    emcioStatus.tool.toolInSpindle = tdata.toolno;
++    hal_set_si32(iocontrol_data->tool_number, emcioStatus.tool.toolInSpindle);
++}
++
+ void Task::reload_tool_number(int toolno) {
+     CANON_TOOL_TABLE tdata;
+     if(random_toolchanger) return; // doesn't need special handling here
+@@ -417,7 +427,20 @@ void Task::reload_tool_number(int toolno) {
  
  int Task::emcIoInit()//EMC_TOOL_INIT
  {
+-    tooldata_load(tooltable_filename);
 +    if (unsupported_db_program) {
 +        rcs_print_error("can't initialize IO: [EMCIO]DB_PROGRAM is not supported\n");
 +        return -1;
 +    }
-     tooldata_load(tooltable_filename);
++    if (tooltable_filename) {
++        if (0 == tooldata_load(tooltable_filename)) {
++            tool_table_loaded();
++        } else {
++            // the machine starts without the table, and the file is not
++            // saved over until it loads
++            emcOperatorError("can't load tool table %s: no tools until it is "
++                             "corrected and reloaded", tooltable_filename);
++        }
++    }
      reload_tool_number(emcioStatus.tool.toolInSpindle);
  
-@@ -519,10 +512,26 @@ int Task::emcToolUnload()//EMC_TOOL_UNLOAD_TYPE
+     if (0 != iniTool(emc_inifile)) {
+@@ -589,10 +612,73 @@ int Task::emcToolUnload()//EMC_TOOL_UNLOAD_TYPE
      return 0;
  }
  
@@ -351,27 +447,86 @@ index 2869ee6fb7..bbdff026a4 100644
 +int find_tool(const CANON_TOOL_TABLE *table, int last, int toolno,
 +              bool random);
 +bool valid_table(const CANON_TOOL_TABLE *table, int last, bool random);
++
++bool same_file(const char *a, const char *b)
++{
++    struct stat sa, sb;
++    return a && b && stat(a, &sa) == 0 && stat(b, &sb) == 0 &&
++           sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
++}
 +}
 +
  int Task::emcToolLoadToolTable(const char *file)//EMC_TOOL_LOAD_TOOL_TABLE_TYPE
  {
      if(!strlen(file)) file = tooltable_filename;//use filename from ini if none is provided
 -    tooldata_load(file);
-+    if (iocontrol_data.tool_prepare || iocontrol_data.tool_change) return -1;
++    if (hal_get_bool(iocontrol_data->tool_prepare) || hal_get_bool(iocontrol_data->tool_change)) {
++        emcOperatorError("can't load tool table %s during a tool change; the table in use is kept", file);
++        return -1;
++    }
 +    CANON_TOOL_TABLE loaded[CANON_POCKETS_MAX];
 +    int loaded_last = 0;
-+    if (tooldata_load_snapshot(file, loaded, &loaded_last) ||
-+        !valid_table(loaded, loaded_last, random_toolchanger) ||
-+        (emcioStatus.tool.toolInSpindle > 0 &&
-+         find_tool(loaded, loaded_last, emcioStatus.tool.toolInSpindle,
-+                   random_toolchanger) < 0)) {
++    bool refused_lines = false;
++    const int spindle_tool = emcioStatus.tool.toolInSpindle;
++    const char *problem = nullptr;
++    const bool parsed =
++        !tooldata_load_snapshot(file, loaded, &loaded_last, &refused_lines);
++    if (!parsed) {
++        problem = "it could not be read";
++    } else if (!valid_table(loaded, loaded_last, random_toolchanger)) {
++        problem = "it has invalid or duplicate entries";
++    } else if (spindle_tool > 0 &&
++               find_tool(loaded, loaded_last, spindle_tool,
++                         random_toolchanger) < 0) {
++        problem = "it does not have the tool in the spindle";
++    } else if (random_toolchanger && spindle_tool > 0 &&
++               loaded[0].toolno != spindle_tool) {
++        // the file must say where the tools are: the changer moves by it
++        problem = "pocket 0 does not hold the tool in the spindle";
++    }
++    if (problem) {
++        // the table in memory stays. If the configured file now holds
++        // something else, it is not saved over until it loads
++        CANON_TOOL_TABLE current[CANON_POCKETS_MAX];
++        int current_last = 0;
++        const bool unchanged = parsed && !refused_lines &&
++            !tooldata_snapshot(current, &current_last) &&
++            tooldata_tables_match(loaded, loaded_last, current, current_last);
++        if (same_file(file, tooltable_filename)) {
++            if (unchanged) {
++                tooldata_adopt_loaded_file();
++            } else {
++                tooldata_set_refused_lines(true);
++            }
++        }
++        emcOperatorError("can't load tool table %s: %s; the table in use is kept",
++                         file, problem);
 +        return -1;
 +    }
 +    if (tooldata_replace(loaded, loaded_last)) return -1;
++    // only loading the configured file says anything about that file, the
++    // one saves go to
++    if (same_file(file, tooltable_filename)) {
++        tooldata_adopt_loaded_file();
++        tooldata_set_refused_lines(refused_lines);
++    }
++    tool_table_loaded();
      reload_tool_number(emcioStatus.tool.toolInSpindle);
      return 0;
  }
-@@ -577,6 +586,191 @@ int Task::emcToolSetOffset(int idx, int toolno, const EmcPose& offset,
+@@ -634,9 +720,10 @@ int Task::emcToolSetOffset(int idx, int toolno, const EmcPose& offset,
+         UNEXPECTED_MSG;
+     }
+     bool stored = (0 == tooldata_save(tooltable_filename));
+-    if (stored && db_mode == tooldb_t::DB_ACTIVE) {
++    if (stored) {
+         // tooldata_save() does not write tool table entries in db mode,
+         // so the db_program must be notified to persist the new offsets
++        // (a no-op without one; IO init refuses [EMCIO]DB_PROGRAM)
+         int pno = idx; // for random_toolchanger
+         if (!random_toolchanger) { pno = tdata.pocketno; }
+         if (tooldata_db_notify(TOOL_OFFSET,toolno,pno,tdata)) {
+@@ -656,6 +743,247 @@ int Task::emcToolSetOffset(int idx, int toolno, const EmcPose& offset,
      return 0;
  }
  
@@ -414,7 +569,9 @@ index 2869ee6fb7..bbdff026a4 100644
 +    for (int idx = random ? 0 : 1; idx <= last; ++idx) {
 +        const auto &entry = table[idx];
 +        if (entry.toolno < 0) continue;
-+        if (entry.pocketno < 0 || entry.pocketno >= CANON_POCKETS_MAX ||
++        // without a random changer the pocket number is only a label
++        if (entry.pocketno < 0 ||
++            (random && entry.pocketno >= CANON_POCKETS_MAX) ||
 +            entry.orientation < 0 || entry.orientation > 9 ||
 +            !isfinite(entry.diameter) || entry.diameter < 0.0 ||
 +            !isfinite(entry.frontangle) || !isfinite(entry.backangle)) return false;
@@ -432,6 +589,22 @@ index 2869ee6fb7..bbdff026a4 100644
 +}
 +}
 +
++namespace {
++// A refused tool edit changes nothing, so it fails only its own command;
++// the operator is told why here.
++int refuse_tool_update(int toolno, const char *reason)
++{
++    emcOperatorError("can't update tool %d: %s", toolno, reason);
++    return -1;
++}
++
++int refuse_tool_delete(int toolno, const char *reason)
++{
++    emcOperatorError("can't delete tool %d: %s", toolno, reason);
++    return -1;
++}
++}
++
 +int Task::emcToolUpdate(const EMC_TOOL_UPDATE &update)
 +{
 +    const char *comment_end = static_cast<const char *>(
@@ -445,44 +618,69 @@ index 2869ee6fb7..bbdff026a4 100644
 +        update.offset_axes & ~0x1ff || update.wear_offset_axes & ~0x1ff ||
 +        !comment_end ||
 +        memchr(update.comment, '\n', comment_length) ||
-+        memchr(update.comment, '\r', comment_length)) return -1;
++        memchr(update.comment, '\r', comment_length)) {
++        return refuse_tool_update(update.toolno, "the request is not valid");
++    }
 +    if ((update.fields & EMC_TOOL_UPDATE_DIAMETER) &&
-+        (!isfinite(update.diameter) || update.diameter < 0.0)) return -1;
-+    if ((update.fields & EMC_TOOL_UPDATE_FRONTANGLE) && !isfinite(update.frontangle)) return -1;
-+    if ((update.fields & EMC_TOOL_UPDATE_BACKANGLE) && !isfinite(update.backangle)) return -1;
++        (!isfinite(update.diameter) || update.diameter < 0.0)) {
++        return refuse_tool_update(update.toolno, "invalid diameter");
++    }
++    if (((update.fields & EMC_TOOL_UPDATE_FRONTANGLE) && !isfinite(update.frontangle)) ||
++        ((update.fields & EMC_TOOL_UPDATE_BACKANGLE) && !isfinite(update.backangle))) {
++        return refuse_tool_update(update.toolno, "invalid angle");
++    }
 +    for (int axis = 0; axis < 9; ++axis) {
-+        if ((update.offset_axes & (1 << axis)) &&
-+            !isfinite(*pose_axes(update.offset, axis))) return -1;
-+        if ((update.wear_offset_axes & (1 << axis)) &&
-+            !isfinite(*pose_axes(update.wear_offset, axis))) return -1;
++        if (((update.offset_axes & (1 << axis)) &&
++             !isfinite(*pose_axes(update.offset, axis))) ||
++            ((update.wear_offset_axes & (1 << axis)) &&
++             !isfinite(*pose_axes(update.wear_offset, axis)))) {
++            return refuse_tool_update(update.toolno, "invalid offset");
++        }
 +    }
 +
 +    CANON_TOOL_TABLE previous[CANON_POCKETS_MAX];
 +    CANON_TOOL_TABLE table[CANON_POCKETS_MAX];
 +    int previous_last = 0;
-+    if (tooldata_snapshot(previous, &previous_last)) return -1;
++    if (tooldata_snapshot(previous, &previous_last)) {
++        return refuse_tool_update(update.toolno, "the tool table is not available");
++    }
 +    memcpy(table, previous, sizeof(table));
 +    int last = previous_last;
 +    int idx = find_tool(table, last, update.toolno, random_toolchanger);
 +    const bool creating = idx < 0;
-+    if (creating && !(update.fields & EMC_TOOL_UPDATE_POCKET)) return -1;
++    if (creating && !(update.fields & EMC_TOOL_UPDATE_POCKET)) {
++        return refuse_tool_update(update.toolno,
++                                  "it is not in the tool table and no pocket was given");
++    }
 +
 +    int destination = idx;
 +    if (update.fields & EMC_TOOL_UPDATE_POCKET) {
-+        if (update.pocket <= 0 || update.pocket >= CANON_POCKETS_MAX) return -1;
++        if (update.pocket <= 0 || update.pocket >= CANON_POCKETS_MAX) {
++            return refuse_tool_update(update.toolno, "pocket number out of range");
++        }
 +        for (int other = 1; other <= last; ++other) {
 +            if (other != idx && table[other].toolno >= 0 &&
-+                table[other].pocketno == update.pocket) return -1;
++                table[other].pocketno == update.pocket) {
++                return refuse_tool_update(update.toolno, "another tool has that pocket");
++            }
 +        }
 +        const bool active = update.toolno == emcioStatus.tool.toolInSpindle ||
 +                            idx == 0 || idx == emcioStatus.tool.pocketPrepped ||
-+                            (iocontrol_data.tool_prepare && idx == iocontrol_data.tool_prep_index) ||
-+                            iocontrol_data.tool_change;
-+        if (!creating && table[idx].pocketno != update.pocket && active) return -1;
++                            (hal_get_bool(iocontrol_data->tool_prepare) && idx == hal_get_si32(iocontrol_data->tool_prep_index)) ||
++                            hal_get_bool(iocontrol_data->tool_change);
++        if (!creating && table[idx].pocketno != update.pocket && active) {
++            return refuse_tool_update(update.toolno,
++                                      "its pocket can't change while it is in use");
++        }
 +        if (random_toolchanger) {
 +            destination = update.pocket;
-+            if (destination != idx && table[destination].toolno >= 0) return -1;
-+            if (!creating && destination != idx && active) return -1;
++            if (destination != idx && table[destination].toolno >= 0) {
++                return refuse_tool_update(update.toolno, "another tool has that pocket");
++            }
++            if (!creating && destination != idx && active) {
++                return refuse_tool_update(update.toolno,
++                                          "its pocket can't change while it is in use");
++            }
 +        }
 +    }
 +    if (creating && !random_toolchanger) {
@@ -495,7 +693,9 @@ index 2869ee6fb7..bbdff026a4 100644
 +    const bool random_spindle_update =
 +        random_toolchanger && !creating && idx == 0 && destination == 0;
 +    if (destination < 0 || destination >= CANON_POCKETS_MAX ||
-+        (destination == 0 && !random_spindle_update)) return -1;
++        (destination == 0 && !random_spindle_update)) {
++        return refuse_tool_update(update.toolno, "the tool table has no room for it");
++    }
 +
 +    CANON_TOOL_TABLE entry = creating ? tooldata_entry_init() : table[idx];
 +    entry.toolno = update.toolno;
@@ -521,41 +721,52 @@ index 2869ee6fb7..bbdff026a4 100644
 +    if (tooldata_save_snapshot(tooltable_filename, table, last)) {
 +        (void)tooldata_save_snapshot(tooltable_filename, previous,
 +                                     previous_last);
-+        return -1;
++        return refuse_tool_update(update.toolno, "the tool table could not be saved");
 +    }
 +    if (tooldata_replace(table, last)) {
 +        (void)tooldata_save_snapshot(tooltable_filename, previous,
 +                                     previous_last);
-+        return -1;
++        return refuse_tool_update(update.toolno, "the tool table could not be updated");
 +    }
 +    return 0;
 +}
 +
 +int Task::emcToolDelete(int toolno)
 +{
-+    if (!tooltable_filename || toolno <= 0 ||
-+        toolno == emcioStatus.tool.toolInSpindle) return -1;
++    if (!tooltable_filename || toolno <= 0) {
++        return refuse_tool_delete(toolno, "the request is not valid");
++    }
++    if (toolno == emcioStatus.tool.toolInSpindle) {
++        return refuse_tool_delete(toolno, "it is in the spindle");
++    }
 +    CANON_TOOL_TABLE previous[CANON_POCKETS_MAX];
 +    CANON_TOOL_TABLE table[CANON_POCKETS_MAX];
 +    int previous_last = 0;
-+    if (tooldata_snapshot(previous, &previous_last)) return -1;
++    if (tooldata_snapshot(previous, &previous_last)) {
++        return refuse_tool_delete(toolno, "the tool table is not available");
++    }
 +    memcpy(table, previous, sizeof(table));
 +    int last = previous_last;
 +    const int idx = find_tool(table, last, toolno, random_toolchanger);
-+    if (idx <= 0 || idx == emcioStatus.tool.pocketPrepped ||
-+        (iocontrol_data.tool_prepare && idx == iocontrol_data.tool_prep_index) ||
-+        iocontrol_data.tool_change) return -1;
++    if (idx <= 0) {
++        return refuse_tool_delete(toolno, "it is not in the tool table");
++    }
++    if (idx == emcioStatus.tool.pocketPrepped ||
++        (hal_get_bool(iocontrol_data->tool_prepare) && idx == hal_get_si32(iocontrol_data->tool_prep_index)) ||
++        hal_get_bool(iocontrol_data->tool_change)) {
++        return refuse_tool_delete(toolno, "a tool change is using it");
++    }
 +    table[idx] = tooldata_entry_init();
 +    while (last > 0 && table[last].toolno < 0) --last;
 +    if (tooldata_save_snapshot(tooltable_filename, table, last)) {
 +        (void)tooldata_save_snapshot(tooltable_filename, previous,
 +                                     previous_last);
-+        return -1;
++        return refuse_tool_delete(toolno, "the tool table could not be saved");
 +    }
 +    if (tooldata_replace(table, last)) {
 +        (void)tooldata_save_snapshot(tooltable_filename, previous,
 +                                     previous_last);
-+        return -1;
++        return refuse_tool_delete(toolno, "the tool table could not be updated");
 +    }
 +    return 0;
 +}
@@ -564,10 +775,10 @@ index 2869ee6fb7..bbdff026a4 100644
  {
      int idx;
 diff --git a/src/emc/task/taskclass.hh b/src/emc/task/taskclass.hh
-index 5e32a1a65d..dced9adeea 100644
+index 509f11f..6077e19 100644
 --- a/src/emc/task/taskclass.hh
 +++ b/src/emc/task/taskclass.hh
-@@ -74,6 +74,8 @@ public:
+@@ -75,6 +75,8 @@ public:
      virtual int emcToolLoadToolTable(const char *file);
      virtual int emcToolUnload();
      virtual int emcToolSetNumber(int number);
@@ -576,18 +787,27 @@ index 5e32a1a65d..dced9adeea 100644
  
      int iocontrol_hal_init(void);
      void reload_tool_number(int toolno);
-@@ -88,8 +90,7 @@ public:
-     hal_comp iocontrol;
+@@ -82,6 +84,7 @@ public:
+     void run();
+     int read_tool_inputs(void);
+     void hal_init_pins(void);
++    void tool_table_loaded(void);
+ 
+     EMC_IO_STAT &emcioStatus;
+     int random_toolchanger {0};
+@@ -89,8 +92,8 @@ public:
+     int comp_id;
      const char *ini_filename;
      const char *tooltable_filename {};
 -    char db_program[LINELEN] {};
 -    tooldb_t db_mode {tooldb_t::DB_NOTUSED};
 +    bool unsupported_db_program {false};
++    bool have_tool_table {false};   // a table has loaded since startup
      int tool_status;
  };
  
 diff --git a/src/emc/tooldata/tooldata.hh b/src/emc/tooldata/tooldata.hh
-index b0f0a756ce..19c0592b15 100644
+index db3e6b7..24ab424 100644
 --- a/src/emc/tooldata/tooldata.hh
 +++ b/src/emc/tooldata/tooldata.hh
 @@ -58,6 +58,8 @@ void   tooldata_reset(void);
@@ -599,13 +819,26 @@ index b0f0a756ce..19c0592b15 100644
  
  // ignore_zero_values:1 for file writes
  //                   :0 for use with tooldata_db_notify()
-@@ -74,8 +76,14 @@ void   tooldata_set_db(tooldb_t mode);
+@@ -76,8 +78,27 @@ void   tooldata_set_db(tooldb_t mode);
  
  //----------------------------------------------------------
  int tooldata_load(const char *filename);
++// stage a table file without publishing it; *refused_lines tells whether
++// lines were refused as too long (see tooldata_set_refused_lines)
 +int tooldata_load_snapshot(const char *filename,
 +                           CANON_TOOL_TABLE *table,
-+                           int *last_index);
++                           int *last_index,
++                           bool *refused_lines);
++// the published table was loaded with refused lines, or the table file
++// did not load: saves are refused until that file loads without them
++void tooldata_set_refused_lines(bool refused);
++// what tooldata_load_snapshot() last read is what the table file holds: a
++// save is refused while the file holds anything else (no file is fine)
++void tooldata_adopt_loaded_file(void);
++
++// whether two tables would be written to a table file identically
++bool tooldata_tables_match(const CANON_TOOL_TABLE *a, int last_a,
++                           const CANON_TOOL_TABLE *b, int last_b);
  
  int tooldata_save(const char *filename);
 +int tooldata_save_snapshot(const char *filename,
@@ -615,22 +848,28 @@ index b0f0a756ce..19c0592b15 100644
  //----------------------------------------------------------
  //mmap specific
 diff --git a/src/emc/tooldata/tooldata_common.cc b/src/emc/tooldata/tooldata_common.cc
-index 4e9651c86f..cbb7299eff 100644
+index ceefe9b..0695af8 100644
 --- a/src/emc/tooldata/tooldata_common.cc
 +++ b/src/emc/tooldata/tooldata_common.cc
-@@ -23,6 +23,11 @@
+@@ -21,10 +21,17 @@
+ ** along with this program; if not, write to the Free Software
+ ** Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
++#include <errno.h>
++#include <limits.h>
+ #include <stdarg.h>
  #include <stdio.h>
  #include <string.h>
 +#include <fcntl.h>
 +#include <stdlib.h>
-+#include <string>
+ #include <string>
 +#include <sys/stat.h>
 +#include <unistd.h>
- #include <rtapi_string.h>
++#include <rtapi_string.h>
  #include "tooldata.hh"
  
-@@ -32,6 +37,25 @@ static bool     is_random_toolchanger = 0;
+ #define UNEXPECTED_MSG fprintf(stderr,"UNEXPECTED %s %d\n",__FILE__,__LINE__);
+@@ -33,6 +40,25 @@ static bool     is_random_toolchanger = 0;
  static int      nonrandom_idx = 0; // 'fakepocket' counter
  static bool     add_init_initialized = 0;
  static tooldb_t db_mode = DB_NOTUSED;
@@ -656,7 +895,31 @@ index 4e9651c86f..cbb7299eff 100644
  
  void tooldata_init(bool random_toolchanger)
  {
-@@ -211,7 +235,7 @@ int tooldata_read_entry(const char *input_line)
+@@ -92,12 +118,19 @@ int tooldata_read_entry(const char *input_line)
+     offset      = empty.offset;
+     wear_offset = empty.wear_offset;
+ 
+-    char* saveptr;
+-    buff = strtok_r(work_line, ";", &saveptr);
+-    if (strlen(buff) <=1) {
+-        //fprintf(stderr,"skip blankline %s\n",__FILE__);
++    // the line ends at its newline, or a CRLF file's carriage return and
++    // newline; a line of only blanks or only a comment holds no tool
++    size_t end = strlen(work_line);
++    while (end > 0 && (work_line[end - 1] == '\n' || work_line[end - 1] == '\r')) {
++        work_line[--end] = 0;
++    }
++    const size_t first = strspn(work_line, " \t");
++    if (work_line[first] == 0 || work_line[first] == ';') {
+         return 0;
+     }
++
++    char* saveptr;
++    buff = strtok_r(work_line, ";", &saveptr);
+     comment = strtok_r(NULL, "\n", &saveptr);
+ 
+     token = strtok_r(buff, " ", &saveptr);
+@@ -206,7 +239,7 @@ int tooldata_read_entry(const char *input_line)
      if (valid) {
          CANON_TOOL_TABLE tdata = tooldata_entry_init();
          // verify no prior tool in pocket
@@ -665,7 +928,7 @@ index 4e9651c86f..cbb7299eff 100644
          if (is_random_toolchanger && tdata.toolno != -1) {
              fprintf(stderr,"WARNING: Attempt to assign multiple toolno.s to pocket %d\n",realpocket);
              fprintf(stderr,"         %s %s()\n",__FILE__,__FUNCTION__);
-@@ -238,7 +262,7 @@ int tooldata_read_entry(const char *input_line)
+@@ -233,7 +266,7 @@ int tooldata_read_entry(const char *input_line)
                         );
              }
          }
@@ -674,41 +937,140 @@ index 4e9651c86f..cbb7299eff 100644
              UNEXPECTED_MSG;
          }
      } else {
-@@ -312,27 +336,15 @@ void tooldata_format_toolline (int idx,
-     return;
+@@ -323,50 +356,130 @@ int tooldata_format_toolline (int idx,
+     return 0;
  } // tooldata_format_toolline()
  
+-// The last table file loaded had a line refused as too long: that tool is
+-// not in memory, so writing the table back would delete the user's line.
++// The table file the table in memory was loaded from had a line refused (too
++// long), or did not load at all: what it holds is not all in memory, so
++// writing the table back would delete the user's lines.
+ static bool table_has_refused_lines = false;
+ 
 -int tooldata_load(const char *filename)
-+int tooldata_load_snapshot(const char *filename,
-+                           CANON_TOOL_TABLE *staged,
-+                           int *last_index)
++void tooldata_set_refused_lines(bool refused)
  {
-     FILE *fp;
-     char input_line[CANON_TOOL_ENTRY_LEN];
-     char orig_line[CANON_TOOL_ENTRY_LEN];
+-    FILE *fp;
+-    char input_line[CANON_TOOL_ENTRY_LEN];
+-    char orig_line[CANON_TOOL_ENTRY_LEN];
++    table_has_refused_lines = refused;
++}
  
 -    if (db_mode == DB_ACTIVE) { //expect data loaded from db
 -         if (tooldata_db_getall()) {
 -            fprintf(stderr,
 -              "\ntooldata_load: Failed to load tooldata from database\n\n");
 -            db_mode = DB_NOTUSED;
--            return -1;
++// What the table file should hold: the bytes read when it was loaded or
++// written by the last save, or no file at all. A file holding anything else
++// has changes the table in memory lacks. Bytes are compared rather than size
++// and timestamps, which miss an edit within the timestamp granularity and
++// change on a mere touch; after a save the bytes are known without looking
++// at the file, so the save's own rename is never taken for an edit.
++static bool table_file_known = false;
++static bool table_file_exists = false;
++static std::string table_file_content;
++static std::string last_read_content; // of the last tooldata_load_snapshot()
++
++// 0 with the whole file in *content, else -1 with errno set
++static int read_whole_file(const char *filename, std::string *content)
++{
++    FILE *fp = fopen(filename, "r");
++    if (!fp) return -1;
++    content->clear();
++    char buffer[4096];
++    size_t count;
++    while ((count = fread(buffer, 1, sizeof(buffer), fp)) > 0) {
++        content->append(buffer, count);
++    }
++    const int read_error = ferror(fp) ? (errno ? errno : EIO) : 0;
++    fclose(fp);
++    if (read_error) {
++        errno = read_error;
++        return -1;
++    }
++    return 0;
++}
++
++void tooldata_adopt_loaded_file(void)
++{
++    table_file_known = true;
++    table_file_exists = true;
++    table_file_content = last_read_content;
++}
++
++// Whether a save would lose nothing: the file holds what is expected, or
++// there is no file. One that cannot be read may hold anything.
++static bool table_file_as_expected(const char *filename)
++{
++    if (!table_file_known) return true;
++    std::string current;
++    if (read_whole_file(filename, &current)) return errno == ENOENT;
++    return table_file_exists && current == table_file_content;
++}
++
++// The file a save has to replace: filename with symbolic links followed, so
++// that the links stay. A link may point to a file not there yet.
++static int resolve_table_file(const char *filename, std::string *resolved)
++{
++    std::string path(filename);
++    for (int depth = 0; depth < 40; ++depth) {
++        char target[PATH_MAX];
++        const ssize_t length = readlink(path.c_str(), target, sizeof(target));
++        if (length < 0) {
++            if (errno != EINVAL && errno != ENOENT) return -1;
++            *resolved = path;
++            return 0;
++        }
++        if ((size_t)length == sizeof(target)) {
++            errno = ENAMETOOLONG;
+             return -1;
 -         }
 -         return 0;
--    }
--
++        }
++        const std::string link(target, length);
++        const auto slash = path.find_last_of('/');
++        if (link[0] == '/' || slash == std::string::npos) {
++            path = link;
++        } else {
++            path = path.substr(0, slash + 1) + link;
++        }
+     }
++    errno = ELOOP;
++    return -1;
++}
+ 
 -    if(!filename) return -1;
--
++int tooldata_load_snapshot(const char *filename,
++                           CANON_TOOL_TABLE *staged,
++                           int *last_index,
++                           bool *refused_lines)
++{
++    FILE *fp = NULL;
++    char input_line[CANON_TOOL_ENTRY_LEN];
++    char orig_line[CANON_TOOL_ENTRY_LEN];
+ 
 -    // clear out tool table
 -    // (Set vars to indicate no tool in pocket):
 -    tooldata_reset();
-+    if (!filename || !staged || !last_index || db_mode == DB_ACTIVE) return -1;
++    if (!filename || !staged || !last_index || !refused_lines ||
++        db_mode == DB_ACTIVE) return -1;
  
-     // open tool table file
-     if (NULL == (fp = fopen(filename, "r"))) {
-@@ -341,14 +353,15 @@ int tooldata_load(const char *filename)
+-    // open tool table file
+-    if (NULL == (fp = fopen(filename, "r"))) {
++    // the file is read once, so that the lines parsed are exactly the bytes
++    // tooldata_adopt_loaded_file() remembers
++    std::string content;
++    if (read_whole_file(filename, &content)) {
+         fprintf(stderr, "%s, %d: Failed to open tool table file '%s': %s\n",
+                 __FILE__, __LINE__, filename, strerror(errno));
          return -1;
      }
++    if (!content.empty() &&
++        NULL == (fp = fmemopen(content.data(), content.size(), "r"))) {
++        return -1;
++    }
  
 -    // after initializing all available pockets,
 -    // subsequent read from filename will update the last_index
@@ -722,11 +1084,25 @@ index 4e9651c86f..cbb7299eff 100644
      const int nonrandom_start_idx = 1; // when reading file start at 0
      tooldata_add_init(nonrandom_start_idx);
  
+-    table_has_refused_lines = false;
++    bool refused = false;
+     int lineno = 0;
+-    while (!feof(fp)) {
 +    int load_failed = 0;
-     while (!feof(fp)) {
++    while (fp && !feof(fp)) {
          // for nonrandom machines, just read the tools into pockets 1..n
          // no matter their tool numbers.  NB leave the spindle pocket 0
-@@ -361,38 +374,62 @@ int tooldata_load(const char *filename)
+         // unchanged/empty.
+@@ -383,7 +496,7 @@ int tooldata_load(const char *filename)
+             while ((c = fgetc(fp)) != EOF && c != '\n') {}
+             fprintf(stderr, "File: %s line %d: tool line longer than %d characters refused\n",
+                     filename, lineno, CANON_TOOL_LINE_MAX);
+-            table_has_refused_lines = true;
++            refused = true;
+             continue;
+         }
+         strcpy(orig_line, input_line);
+@@ -391,37 +504,79 @@ int tooldata_load(const char *filename)
          // parse and store one line from tool table file
          int entry_idx = tooldata_read_entry(input_line);
          if (entry_idx <0) {
@@ -756,16 +1132,17 @@ index 4e9651c86f..cbb7299eff 100644
          }
      } // while
  
-     // close the file
+-    // close the file
 -    fclose(fp);
--
-+    if (ferror(fp) || fclose(fp)) load_failed = 1;
++    if (fp && (ferror(fp) || fclose(fp))) load_failed = 1;
 +    load_staging_table = nullptr;
 +    if (load_failed) return -1;
 +    *last_index = load_staging_last_index;
-     return 0;
++    *refused_lines = refused;
++    last_read_content = std::move(content);
++    return 0;
 +} // tooldata_load_snapshot()
-+
+ 
 +int tooldata_load(const char *filename)
 +{
 +    if (db_mode == DB_ACTIVE) { //expect data loaded from db
@@ -779,41 +1156,55 @@ index 4e9651c86f..cbb7299eff 100644
 +    }
 +    CANON_TOOL_TABLE staged[CANON_POCKETS_MAX];
 +    int last_index = 0;
-+    if (tooldata_load_snapshot(filename, staged, &last_index)) return -1;
-+    return tooldata_replace(staged, last_index);
++    bool refused_lines = false;
++    if (tooldata_load_snapshot(filename, staged, &last_index, &refused_lines) ||
++        tooldata_replace(staged, last_index)) {
++        // a table file that did not load is kept as it is until one loads:
++        // the table in memory does not hold it (a missing one may be made)
++        struct stat existing;
++        if (filename && stat(filename, &existing) == 0) {
++            tooldata_set_refused_lines(true);
++        } else if (filename) {
++            table_file_known = true;
++            table_file_exists = false;
++            table_file_content.clear();
++        }
++        return -1;
++    }
++    tooldata_adopt_loaded_file();
++    tooldata_set_refused_lines(refused_lines);
+     return 0;
  } // tooldata_load()
  
--static void write_tool_line(FILE* fp,int idx)
-+static int write_tool_line(FILE* fp, int idx, const CANON_TOOL_TABLE *table)
+-// Append idx's tool line to table; -1 if it is too long to write.
+-static int write_tool_line(std::string &table,int idx)
++// Append idx's tool line from table, or from the table in memory if table
++// is NULL; -1 if it is too long to write.
++static int write_tool_line(std::string *out, int idx, const CANON_TOOL_TABLE *table)
  {
      CANON_TOOL_TABLE tdata;
--    if (tooldata_get(&tdata,idx) != IDX_OK) {return;}
+-    if (tooldata_get(&tdata,idx) != IDX_OK) {return 0;}
 +    if (table) {
 +        tdata = table[idx];
 +    } else if (tooldata_get(&tdata,idx) != IDX_OK) {
 +        return -1;
 +    }
      if (db_mode == DB_ACTIVE && idx != 0 ) {
--        return;
-+        return 0;
+         return 0;
      }
- 
-     if (tdata.toolno != -1) {
-@@ -400,49 +437,60 @@ static void write_tool_line(FILE* fp,int idx)
-         tooldata_format_toolline (idx,
-                                   1, // ignore_zero_values
-                                   tdata,theline);
--        fprintf(fp,"%s",theline);
-+        if (fprintf(fp,"%s",theline) < 0) return -1;
+@@ -433,63 +588,114 @@ static int write_tool_line(std::string &table,int idx)
+                                       tdata,theline)) {
+             return -1;
+         }
+-        table += theline;
++        out->append(theline);
      }
--    return;
-+    return 0;
+     return 0;
  } // write_tool_line()
  
 -int tooldata_save(const char *filename)
-+int tooldata_save_snapshot(const char *filename,
-+                           const CANON_TOOL_TABLE *table,
-+                           int last_index)
++bool tooldata_tables_match(const CANON_TOOL_TABLE *a, int last_a,
++                           const CANON_TOOL_TABLE *b, int last_b)
  {
 -    int idx;
 -    FILE *fp;
@@ -833,72 +1224,139 @@ index 4e9651c86f..cbb7299eff 100644
 -        if (filename[0] == 0) {
 -            UNEXPECTED_MSG;
 -        }
-+    if (!filename || !filename[0] || !table || last_index < 0 ||
-+        last_index >= CANON_POCKETS_MAX || db_mode == DB_ACTIVE) return -1;
-+    std::string temporary = std::string(filename) + ".tmp.XXXXXX";
-+    int fd = mkstemp(temporary.data());
-+    if (fd < 0) return -1;
-+    struct stat existing{};
-+    if (stat(filename, &existing) == 0) (void)fchmod(fd, existing.st_mode & 0777);
-+    FILE *fp = fdopen(fd, "w");
-+    if (!fp) { close(fd); unlink(temporary.c_str()); return -1; }
-+    int result = 0;
-+    for (int idx = is_random_toolchanger ? 0 : 1;
-+         idx <= last_index; ++idx) {
-+        if (write_tool_line(fp, idx, table)) { result = -1; break; }
-     }
+-        if (table_has_refused_lines) {
+-            fprintf(stderr, "%s: not saved: lines refused when it was loaded "
+-                    "would be lost; shorten them and reload the tool table\n",
+-                    filename);
+-            return -1;
+-        }
+-    }
 -
+-    // format every line first: a tool whose line is too long leaves the
+-    // file as it was rather than written without that tool
+-    std::string table;
+-    if (db_mode == DB_ACTIVE) {
+-        int spindle_idx = 0;
+-        if (write_tool_line(table,spindle_idx)) {return -1;}
+-    } else {
+-        start_idx = is_random_toolchanger ? 0 : 1;
+-        for (idx = start_idx; idx < CANON_POCKETS_MAX; idx++) {
+-            if (write_tool_line(table,idx)) {return -1;}
+-        }
++    const int last = last_a > last_b ? last_a : last_b;
++    for (int idx = is_random_toolchanger ? 0 : 1; idx <= last; ++idx) {
++        char line_a[CANON_TOOL_ENTRY_LEN] = {0};
++        char line_b[CANON_TOOL_ENTRY_LEN] = {0};
++        if (idx <= last_a && a[idx].toolno != -1 &&
++            tooldata_format_toolline(idx, 1, a[idx], line_a)) return false;
++        if (idx <= last_b && b[idx].toolno != -1 &&
++            tooldata_format_toolline(idx, 1, b[idx], line_b)) return false;
++        if (strcmp(line_a, line_b)) return false;
+     }
++    return true;
++}
+ 
 -    // open tool table file
 -    if (NULL == (fp = fopen(filename, "w"))) {
 -        fprintf(stderr, "%s, %d: Failed to open tool table file '%s': %s\n",
 -                __FILE__, __LINE__, filename, strerror(errno));
--        return -1;
++int tooldata_save_snapshot(const char *filename,
++                           const CANON_TOOL_TABLE *table,
++                           int last_index)
++{
++    if (!filename || !filename[0] || !table || last_index < 0 ||
++        last_index >= CANON_POCKETS_MAX || db_mode == DB_ACTIVE) return -1;
++    if (table_has_refused_lines) {
++        fprintf(stderr, "%s: not saved: lines refused when it was loaded "
++                "would be lost; correct them and reload the tool table\n",
++                filename);
+         return -1;
+     }
+-    int written = fputs(table.c_str(), fp);
+-    if (fclose(fp) != 0 || written == EOF) {
+-        fprintf(stderr, "%s, %d: Failed to write tool table file '%s': %s\n",
+-                __FILE__, __LINE__, filename, strerror(errno));
++    // a tool whose line is too long fails the save, and the file stays as
++    // it was: the table goes to a temporary file renamed over it only when
++    // every line has been written
++    std::string content;
++    for (int idx = is_random_toolchanger ? 0 : 1;
++         idx <= last_index; ++idx) {
++        if (write_tool_line(&content, idx, table)) return -1;
++    }
++    // the rename replaces the real file, not a link leading to it
++    std::string target;
++    if (resolve_table_file(filename, &target)) {
++        fprintf(stderr, "%s: not saved: %s\n", filename, strerror(errno));
+         return -1;
+     }
+-    return 0;
++    std::string temporary = target + ".tmp.XXXXXX";
++    int fd = mkstemp(temporary.data());
++    if (fd < 0) return -1;
++    struct stat existing{};
++    if (stat(target.c_str(), &existing) == 0) (void)fchmod(fd, existing.st_mode & 0777);
++    FILE *fp = fdopen(fd, "w");
++    if (!fp) { close(fd); unlink(temporary.c_str()); return -1; }
++    int result = 0;
++    if (fwrite(content.data(), 1, content.size(), fp) != content.size()) result = -1;
 +    if (!result && fflush(fp)) result = -1;
 +    if (!result && fsync(fd)) result = -1;
 +    if (fclose(fp)) result = -1;
-+    if (!result && rename(temporary.c_str(), filename)) result = -1;
++    // checked last, to leave the least time for a change to slip in
++    if (!result && !table_file_as_expected(target.c_str())) {
++        fprintf(stderr, "%s: not saved: the file changed since it was loaded "
++                "or saved; reload the tool table\n", filename);
++        result = -1;
++    }
++    if (!result && rename(temporary.c_str(), target.c_str())) result = -1;
 +    if (!result) {
-+        const std::string path(filename);
-+        const auto slash = path.find_last_of('/');
++        table_file_known = true;
++        table_file_exists = true;
++        table_file_content = std::move(content);
++        const auto slash = target.find_last_of('/');
 +        const std::string parent = slash == std::string::npos ? "." :
-+                                   (slash == 0 ? "/" : path.substr(0, slash));
++                                   (slash == 0 ? "/" : target.substr(0, slash));
 +        const int dirfd = open(parent.c_str(), O_RDONLY | O_DIRECTORY);
 +        if (dirfd < 0 || fsync(dirfd)) result = -1;
 +        if (dirfd >= 0 && close(dirfd)) result = -1;
-     }
++    }
 +    if (result) unlink(temporary.c_str());
 +    return result;
-+} //tooldata_save()
- 
+ } //tooldata_save()
++
 +int tooldata_save(const char *filename)
 +{
-     if (db_mode == DB_ACTIVE) {
--        int spindle_idx = 0;
--        write_tool_line(fp,spindle_idx);
--    } else {
--        start_idx = is_random_toolchanger ? 0 : 1;
--        for (idx = start_idx; idx < CANON_POCKETS_MAX; idx++) {
--            write_tool_line(fp,idx);
--        }
++    if (db_mode == DB_ACTIVE) {
 +        if (!is_random_toolchanger) return 0;
++        // format the line first: one too long leaves the file as it was
++        CANON_TOOL_TABLE tdata;
++        char theline[CANON_TOOL_ENTRY_LEN] = {0};
++        if (tooldata_get(&tdata, 0) != IDX_OK) return -1;
++        if (tdata.toolno != -1 &&
++            tooldata_format_toolline(0, 1, tdata, theline)) return -1;
 +        FILE *fp = fopen(DB_SPINDLE_SAVE, "w");
 +        if (!fp) return -1;
-+        int result = write_tool_line(fp, 0, NULL);
++        int result = fputs(theline, fp) == EOF ? -1 : 0;
 +        if (!result && fflush(fp)) result = -1;
 +        if (!result && fsync(fileno(fp))) result = -1;
 +        if (fclose(fp)) result = -1;
 +        return result;
-     }
--    fclose(fp);
--    return 0;
--} //tooldata_save()
++    }
++    // filename == NULL happens without ini entry [EMCIO]TOOL_TABLE
++    // and a Task::emcToolSetOffset is performed.
++    if (!filename) {
++        fprintf(stderr, "%s: No filename. Are you missing INI-entry [EMCIO]TOOL_TABLE?\n",
++                __PRETTY_FUNCTION__);
++        return -1;
++    }
 +    CANON_TOOL_TABLE table[CANON_POCKETS_MAX];
 +    int last_index = 0;
 +    if (tooldata_snapshot(table, &last_index)) return -1;
 +    return tooldata_save_snapshot(filename, table, last_index);
 +}
 diff --git a/src/emc/tooldata/tooldata_mmap.cc b/src/emc/tooldata/tooldata_mmap.cc
-index 45d0c2e7c2..0e3a27389d 100644
+index d13d877..71b417b 100644
 --- a/src/emc/tooldata/tooldata_mmap.cc
 +++ b/src/emc/tooldata/tooldata_mmap.cc
 @@ -22,6 +22,7 @@
@@ -909,18 +1367,17 @@ index 45d0c2e7c2..0e3a27389d 100644
  #include <string.h>
  #include <mutex>
  #include "config.h"
-@@ -39,6 +40,10 @@ static int           creator_fd;
+@@ -48,6 +49,9 @@ static bool          mmap_is_creator = false;
  static char          filename[LINELEN] = {};
- static char*         tool_mmap_base = 0;
+ static char*         tool_mmap_base = NULL;
  static EMC_TOOL_STAT const *toolstat;
 +static dev_t         mapped_device;
 +static ino_t         mapped_inode;
-+static bool          creator_mapping;
 +static std::mutex    mapping_mutex;
  
  typedef struct {
      rtapi_mutex_t   mutex;
-@@ -114,6 +119,8 @@ static void tool_mmap_mutex_give()
+@@ -130,6 +134,8 @@ static void tool_mmap_mutex_give()
  
  bool tool_mmap_is_random_toolchanger(void)
  {
@@ -929,7 +1386,7 @@ index 45d0c2e7c2..0e3a27389d 100644
      bool ans = 0;
      tool_mmap_mutex_get();
      tooldata_header_t *hptr = HPTR();
-@@ -127,6 +134,7 @@ bool tool_mmap_is_random_toolchanger(void)
+@@ -143,6 +149,7 @@ bool tool_mmap_is_random_toolchanger(void)
  int tool_mmap_creator(EMC_TOOL_STAT const * ptr,int random_toolchanger)
  {
      static int inited=0;
@@ -937,7 +1394,7 @@ index 45d0c2e7c2..0e3a27389d 100644
  
      if (inited) {
          fprintf(stderr,"Error: tool_mmap_creator already called BYE\n");
-@@ -156,6 +164,12 @@ int tool_mmap_creator(EMC_TOOL_STAT const * ptr,int random_toolchanger)
+@@ -172,6 +179,11 @@ int tool_mmap_creator(EMC_TOOL_STAT const * ptr,int random_toolchanger)
          perror("tool_mmap_creator(): mmap fail");
          exit(EXIT_FAILURE);
      }
@@ -946,11 +1403,24 @@ index 45d0c2e7c2..0e3a27389d 100644
 +        mapped_device = mapping_stat.st_dev;
 +        mapped_inode = mapping_stat.st_ino;
 +    }
-+    creator_mapping = true;
  
      tooldata_header_t *hptr = HPTR();
      hptr->is_random_toolchanger = random_toolchanger;
-@@ -168,9 +182,22 @@ int tool_mmap_creator(EMC_TOOL_STAT const * ptr,int random_toolchanger)
+@@ -183,12 +195,34 @@ int tool_mmap_creator(EMC_TOOL_STAT const * ptr,int random_toolchanger)
+     tool_mmap_mutex_give(); return 0;
+ } // tool_mmap_creator();
+ 
++// drop a user mapping whose file has gone or been replaced
++static void tool_mmap_user_unmap()
++{
++    munmap(tool_mmap_base, TOOL_MMAP_SIZE);
++    tool_mmap_base = nullptr;
++    if (mmap_fd >= 0) {
++        close(mmap_fd);
++        mmap_fd = -1;
++    }
++}
++
  //typ: milltask, guis (emcmodule,emcsh,...), halui
  int tool_mmap_user()
  {
@@ -960,24 +1430,22 @@ index 45d0c2e7c2..0e3a27389d 100644
 +    const std::lock_guard<std::mutex> mapping_lock(mapping_mutex);
 +    struct stat path_stat;
 +    if (stat(tool_mmap_fname(), &path_stat)) {
-+        if (tool_mmap_base && !creator_mapping) {
-+            munmap(tool_mmap_base, TOOL_MMAP_SIZE);
-+            tool_mmap_base = 0;
++        if (tool_mmap_base && !mmap_is_creator) {
++            tool_mmap_user_unmap();
 +        }
 +        return -1;
 +    }
 +    if (tool_mmap_base &&
-+        (creator_mapping || (mapped_device == path_stat.st_dev &&
++        (mmap_is_creator || (mapped_device == path_stat.st_dev &&
 +                             mapped_inode == path_stat.st_ino))) return 0;
 +    if (tool_mmap_base) {
-+        munmap(tool_mmap_base, TOOL_MMAP_SIZE);
-+        tool_mmap_base = 0;
++        tool_mmap_user_unmap();
 +    }
      int fd = open(tool_mmap_fname(),
                    TOOL_MMAP_USER_OPEN_FLAGS, TOOL_MMAP_MODE);
  
-@@ -187,6 +214,12 @@ int tool_mmap_user()
-         tool_mmap_base = (char*)0;
+@@ -205,6 +239,12 @@ int tool_mmap_user()
+         tool_mmap_base = (char*)NULL;
          return(-1);
      }
 +    struct stat opened_stat;
@@ -986,17 +1454,16 @@ index 45d0c2e7c2..0e3a27389d 100644
 +        close(fd);
 +        return -1;
 +    }
-     tool_mmap_base = (char*)mmap(0, TOOL_MMAP_SIZE, PROT_READ|PROT_WRITE,
+     tool_mmap_base = (char*)mmap(NULL, TOOL_MMAP_SIZE, PROT_READ|PROT_WRITE,
                                   MAP_SHARED, fd, 0);
  
-@@ -195,12 +228,16 @@ int tool_mmap_user()
+@@ -213,12 +253,15 @@ int tool_mmap_user()
          perror("tool_mmap_user(): mmap fail");
          exit(EXIT_FAILURE);
      }
 +    mapped_device = opened_stat.st_dev;
 +    mapped_inode = opened_stat.st_ino;
-+    creator_mapping = false;
-     close(fd);
+     mmap_fd = fd;
      return 0;
  } //tool_mmap_user()
  
@@ -1006,24 +1473,16 @@ index 45d0c2e7c2..0e3a27389d 100644
      if (!tool_mmap_base) { return; }
      // flush mmapped file to filesystem
      if (msync(tool_mmap_base, TOOL_MMAP_SIZE, MS_SYNC) == -1) {
-@@ -211,6 +248,7 @@ void tool_mmap_close()
-         perror("tool_mmap_close(): munmapfail");
-         exit(EXIT_FAILURE);
-     }
-+    tool_mmap_base = 0;
-     if( unlink(tool_mmap_fname() )) {
-         perror("tool_mmap_close(): unlink fail");
-     }
-@@ -219,6 +257,8 @@ void tool_mmap_close()
+@@ -249,6 +292,8 @@ void tool_mmap_close()
  
  void tooldata_last_index_set(int idx)  //force last_index
  {
 +    const std::lock_guard<std::mutex> mapping_lock(mapping_mutex);
-+    if (!creator_mapping) { UNEXPECTED_MSG; return; }
++    if (!mmap_is_creator) { UNEXPECTED_MSG; return; }
      tool_mmap_mutex_get();
      tooldata_header_t *hptr = HPTR();
      if (idx < 0 || idx >= CANON_POCKETS_MAX) {
-@@ -232,19 +272,20 @@ void tooldata_last_index_set(int idx)  //force last_index
+@@ -262,19 +307,20 @@ void tooldata_last_index_set(int idx)  //force last_index
  
  int tooldata_last_index_get(void)
  {
@@ -1046,20 +1505,20 @@ index 45d0c2e7c2..0e3a27389d 100644
 +    const std::lock_guard<std::mutex> mapping_lock(mapping_mutex);
      toolidx_t ret;
 -    if (!tool_mmap_base) {
-+    if (!tool_mmap_base || !creator_mapping) {
++    if (!tool_mmap_base || !mmap_is_creator) {
          fprintf(stderr,"%5d tooldata_put() no tool_mmap_base\n",getpid());
          return IDX_FAIL;
      }
-@@ -277,6 +318,8 @@ toolidx_t tooldata_put(struct CANON_TOOL_TABLE tdata,int idx)
+@@ -307,6 +353,8 @@ toolidx_t tooldata_put(struct CANON_TOOL_TABLE tdata,int idx)
  
  void tooldata_reset()
  {
 +    const std::lock_guard<std::mutex> mapping_lock(mapping_mutex);
-+    if (!creator_mapping) { UNEXPECTED_MSG; return; }
++    if (!mmap_is_creator) { UNEXPECTED_MSG; return; }
      CANON_TOOL_TABLE initdata = tooldata_entry_init();
      tool_mmap_mutex_get();
      int idx;
-@@ -289,9 +332,9 @@ void tooldata_reset()
+@@ -319,9 +367,9 @@ void tooldata_reset()
  
  toolidx_t tooldata_get(CANON_TOOL_TABLE* pdata, int idx)
  {
@@ -1071,7 +1530,7 @@ index 45d0c2e7c2..0e3a27389d 100644
      }
      if (idx < 0 || idx >= CANON_POCKETS_MAX) {
          // ui programs may query for nonexistent idx values
-@@ -310,6 +353,8 @@ toolidx_t tooldata_get(CANON_TOOL_TABLE* pdata, int idx)
+@@ -340,6 +388,8 @@ toolidx_t tooldata_get(CANON_TOOL_TABLE* pdata, int idx)
  
  int tooldata_find_index_for_tool(int toolno)
  {
@@ -1080,7 +1539,7 @@ index 45d0c2e7c2..0e3a27389d 100644
      tooldata_header_t *hptr = HPTR();
      tool_mmap_mutex_get();
      int idx;
-@@ -332,3 +377,33 @@ int tooldata_find_index_for_tool(int toolno)
+@@ -362,3 +412,33 @@ int tooldata_find_index_for_tool(int toolno)
      tool_mmap_mutex_give();
      return foundidx;
  } // tooldata_find_index_for_tool()
@@ -1101,7 +1560,7 @@ index 45d0c2e7c2..0e3a27389d 100644
 +int tooldata_replace(const CANON_TOOL_TABLE *table, int last_index)
 +{
 +    const std::lock_guard<std::mutex> mapping_lock(mapping_mutex);
-+    if (!tool_mmap_base || !creator_mapping || !table || last_index < 0 ||
++    if (!tool_mmap_base || !mmap_is_creator || !table || last_index < 0 ||
 +        last_index >= CANON_POCKETS_MAX || tool_mmap_mutex_get()) {
 +        return -1;
 +    }
@@ -1115,7 +1574,7 @@ index 45d0c2e7c2..0e3a27389d 100644
 +    return 0;
 +}
 diff --git a/src/emc/tooldata/tooldata_nml.cc b/src/emc/tooldata/tooldata_nml.cc
-index f33392574a..a7ee61e380 100644
+index f333925..a7ee61e 100644
 --- a/src/emc/tooldata/tooldata_nml.cc
 +++ b/src/emc/tooldata/tooldata_nml.cc
 @@ -102,3 +102,19 @@ int tooldata_find_index_for_tool(int toolno)
@@ -1139,7 +1598,7 @@ index f33392574a..a7ee61e380 100644
 +    return 0;
 +}
 diff --git a/tests/toolchanger/reload-tool/non-random/test-ui.py b/tests/toolchanger/reload-tool/non-random/test-ui.py
-index 7bff305516..aa4b127bbd 100755
+index fca46c3..445e5ee 100755
 --- a/tests/toolchanger/reload-tool/non-random/test-ui.py
 +++ b/tests/toolchanger/reload-tool/non-random/test-ui.py
 @@ -67,6 +67,20 @@ c.home(-1)
@@ -1164,7 +1623,7 @@ index 7bff305516..aa4b127bbd 100755
  
  #
 diff --git a/tests/toolchanger/reload-tool/random/test-ui.py b/tests/toolchanger/reload-tool/random/test-ui.py
-index 7e5fc520ec..a41638f7fc 100755
+index 22509af..628ff13 100755
 --- a/tests/toolchanger/reload-tool/random/test-ui.py
 +++ b/tests/toolchanger/reload-tool/random/test-ui.py
 @@ -67,6 +67,8 @@ c.home(-1)
@@ -1181,3 +1640,12 @@ index 7e5fc520ec..a41638f7fc 100755
  
  sys.exit(0)
 -
+diff --git a/tests/tooldb/db-g10-offset/skip b/tests/tooldb/db-g10-offset/skip
+new file mode 100644
+index 0000000..730d8c3
+--- /dev/null
++++ b/tests/tooldb/db-g10-offset/skip
+@@ -0,0 +1,3 @@
++This test needs an [EMCIO]DB_PROGRAM, which task refuses in this patched
++build ("emc: own transactional tool CRUD in task"): tool data must come
++from a file-backed [EMCIO]TOOL_TABLE.

@@ -45,7 +45,15 @@ void expect_command_error(linuxcnc::v1::MachineService::Stub* machine,
 void verify_command_error_attribution(
     linuxcnc::v1::MachineService::Stub* machine);
 void verify_abort_handler_errors(linuxcnc::v1::MachineService::Stub* machine);
+// Unlike assert(), stays active when NDEBUG is defined.
+void live_require(bool condition, const char* description);
+// Requires MDI mode with the machine on, and leaves it that way.
+void verify_task_queued_command_ordering(
+    linuxcnc::v1::MachineService::Stub* machine);
 void verify_priority_admission(linuxcnc::v1::MachineService::Stub* machine);
+// Requires MDI mode with the machine on, and leaves it that way.
+void verify_interpreter_reset_requires_idle(
+    linuxcnc::v1::MachineService::Stub* machine);
 
 std::string read_file(const std::string& path);
 linuxcnc::v1::UploadWorkspaceResponse upload_program(

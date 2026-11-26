@@ -1,0 +1,7 @@
+# Task reads status less often than this absolute encoder home takes to finish.
+[FIXTURE]
+BASE = base.ini
+[TASK]
+CYCLE_TIME = 0.05
+[JOINT_1]
+HOME_ABSOLUTE_ENCODER = 2

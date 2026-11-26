@@ -1,0 +1,6 @@
+Exercise the native M54/M55 joint and spindle selectors, generic standalone
+block validation, and interpreter checks limited to selector representation.
+Configured resource topology is deliberately left to task and motion.
+
+Execute-status coverage checks zero queue-buster returns for legacy M54/M55
+remaps and two for each built-in acquire/release program. Requires a built RIP tree.

@@ -1,0 +1,11 @@
+rigid-tap
+g33
+queued-g33
+g33-chain
+trapezoidal:g33-chain
+g95-between-g33
+g33-no-following-rapid
+command-after-sync
+resume-stopping-refused
+step-stopping-refused
+inflight-step-g33-chain

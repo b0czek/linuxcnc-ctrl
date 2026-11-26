@@ -126,9 +126,9 @@ jobs:
           cd "${LINUXCNC_DIR}/src"
           ./autogen.sh
           ./configure --with-realtime=uspace \
-            --enable-headless \
+            --disable-gui \
             --disable-build-documentation \
-            --disable-build-manpages
+            --disable-manpages
           make -j"$(nproc)"
       - name: Save LinuxCNC build
         if: steps.linuxcnc-cache.outputs.cache-hit != 'true'

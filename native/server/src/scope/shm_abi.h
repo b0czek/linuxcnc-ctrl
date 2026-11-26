@@ -1,8 +1,9 @@
 /*
- * LinuxCNC scope_rt shared-memory ABI, pinned to the repository's baseline.
- * Derived from src/hal/utils/scope_shm.h. This header is deliberately kept
- * on the native implementation side; transport-facing code sees only the
- * types in scope_controller.hpp.
+ * LinuxCNC scope_rt shared-memory ABI, pinned to the repository's baseline
+ * (LinuxCNC 2.10, src/hal/utils/scope_shm.h). This header is deliberately
+ * kept on the native implementation side; transport-facing code sees only
+ * the types in scope_controller.hpp. The scope controller contract test
+ * checks it against upstream's header.
  */
 #pragma once
 
@@ -22,12 +23,13 @@ enum linuxcnc_scope_state_t {
   LINUXCNC_SCOPE_RESET,
 };
 
+/* One sample of one channel. scope_rt stores the member that matches the
+ * channel's HAL type; the other bytes of the cell keep stale data. */
 union linuxcnc_scope_data_t {
-  unsigned char d_u8;
-  rtapi_u32 d_u32;
-  rtapi_s32 d_s32;
-  real_t d_real;
-  ireal_t d_ireal;
+  rtapi_bool b;
+  rtapi_uint u;
+  rtapi_sint s;
+  rtapi_real r;
 };
 
 struct linuxcnc_scope_shm_control_t {
@@ -48,7 +50,15 @@ struct linuxcnc_scope_shm_control_t {
   int curr;
   int samples;
   linuxcnc_scope_state_t state;
-  int data_offset[LINUXCNC_SCOPE_CHANNELS];
+  /* Offset of the channel's value in HAL shared memory, as produced by
+   * hal_reference_unmap() and consumed by scope_rt's hal_reference_map(). */
+  rtapi_intptr_t data_offset[LINUXCNC_SCOPE_CHANNELS];
   hal_type_t data_type[LINUXCNC_SCOPE_CHANNELS];
+  /* Non-zero when the channel is sampled. */
   char data_len[LINUXCNC_SCOPE_CHANNELS];
 };
+
+/* scope_rt places the sample buffer after the control block, rounded up to
+ * a multiple of 8 bytes. */
+#define LINUXCNC_SCOPE_BUFFER_OFFSET \
+  ((sizeof(struct linuxcnc_scope_shm_control_t) + 7UL) & ~7UL)

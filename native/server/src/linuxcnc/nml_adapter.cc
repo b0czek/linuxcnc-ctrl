@@ -11,6 +11,8 @@
 #include <thread>
 #include <utility>
 
+#include "linuxcnc_grpc/linuxcnc/command_completion_tracker.hpp"
+
 #ifdef LINUXCNC_GRPC_HAS_NML
 #include "cms.hh"
 #include "emc.hh"
@@ -25,6 +27,14 @@ static_assert(linuxcnc::server::NmlAdapter::kDigitalOutputLimit ==
               EMCMOT_MAX_DIO);
 static_assert(linuxcnc::server::NmlAdapter::kAnalogOutputLimit ==
               EMCMOT_MAX_AIO);
+static_assert(linuxcnc::server::detail::kNmlRcsStatusDone ==
+              static_cast<std::int32_t>(RCS_STATUS::DONE));
+static_assert(linuxcnc::server::detail::kNmlRcsStatusError ==
+              static_cast<std::int32_t>(RCS_STATUS::ERROR));
+static_assert(linuxcnc::server::detail::kNmlTaskStateEstop ==
+              static_cast<std::int32_t>(EMC_TASK_STATE::ESTOP));
+static_assert(linuxcnc::server::detail::kNmlTaskStateOff ==
+              static_cast<std::int32_t>(EMC_TASK_STATE::OFF));
 #endif
 
 namespace linuxcnc::server {
@@ -390,6 +400,7 @@ NmlStatusPoll NmlAdapter::poll_status(NmlStatusSnapshot* snapshot) {
   task.task_paused = status->task.task_paused;
   task.delay_left = status->task.delayLeft;
   task.queued_mdi_commands = status->task.queuedMDIcommands;
+  task.hold_wait = static_cast<std::int32_t>(status->task.holdWait);
 
   auto& motion = snapshot->motion_stat;
   const auto& source_traj = status->motion.traj;
@@ -537,12 +548,14 @@ CommandSubmission NmlAdapter::submit(
     // NOLINTNEXTLINE(performance-unnecessary-value-param): see above.
     std::stop_token stop_token) {
 #ifdef LINUXCNC_GRPC_HAS_NML
-  const bool safety_command = command.kind == NmlCommandKind::StopProgram ||
-                              command.kind == NmlCommandKind::Pause ||
-                              command.kind == NmlCommandKind::AbortTask;
+  const auto routing = detail::nml_command_routing(command);
+  const bool safety_command = routing.priority != CommandPriority::Normal;
+  // A command cancelled by a later Interrupt never runs its action, so undo
+  // what was reserved for it here instead.
+  auto on_cancelled = command.on_failed;
   return impl_->commands.submit_with_context(
-      [this, command = std::move(command),
-       safety_command](CommandContext& context) mutable {
+      [this, command = std::move(command), safety_command,
+       routing](CommandContext& context) mutable {
         const auto rollback = [&command] {
           if (command.on_failed) command.on_failed();
         };
@@ -573,6 +586,14 @@ CommandSubmission NmlAdapter::submit(
               message = std::make_unique<EMC_TASK_PLAN_SYNCH>();
               break;
             case NmlCommandKind::ResetInterpreter:
+              // LinuxCNC refuses a reset unless the machine is idle. Commands
+              // this server wrote earlier may not have reached task yet, so
+              // refuse here too rather than let task judge a stale state.
+              // Checked after every earlier command was written.
+              if (impl_->completions.has_pending())
+                throw std::runtime_error(
+                    "interpreter reset refused: earlier commands are still "
+                    "in progress; wait for them or abort first");
               message = std::make_unique<EMC_TASK_PLAN_INIT>();
               break;
             case NmlCommandKind::ProgramOpen: {
@@ -926,41 +947,17 @@ CommandSubmission NmlAdapter::submit(
             }
           }
           const int serial = command_message->serial_number;
-          context.mark_accepted(static_cast<std::uint32_t>(serial));
-          context.defer_completion();
-          impl_->completions.track(
-              serial,
-              [completed = context.mark_completed, failed = context.mark_failed,
-               on_completed = std::move(command.on_completed)]() mutable {
-                try {
-                  if (on_completed) on_completed();
-                  completed();
-                } catch (const std::exception& error) {
-                  failed(error.what());
-                } catch (...) {
-                  failed("command completion callback failed");
-                }
-              },
-              [failed = context.mark_failed,
-               on_failed =
-                   std::move(command.on_failed)](std::string error) mutable {
-                try {
-                  if (on_failed) on_failed();
-                } catch (const std::exception& rollback_error) {
-                  error += "; rollback failed: ";
-                  error += rollback_error.what();
-                } catch (...) {
-                  error += "; rollback failed";
-                }
-                failed(std::move(error));
-              });
+          detail::track_written_command(
+              &impl_->completions, context, serial, routing.task_queued,
+              impl_->command_completion_timeout,
+              std::move(command.on_completed), std::move(command.on_failed));
         } catch (...) {
           rollback();
           throw;
         }
       },
-      stop_token,
-      safety_command ? CommandPriority::Safety : CommandPriority::Normal);
+      stop_token, routing.priority, routing.hold_policy,
+      std::move(on_cancelled));
 #else
   (void)command;
   (void)stop_token;

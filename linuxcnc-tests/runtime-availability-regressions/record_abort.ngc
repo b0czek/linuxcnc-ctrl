@@ -1,0 +1,6 @@
+o<record_abort> sub
+(LOGAPPEND,abort-reasons.log)
+(LOG,#1)
+(LOGCLOSE)
+o<record_abort> endsub
+M2

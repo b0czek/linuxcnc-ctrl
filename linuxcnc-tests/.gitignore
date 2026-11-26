@@ -1,0 +1,7 @@
+result
+stderr
+*.var
+*.var.bak
+*.ini.expanded
+__pycache__/
+*.log

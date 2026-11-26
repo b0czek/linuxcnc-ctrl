@@ -7,6 +7,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace linuxcnc::server {
@@ -25,6 +26,15 @@ struct NmlErrorEvent {
   // the same value an ExecuteCommand response reports as its command
   // sequence. Zero when LinuxCNC did not tie the error to a command.
   std::uint32_t command_sequence = 0;
+};
+
+enum class NmlCompletionRule {
+  // A later echoed serial counts as completion. Used for commands task does
+  // not queue behind other work.
+  EchoAdvance,
+  // The result is only meaningful while task still echoes this serial. A later
+  // serial means the result was overwritten, so the outcome is unknown.
+  ExactEcho,
 };
 
 // The command-relevant part of one LinuxCNC status read.
@@ -46,8 +56,9 @@ struct NmlCommandEcho {
 // A command is rejected when an error stamped with its serial was read, even
 // if the status has already moved on to a later command, or when the status
 // echoes its serial with an error. Its failure message is the text of its
-// stamped errors. It completes when the status echoes it as done or has moved
-// past it without either.
+// stamped errors. It completes when the status echoes it as done, or, under
+// NmlCompletionRule::EchoAdvance, has moved past it without either. Under
+// ExactEcho a status that moved past it leaves its outcome unknown.
 class NmlCommandCompletionTracker {
  public:
   using Completion = std::function<void()>;
@@ -63,7 +74,12 @@ class NmlCommandCompletionTracker {
 
   explicit NmlCommandCompletionTracker(std::chrono::milliseconds timeout);
 
-  void track(std::int32_t serial, Completion completed, Failure failed);
+  void track(std::int32_t serial, Completion completed, Failure failed) {
+    track(serial, NmlCompletionRule::EchoAdvance, std::move(completed),
+          std::move(failed));
+  }
+  void track(std::int32_t serial, NmlCompletionRule rule, Completion completed,
+             Failure failed);
   void channel_failed();
   // Records an error read from the error channel. command_serial is the
   // serial LinuxCNC stamped on it, or zero.
@@ -71,10 +87,13 @@ class NmlCommandCompletionTracker {
   void observe(const NmlCommandEcho& echo);
   void tick();
   bool fresh() const;
+  // Whether a written command is still waiting for LinuxCNC to finish it.
+  bool has_pending() const;
 
  private:
   struct Pending {
     std::int32_t serial;
+    NmlCompletionRule rule;
     std::chrono::steady_clock::time_point deadline;
     std::uint64_t after_observation;
     Completion completed;
@@ -87,7 +106,14 @@ class NmlCommandCompletionTracker {
     std::chrono::steady_clock::time_point read_at;
   };
 
-  enum class Resolution { Pending, Completed, Rejected, TimedOut, Unavailable };
+  enum class Resolution {
+    Pending,
+    Completed,
+    Rejected,
+    Superseded,
+    TimedOut,
+    Unavailable
+  };
 
   struct Ready {
     Pending pending;

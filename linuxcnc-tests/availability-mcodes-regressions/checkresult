@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+for scenario in ${AVAILABILITY_MCODE_REGRESSION_CASES:-sync step}; do
+    grep -q "^availability M-code regression $scenario ok$" "$1"
+done
