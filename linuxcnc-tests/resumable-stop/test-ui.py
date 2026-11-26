@@ -1323,6 +1323,35 @@ def run_set_auto_while_stopped_test():
     wait_for_program_complete(5.0, expected_z=aborted_z)
 
 
+def run_step_after_dwell_stop_test():
+    # Stop during a dwell leaves an empty motion queue. Step from STOPPED
+    # must not mark the program finished: it runs on, and afterwards the
+    # program can be run again.
+    open_auto_program("dwell.ngc")
+    c.auto(linuxcnc.AUTO_RUN, 0)
+    wait_for(
+        lambda: s.exec_state == linuxcnc.EXEC_WAITING_FOR_DELAY
+        and s.delay_left > 2.0,
+        "G4 did not enter its dwell",
+    )
+    c.program_stop()
+    wait_for(
+        lambda: s.stop_state == linuxcnc.STOP_STOPPED and s.task_paused,
+        "task did not enter STOPPED during G4",
+    )
+    c.auto(linuxcnc.AUTO_STEP)
+    time.sleep(0.3)
+    s.poll()
+    if s.interp_state == linuxcnc.INTERP_IDLE:
+        fail("Step from STOPPED marked the program finished")
+    c.auto(linuxcnc.AUTO_RESUME)
+    wait_for_program_complete(5.0)
+    # The program file was closed at its end, so Run starts it again.
+    c.auto(linuxcnc.AUTO_RUN, 0)
+    wait_for(lambda: s.position[0] < 1.0, "Run after the program did not start it again")
+    wait_for_program_complete(5.0)
+
+
 def run_dwell_atspeed_barrier_test():
     # M3 arms motion's next-feed at-speed barrier before the dwell, and the
     # following feed is not queued until the dwell ends. Turning the spindle
@@ -2055,6 +2084,36 @@ def run_threading_chain_stop_resume_test():
     )
 
 
+def run_inflight_step_g33_chain_test():
+    # Consecutive G33 moves stay synchronized to one index pulse. A Single
+    # Step armed during the first ends at the end of the whole synchronized
+    # run, as Stop does, and never inside it; Resume finishes the program.
+    open_auto_program("thread-chain-g64.ngc")
+    c.auto(linuxcnc.AUTO_RUN, 0)
+    wait_for(
+        lambda: s.position[2] < -0.5
+        and s.position[2] > -1.5
+        and hal.get_value("spindle.0.speed-out") > 0.0,
+        "first G33 did not start",
+        timeout=15.0,
+    )
+    c.auto(linuxcnc.AUTO_STEP)
+    # G64 blends the last G33 into the following G1, so the run ends where
+    # that blend begins, short of Z-5.
+    wait_for(
+        lambda: s.position[2] < -4.0 and s.current_vel == 0.0,
+        lambda: "Step did not end after the G33 chain: Z=%.4f" % s.position[2],
+        timeout=15.0,
+    )
+    time.sleep(0.5)
+    s.poll()
+    if s.position[2] > -4.0 or abs(s.position[0]) > 0.5:
+        fail("Step did not hold after the G33 chain: X=%.4f Z=%.4f"
+             % (s.position[0], s.position[2]))
+    c.auto(linuxcnc.AUTO_RESUME)
+    wait_for_program_complete(10.0, expected_z=-5.0)
+
+
 def run_g95_between_g33_stop_resume_test():
     # A G33 that follows velocity-synchronized G95 motion keeps the earlier
     # G33's spindle synchronization. After a Stop during the G95 move the
@@ -2160,6 +2219,7 @@ SCENARIOS = {
     "dwell": run_dwell_stop_resume_test,
     "system-command": run_system_command_stop_test,
     "set-auto-stopped": run_set_auto_while_stopped_test,
+    "step-after-dwell-stop": run_step_after_dwell_stop_test,
     "dwell-atspeed": run_dwell_atspeed_barrier_test,
     "command-after-sync": run_command_after_sync_motion_test,
     "resume-atspeed": run_resume_atspeed_wait_test,
@@ -2179,6 +2239,7 @@ SCENARIOS = {
     "queued-feed-atspeed": run_queued_feed_atspeed_test,
     "g33-chain": run_threading_chain_stop_resume_test,
     "g95-between-g33": run_g95_between_g33_stop_resume_test,
+    "inflight-step-g33-chain": run_inflight_step_g33_chain_test,
     "spindle-state": run_stopped_spindle_s_word_test,
 }
 

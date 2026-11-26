@@ -8,3 +8,4 @@ g33-no-following-rapid
 command-after-sync
 resume-stopping-refused
 step-stopping-refused
+inflight-step-g33-chain

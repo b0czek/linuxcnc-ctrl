@@ -79,7 +79,7 @@ Fixes from review of the port:
  src/emc/rs274ngc/gcodemodule.cc               |  27 ++-
  src/emc/rs274ngc/interp_array.cc              |   1 +
  src/emc/rs274ngc/interp_check.cc              |   4 +-
- src/emc/rs274ngc/interp_convert.cc            | 171 ++++++++++------
+ src/emc/rs274ngc/interp_convert.cc            | 175 +++++++++++------
  src/emc/rs274ngc/interp_internal.hh           |   2 -
  src/emc/rs274ngc/interp_parameter_def.hh      |  10 +
  src/emc/rs274ngc/pyemctypes.cc                |   2 +
@@ -116,7 +116,7 @@ Fixes from review of the port:
  tests/toolchanger/m61/test-ui.py              |  28 ++-
  .../nonrandom/expected-gcode-output           |  12 +-
  .../random/expected-gcode-output              |  12 +-
- 59 files changed, 937 insertions(+), 286 deletions(-)
+ 59 files changed, 941 insertions(+), 286 deletions(-)
 
 diff --git a/configs/sim/gmoccapy/gmoccapy_tool_sensor.ini b/configs/sim/gmoccapy/gmoccapy_tool_sensor.ini
 index 37daf10..bbcdfc2 100644
@@ -869,7 +869,7 @@ index fc5ae57..c65a3b2 100644
    } else if (mode0 == G_30) {
    } else if (mode0 == G_5_3) {
 diff --git a/src/emc/rs274ngc/interp_convert.cc b/src/emc/rs274ngc/interp_convert.cc
-index 450922e..10bf98d 100644
+index 450922e..ab502ad 100644
 --- a/src/emc/rs274ngc/interp_convert.cc
 +++ b/src/emc/rs274ngc/interp_convert.cc
 @@ -4013,6 +4013,8 @@ int Interp::convert_m(block_pointer block,       //!< pointer to a block of RS27
@@ -881,16 +881,20 @@ index 450922e..10bf98d 100644
    double timeout;               // timeout for M66
  
    /* The M62-65 commands are used for DIO */
-@@ -4148,6 +4150,8 @@ int Interp::convert_m(block_pointer block,       //!< pointer to a block of RS27
+@@ -4148,6 +4150,12 @@ int Interp::convert_m(block_pointer block,       //!< pointer to a block of RS27
  	      // the 'recursion case'; record the fact
  	      CONTROLLING_BLOCK(*settings).builtin_used = !remapped_in_block;
  	      CHP(convert_tool_change(settings));
 +	      builtin_tool_change = true;
-+	      changed_toolno = settings->selected_tool;
++	      // The tool just loaded, from its pocket: selected_tool is not
++	      // resynchronised after an abort, the pocket is (upstream
++	      // RETAIN_G43 also decides on the pocket).
++	      changed_toolno = settings->current_pocket > 0
++		  ? settings->tool_table[settings->current_pocket].toolno : 0;
  	  }
        	  break;
  
-@@ -4160,6 +4164,10 @@ int Interp::convert_m(block_pointer block,       //!< pointer to a block of RS27
+@@ -4160,6 +4168,10 @@ int Interp::convert_m(block_pointer block,       //!< pointer to a block of RS27
  	      toolno = round_to_int(block->q_number);
  	      // now also accept M61 Q0 - unload tool
  	      CHKS((toolno < 0), (_("Need non-negative Q-word to specify tool number with M61")));
@@ -901,7 +905,7 @@ index 450922e..10bf98d 100644
  
  	      int idx;
  
-@@ -4169,6 +4177,8 @@ int Interp::convert_m(block_pointer block,       //!< pointer to a block of RS27
+@@ -4169,6 +4181,8 @@ int Interp::convert_m(block_pointer block,       //!< pointer to a block of RS27
  	      settings->toolchange_flag = true;
  	      CHANGE_TOOL_NUMBER(settings->current_pocket);
  	      set_tool_parameters();
@@ -910,7 +914,7 @@ index 450922e..10bf98d 100644
  	  }
  	  break;
  
-@@ -4180,22 +4190,31 @@ int Interp::convert_m(block_pointer block,       //!< pointer to a block of RS27
+@@ -4180,22 +4194,31 @@ int Interp::convert_m(block_pointer block,       //!< pointer to a block of RS27
        }
    }
  
@@ -958,7 +962,7 @@ index 450922e..10bf98d 100644
    }
  
   if (is_user_defined_m_code(block, settings, 7) && ONCE_M(7)) {
-@@ -4464,7 +4483,7 @@ int Interp::convert_modal_0(int code,    						//!< G-code, must be from group 0
+@@ -4464,7 +4487,7 @@ int Interp::convert_modal_0(int code,    						//!< G-code, must be from group 0
  {
  
    if (code == G_10) {
@@ -967,7 +971,7 @@ index 450922e..10bf98d 100644
            CHP(convert_setup_tool(block, settings));
        else if (block->l_number == 0) {
            int tno = settings->tool_table[0].toolno;
-@@ -4731,7 +4750,8 @@ int Interp::convert_setup_tool(block_pointer block, setup_pointer settings) {
+@@ -4731,7 +4754,8 @@ int Interp::convert_setup_tool(block_pointer block, setup_pointer settings) {
      int idx = -1, toolno;
      int q;
      double tx, ty, tz, ta, tb, tc, tu, tv, tw;
@@ -977,7 +981,7 @@ index 450922e..10bf98d 100644
  
      is_near_int(&toolno, block->p_number);
  
-@@ -4742,9 +4762,31 @@ int Interp::convert_setup_tool(block_pointer block, setup_pointer settings) {
+@@ -4742,9 +4766,31 @@ int Interp::convert_setup_tool(block_pointer block, setup_pointer settings) {
             block->u_flag || block->v_flag || block->w_flag ||
             block->r_flag || block->q_flag || block->i_flag ||
             block->j_flag),
@@ -1011,7 +1015,7 @@ index 450922e..10bf98d 100644
          if(block->x_flag)
              settings->tool_table[idx].offset.tran.x = PROGRAM_TO_USER_LEN(block->x_number);
          if(block->y_flag)
-@@ -4844,10 +4886,10 @@ int Interp::convert_setup_tool(block_pointer block, setup_pointer settings) {
+@@ -4844,10 +4890,10 @@ int Interp::convert_setup_tool(block_pointer block, setup_pointer settings) {
              settings->tool_table[idx].offset.w = PROGRAM_TO_USER_AX(AXIS_W, tw - block->w_number);
      }
  
@@ -1026,7 +1030,7 @@ index 450922e..10bf98d 100644
          CHKS((!is_near_int(&q, block->q_number)), _("Q number in G10 is not an integer"));
          CHKS((q > 9), _("Invalid tool orientation"));
          settings->tool_table[idx].orientation = q;
-@@ -4856,6 +4898,7 @@ int Interp::convert_setup_tool(block_pointer block, setup_pointer settings) {
+@@ -4856,6 +4902,7 @@ int Interp::convert_setup_tool(block_pointer block, setup_pointer settings) {
      SET_TOOL_TABLE_ENTRY(idx,
                           settings->tool_table[idx].toolno,
                           settings->tool_table[idx].offset,
@@ -1034,7 +1038,7 @@ index 450922e..10bf98d 100644
                           settings->tool_table[idx].diameter,
                           settings->tool_table[idx].frontangle,
                           settings->tool_table[idx].backangle,
-@@ -4910,6 +4953,15 @@ int Interp::convert_setup_tool(block_pointer block, setup_pointer settings) {
+@@ -4910,6 +4957,15 @@ int Interp::convert_setup_tool(block_pointer block, setup_pointer settings) {
      settings->parameters[5411] = settings->tool_table[0].frontangle;
      settings->parameters[5412] = settings->tool_table[0].backangle;
      settings->parameters[5413] = settings->tool_table[0].orientation;
@@ -1050,7 +1054,7 @@ index 450922e..10bf98d 100644
  
      // if the modified tool is currently in the spindle, then copy its
      // information to index 0 of the tool table (which signifies the
-@@ -4919,6 +4971,7 @@ int Interp::convert_setup_tool(block_pointer block, setup_pointer settings) {
+@@ -4919,6 +4975,7 @@ int Interp::convert_setup_tool(block_pointer block, setup_pointer settings) {
          SET_TOOL_TABLE_ENTRY(0,
                               settings->tool_table[idx].toolno,
                               settings->tool_table[idx].offset,
@@ -1058,7 +1062,7 @@ index 450922e..10bf98d 100644
                               settings->tool_table[idx].diameter,
                               settings->tool_table[idx].frontangle,
                               settings->tool_table[idx].backangle,
-@@ -6438,11 +6491,9 @@ This implements the "Next tool in T word" approach to tool selection.
+@@ -6438,11 +6495,9 @@ This implements the "Next tool in T word" approach to tool selection.
  The tool is selected when the T word is read (and the carousel may
  move at that time) but is changed when M6 is read.
  
@@ -1073,7 +1077,7 @@ index 450922e..10bf98d 100644
  
  */
  
-@@ -6662,15 +6713,15 @@ int Interp::convert_tool_length_offset(int g_code,       //!< g_code being execu
+@@ -6662,15 +6717,15 @@ int Interp::convert_tool_length_offset(int g_code,       //!< g_code being execu
      logDebug("convert_tool_length_offset: using index=%d spindle_toolno=%d pocket_toolno=%d",
  	     idx, settings->tool_table[0].toolno,settings->tool_table[settings->current_pocket].toolno);
  
@@ -1098,7 +1102,7 @@ index 450922e..10bf98d 100644
      settings->g43_with_zero_offset =
        !(tool_offset.tran.x || tool_offset.tran.y || tool_offset.tran.z ||
          tool_offset.a || tool_offset.b || tool_offset.c ||
-@@ -6697,15 +6748,15 @@ int Interp::convert_tool_length_offset(int g_code,       //!< g_code being execu
+@@ -6697,15 +6752,15 @@ int Interp::convert_tool_length_offset(int g_code,       //!< g_code being execu
      tool_offset = settings->tool_offset;
      if (block->h_flag){
          CHP((find_tool_index(settings, block->h_number, &idx)));
@@ -1123,7 +1127,7 @@ index 450922e..10bf98d 100644
      } else {
          if(block->x_flag) tool_offset.tran.x += block->x_number;
          if(block->y_flag) tool_offset.tran.y += block->y_number;
-@@ -6749,15 +6800,7 @@ int Interp::convert_tool_length_offset(int g_code,       //!< g_code being execu
+@@ -6749,15 +6804,7 @@ int Interp::convert_tool_length_offset(int g_code,       //!< g_code being execu
    // G10 L1.  See issue #2994.
    // tool_offset here is in program units; params follow the user-unit
    // convention used elsewhere.
@@ -1140,7 +1144,7 @@ index 450922e..10bf98d 100644
  
    if (g_code == G_49 && settings->kins_by_g43_4) {
      // G49 undoes what G43.4 did: after the cancel it drops the machine
-@@ -6808,6 +6851,22 @@ int Interp::convert_tool_select(block_pointer block,     //!< pointer to a block
+@@ -6808,6 +6855,22 @@ int Interp::convert_tool_select(block_pointer block,     //!< pointer to a block
    return INTERP_OK;
  }
  
@@ -1471,7 +1475,7 @@ index 7620a30..55fb417 100644
      // clear out the interpreter state
      emcStatus->task.interpState = EMC_TASK_INTERP::IDLE;
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 60ae9b4..eb0dda6 100644
+index 3b544e1..fafc18c 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -612,6 +612,9 @@ interpret_again:
@@ -1484,7 +1488,7 @@ index 60ae9b4..eb0dda6 100644
  				emcAbortCleanup(EMC_ABORT::INTERPRETER_ERROR,
  						"interpreter error");
  			    } else if (execRetval == -1
-@@ -1952,6 +1955,11 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
+@@ -1955,6 +1958,11 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
  	break;
  
      case EMC_TOOL_SET_NUMBER_TYPE:
@@ -1496,7 +1500,7 @@ index 60ae9b4..eb0dda6 100644
  	return EMC_TASK_EXEC::WAITING_FOR_IO;
  	break;
  
-@@ -2029,6 +2037,12 @@ int emcTaskQueueCommand(std::unique_ptr<NMLmsg> &&cmd)
+@@ -2032,6 +2040,12 @@ int emcTaskQueueCommand(std::unique_ptr<NMLmsg> &&cmd)
  }
  
  // issues command immediately
@@ -1509,7 +1513,7 @@ index 60ae9b4..eb0dda6 100644
  static int emcTaskIssueCommand(NMLmsg * cmd)
  {
      int retval = 0;
-@@ -2532,9 +2546,13 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2535,9 +2549,13 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	retval = emcToolPrepare(tool_prepare_msg->tool);
  	break;
  
@@ -1524,7 +1528,7 @@ index 60ae9b4..eb0dda6 100644
  
      case EMC_TOOL_UNLOAD_TYPE:
  	retval = emcToolUnload();
-@@ -2550,6 +2568,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2553,6 +2571,8 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	retval = emcToolSetOffset(emc_tool_set_offset_msg->pocket,
                                    emc_tool_set_offset_msg->toolno,
                                    emc_tool_set_offset_msg->offset,
@@ -1533,7 +1537,7 @@ index 60ae9b4..eb0dda6 100644
                                    emc_tool_set_offset_msg->diameter,
                                    emc_tool_set_offset_msg->frontangle,
                                    emc_tool_set_offset_msg->backangle,
-@@ -2559,6 +2579,10 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2562,6 +2582,10 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
      case EMC_TOOL_SET_NUMBER_TYPE:
  	emc_tool_set_number_msg = reinterpret_cast<EMC_TOOL_SET_NUMBER *>(cmd);
  	retval = emcToolSetNumber(emc_tool_set_number_msg->tool);
@@ -1544,7 +1548,7 @@ index 60ae9b4..eb0dda6 100644
  	break;
  
  	// task commands
-@@ -3149,6 +3173,7 @@ static int emcTaskExecute(void)
+@@ -3152,6 +3176,7 @@ static int emcTaskExecute(void)
  	// clear out pending command
  	emcTaskCommand = NULL;
  	interp_list.clear();
@@ -1552,7 +1556,7 @@ index 60ae9b4..eb0dda6 100644
  	emcAbortCleanup(EMC_ABORT::TASK_EXEC_ERROR);
          emcStatus->task.currentLine = 0;
  
-@@ -3715,7 +3740,8 @@ static int emctask_startup()
+@@ -3718,7 +3743,8 @@ static int emctask_startup()
      }
      // initialize the subsystems
  
@@ -1562,7 +1566,7 @@ index 60ae9b4..eb0dda6 100644
      if (emcIoInit() != 0) {
          rcs_print_error("can't initialize IO\n");
          return -1;
-@@ -4165,6 +4191,7 @@ int main(int argc, char *argv[])
+@@ -4168,6 +4194,7 @@ int main(int argc, char *argv[])
  	    // clear out the pending command
  	    emcTaskCommand = NULL;
  	    interp_list.clear();

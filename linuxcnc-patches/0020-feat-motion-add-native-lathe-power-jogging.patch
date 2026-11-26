@@ -688,10 +688,10 @@ index feab3fb..a9fc353 100644
    public:
      EMC_JOG_CONT()
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 2a76c92..57b8240 100644
+index 418bcd5..d2e57f0 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -1521,6 +1521,7 @@ static int emcTaskPlan(void)
+@@ -1527,6 +1527,7 @@ static int emcTaskPlan(void)
  	    case EMC_JOINT_HOME_TYPE:
  	    case EMC_JOINT_UNHOME_TYPE:
  	    case EMC_JOG_CONT_TYPE:
@@ -699,7 +699,7 @@ index 2a76c92..57b8240 100644
  	    case EMC_JOG_INCR_TYPE:
  	    case EMC_JOG_ABS_TYPE:
  	    case EMC_JOG_STOP_TYPE:
-@@ -2425,6 +2426,13 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2431,6 +2432,13 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
                              jog_stop_msg->jjogmode);
  	break;
  

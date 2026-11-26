@@ -266,6 +266,41 @@ elif scenario in ("stop", "pause"):
         "program did not finish after Resume",
     )
 
+elif scenario == "mdi-pause":
+    # In MDI too a request already started runs to its end while paused,
+    # and the program stays paused.
+    command.mdi("M10")
+    prefix, request_id = wait_request("chuck", 0)
+    command.auto(linuxcnc.AUTO_PAUSE)
+    wait_for(
+        lambda: status.interp_state == linuxcnc.INTERP_PAUSED
+        and status.hold_wait == linuxcnc.HOLD_WAIT_EXECUTOR,
+        "MDI pause did not wait for the executor request",
+    )
+    respond(prefix, request_id, 4, 0)
+    assert_released(prefix)
+    time.sleep(0.2)
+    status.poll()
+    if status.interp_state != linuxcnc.INTERP_PAUSED:
+        fail("the executor request ended the MDI pause")
+    command.auto(linuxcnc.AUTO_RESUME)
+    wait_interp_idle("MDI did not finish after Resume")
+    # Once the request has ended, a later Pause holds as usual.
+    command.mdi("G4 P2")
+    wait_for(
+        lambda: status.exec_state == linuxcnc.EXEC_WAITING_FOR_DELAY,
+        "G4 did not start",
+    )
+    command.auto(linuxcnc.AUTO_PAUSE)
+    wait_for(
+        lambda: status.interp_state == linuxcnc.INTERP_PAUSED,
+        "MDI pause during G4 did not hold",
+    )
+    if status.hold_wait != linuxcnc.HOLD_WAIT_NONE:
+        fail("a finished executor request still reported a hold wait")
+    command.auto(linuxcnc.AUTO_RESUME)
+    wait_interp_idle("G4 did not finish after Resume")
+
 elif scenario == "stop-timeout":
     # The request keeps its timeout while Stop waits for it; a timeout ends
     # the program as usual.

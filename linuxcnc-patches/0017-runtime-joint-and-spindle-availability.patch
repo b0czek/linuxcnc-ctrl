@@ -2267,7 +2267,7 @@ index d2634e9..f889dd3 100644
  
      // clear out the pending command
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index bae7266..2a76c92 100644
+index 5880f9a..418bcd5 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -171,6 +171,61 @@ volatile int done;
@@ -2400,7 +2400,7 @@ index bae7266..2a76c92 100644
  static EMC_SPINDLE_SPEED *spindle_speed_msg;
  static EMC_SPINDLE_ORIENT *spindle_orient_msg;
  static EMC_SPINDLE_WAIT_ORIENT_COMPLETE *wait_spindle_orient_complete_msg;
-@@ -945,6 +1024,13 @@ static bool emcTaskArmSingleStep()
+@@ -951,6 +1030,13 @@ static bool emcTaskArmSingleStep()
      return true;
  }
  
@@ -2414,7 +2414,7 @@ index bae7266..2a76c92 100644
  static void emcTaskStopClear()
  {
      bool was_active = emcStatus &&
-@@ -1057,6 +1143,19 @@ static EMC_TASK_HOLD_WAIT emcTaskHoldWait()
+@@ -1063,6 +1149,19 @@ static EMC_TASK_HOLD_WAIT emcTaskHoldWait()
      if (emcStatus->io.status == RCS_STATUS::EXEC) {
          return EMC_TASK_HOLD_WAIT::IO;
      }
@@ -2434,7 +2434,7 @@ index bae7266..2a76c92 100644
      return EMC_TASK_HOLD_WAIT::NONE;
  }
  
-@@ -1202,6 +1301,31 @@ static int emcTaskPlan(void)
+@@ -1208,6 +1307,31 @@ static int emcTaskPlan(void)
          return emcTaskIssueCommand(emcCommand);
      }
  
@@ -2466,7 +2466,7 @@ index bae7266..2a76c92 100644
      if (emcStatus->task.stopState != EMC_TASK_STOP_STATE::IDLE &&
              (type == EMC_TASK_PLAN_RUN_TYPE ||
               type == EMC_TASK_PLAN_RESUME_TYPE ||
-@@ -1225,6 +1349,36 @@ static int emcTaskPlan(void)
+@@ -1231,6 +1355,36 @@ static int emcTaskPlan(void)
          return 0;
      }
  
@@ -2503,7 +2503,7 @@ index bae7266..2a76c92 100644
      // handle any new command
      switch (emcStatus->task.state) {
      case EMC_TASK_STATE::OFF:
-@@ -1737,9 +1891,7 @@ static int emcTaskPlan(void)
+@@ -1743,9 +1897,7 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -2514,7 +2514,7 @@ index bae7266..2a76c92 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -2005,6 +2157,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
+@@ -2011,6 +2163,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
      case EMC_TRAJ_CLEAR_PROBE_TRIPPED_FLAG_TYPE:	// and this
      case EMC_AUX_INPUT_WAIT_TYPE:
      case EMC_SPINDLE_WAIT_ORIENT_COMPLETE_TYPE:
@@ -2523,7 +2523,7 @@ index bae7266..2a76c92 100644
  	return EMC_TASK_EXEC::WAITING_FOR_MOTION_AND_IO;
  	break;
  
-@@ -2211,10 +2365,12 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2217,10 +2371,12 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  		emcTrajSetMode(EMC_TRAJ_MODE::FREE);
  	    }
  	    homingWaitJoint = target_joint;
@@ -2536,7 +2536,7 @@ index bae7266..2a76c92 100644
  	    if (retval != 0) {
  		// emcJointHome() rejected the request outright (e.g. an
  		// invalid joint number) -- homing will never start, so the
-@@ -2224,9 +2380,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2230,9 +2386,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  		// from it) stays stuck at FREE/MANUAL until the operator
  		// manually cycles mode again.
  		homingWaiting = false;
@@ -2547,7 +2547,7 @@ index bae7266..2a76c92 100644
  	    }
  	}
  	break;
-@@ -2240,6 +2394,24 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2246,6 +2400,24 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	retval = emcJointUnhome(unhome_msg->joint);
  	break;
  
@@ -2572,7 +2572,7 @@ index bae7266..2a76c92 100644
      case EMC_JOG_CONT_TYPE:
  	jog_cont_msg = reinterpret_cast<EMC_JOG_CONT *>(cmd);
  	retval = emcJogCont(jog_cont_msg->joint_or_axis,
-@@ -2607,6 +2779,26 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2613,6 +2785,26 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	retval = emcSpindleOff(spindle_off_msg->spindle, spindle_off_msg->wait_for_spindle_at_speed);
  	break;
  
@@ -2599,7 +2599,7 @@ index bae7266..2a76c92 100644
      case EMC_SPINDLE_BRAKE_RELEASE_TYPE:
      spindle_brake_release_msg = reinterpret_cast<EMC_SPINDLE_BRAKE_RELEASE *>(cmd);
  	retval = emcSpindleBrakeRelease(spindle_brake_release_msg->spindle);
-@@ -3065,7 +3257,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -3074,7 +3266,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	break;
  
      case EMC_TASK_PLAN_SYNCH_TYPE:
@@ -2614,7 +2614,7 @@ index bae7266..2a76c92 100644
  	if (retval > INTERP_MIN_ERROR) {
  	    retval = -1;
  	}
-@@ -3180,6 +3379,11 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3189,6 +3388,11 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
  	return EMC_TASK_EXEC::DONE;
  	break;
  
@@ -2626,7 +2626,7 @@ index bae7266..2a76c92 100644
      case EMC_TASK_PLAN_RUN_TYPE:
      case EMC_TASK_PLAN_PAUSE_TYPE:
      case EMC_TASK_PLAN_END_TYPE:
-@@ -3262,6 +3466,12 @@ static int emcTaskExecute(void)
+@@ -3271,6 +3475,12 @@ static int emcTaskExecute(void)
      int status;			// status of child from EMC_SYSTEM_CMD
      pid_t pid;			// pid returned from waitpid()
  
@@ -2639,7 +2639,7 @@ index bae7266..2a76c92 100644
      // first check for an abandoned system command and abort it
      if (emcSystemCmdPid != 0 &&
  	emcStatus->task.execState !=
-@@ -3389,11 +3599,59 @@ static int emcTaskExecute(void)
+@@ -3399,11 +3609,59 @@ static int emcTaskExecute(void)
  	break;
  
      case EMC_TASK_EXEC::WAITING_FOR_MOTION:
@@ -2699,7 +2699,7 @@ index bae7266..2a76c92 100644
  	    emcStatus->task.execState = EMC_TASK_EXEC::DONE;
  	    emcTaskEager = 1;
  	}
-@@ -3521,12 +3779,17 @@ static int emcTaskExecute(void)
+@@ -3531,12 +3789,17 @@ static int emcTaskExecute(void)
  		homingStarted = true;
  		break; // still running; no timeout once started (see HOMING_START_TIMEOUT comment)
  	    }
@@ -2722,7 +2722,7 @@ index bae7266..2a76c92 100644
  		// HOMING_START_TIMEOUT before concluding it was rejected.
  		if (etime() - homingIssueTime < HOMING_START_TIMEOUT) {
  		    break;
-@@ -3538,11 +3801,8 @@ static int emcTaskExecute(void)
+@@ -3548,11 +3811,8 @@ static int emcTaskExecute(void)
  		emcTaskEager = 1;
  		homingWaiting = false;
  		// Nothing physically moved, so it's safe to restore the
@@ -2736,7 +2736,7 @@ index bae7266..2a76c92 100644
  		break;
  	    }
  	    // It ran and has now stopped; did it reach the expected end state?
-@@ -3608,7 +3868,9 @@ static int emcTaskExecute(void)
+@@ -3618,7 +3878,9 @@ static int emcTaskExecute(void)
  				    "coordinated motion until every joint is homed"));
  		emcStatus->task.execState = EMC_TASK_EXEC::ERROR;
  	    } else if (success) {

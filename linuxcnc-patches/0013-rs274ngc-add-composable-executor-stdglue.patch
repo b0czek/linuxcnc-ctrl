@@ -21,19 +21,19 @@ instead of continuing the unwound call.
 ---
  docs/src/config/python-interface.adoc         |   3 +-
  docs/src/remap/remap.adoc                     | 130 ++++++++
- nc_files/remap_lib/python-stdglue/stdglue.py  | 278 +++++++++++++++++-
+ nc_files/remap_lib/python-stdglue/stdglue.py  | 280 +++++++++++++++++-
  src/emc/nml_intf/emc.hh                       |   3 +-
  src/emc/rs274ngc/interp_internal.hh           |   7 +
- src/emc/rs274ngc/interp_python.cc             |  60 +++-
+ src/emc/rs274ngc/interp_python.cc             |  76 ++++-
  src/emc/rs274ngc/interp_python.hh             |   7 +
  src/emc/rs274ngc/interp_setup.cc              |   1 +
  src/emc/rs274ngc/interpmodule.cc              |   7 +
  src/emc/rs274ngc/rs274ngc_pre.cc              |   9 +
  src/emc/task/emctask.cc                       |  12 +
- src/emc/task/emctaskmain.cc                   |  43 ++-
+ src/emc/task/emctaskmain.cc                   |  55 +++-
  src/emc/task/task.hh                          |   4 +
  src/emc/usr_intf/axis/extensions/emcmodule.cc |   1 +
- 14 files changed, 555 insertions(+), 10 deletions(-)
+ 14 files changed, 580 insertions(+), 15 deletions(-)
 
 diff --git a/docs/src/config/python-interface.adoc b/docs/src/config/python-interface.adoc
 index 1c871cf..2131b07 100644
@@ -191,7 +191,7 @@ index 75e2a09..642e4c7 100644
  
  These wrap a NGC procedure for T__x__ Tool Prepare.
 diff --git a/nc_files/remap_lib/python-stdglue/stdglue.py b/nc_files/remap_lib/python-stdglue/stdglue.py
-index 8457e40..7c4efca 100644
+index 8457e40..0991d4f 100644
 --- a/nc_files/remap_lib/python-stdglue/stdglue.py
 +++ b/nc_files/remap_lib/python-stdglue/stdglue.py
 @@ -16,6 +16,9 @@
@@ -204,7 +204,7 @@ index 8457e40..7c4efca 100644
  import emccanon
  from interpreter import *
  from emccanon import MESSAGE
-@@ -40,6 +43,279 @@ def build_hal(self):
+@@ -40,6 +43,281 @@ def build_hal(self):
      except Exception as e:
          print(e)
  
@@ -321,6 +321,8 @@ index 8457e40..7c4efca 100644
 +            emccanon.DWELL(min(_EXECUTOR_POLL_INTERVAL, remaining))
 +            yield INTERP_EXECUTE_FINISH
 +    finally:
++        # The request has ended; nothing is polled any more.
++        self.executor_poll_pending = False
 +        if operation is not None and not finalized:
 +            finalized = True
 +            operation.cancel()
@@ -484,7 +486,7 @@ index 8457e40..7c4efca 100644
  # REMAP=S   prolog=setspeed_prolog  ngc=setspeed epilog=setspeed_epilog
  # exposed parameter: #<speed>
  
-@@ -655,5 +931,3 @@ def tool_probe_m6(self, **words):
+@@ -655,5 +933,3 @@ def tool_probe_m6(self, **words):
          self.set_errormsg("tool_probe_m6 remap error." )
          yield INTERP_ERROR
  
@@ -530,7 +532,7 @@ index 210b4db..692b6e9 100644
    bool input_digital;		// input queried was digital (false=analog)
    bool cutter_comp_firstmove; // this is the first comp move
 diff --git a/src/emc/rs274ngc/interp_python.cc b/src/emc/rs274ngc/interp_python.cc
-index e3f8b60..34f6fbc 100644
+index e3f8b60..ffcbf6f 100644
 --- a/src/emc/rs274ngc/interp_python.cc
 +++ b/src/emc/rs274ngc/interp_python.cc
 @@ -99,6 +99,19 @@ bool Interp::is_pycallable(setup_pointer /*settings*/,
@@ -574,7 +576,7 @@ index e3f8b60..34f6fbc 100644
  		    ERS("exception during generator call: %s", msg.c_str());
  		}
  	    } else 
-@@ -193,6 +212,7 @@ int Interp::pycall(setup_pointer /*settings*/,
+@@ -193,11 +212,24 @@ int Interp::pycall(setup_pointer /*settings*/,
  
  		    // a generator was returned. This must have been the first time call to a handler
  		    // which contains a yield. Extract next() method.
@@ -582,7 +584,26 @@ index e3f8b60..34f6fbc 100644
  		    frame->pystuff.impl->generator_next = bp::getattr(retval, "__next__");
  		    // and  call it for the first time.
  		    // Expect execution up to first 'yield INTERP_EXECUTE_FINISH'.
-@@ -264,6 +284,11 @@ int Interp::pycall(setup_pointer /*settings*/,
+-		    frame->pystuff.impl->py_returned_int = bp::extract<int>(frame->pystuff.impl->generator_next());
+-		    frame->pystuff.impl->py_return_type = RET_YIELD;
++		    try {
++			frame->pystuff.impl->py_returned_int = bp::extract<int>(frame->pystuff.impl->generator_next());
++			frame->pystuff.impl->py_return_type = RET_YIELD;
++		    } catch (bp::error_already_set &) {
++			if (!PyErr_ExceptionMatches(PyExc_StopIteration))
++			    throw;
++			// A generator that returns before its first yield ends
++			// normally, as it does after a later one (for example an
++			// executor helper in preview, where nothing is run).
++			PyErr_Clear();
++			frame->pystuff.impl->py_return_type = RET_STOPITERATION;
++			frame->pystuff.impl->generator_next = bp::object();
++			frame->pystuff.impl->generator = bp::object();
++		    }
+         } else if (PyUnicode_Check(retval.ptr())) {
+ 		    // returning a string sets the interpreter error message and aborts
+ 		    char *msg = bp::extract<char *>(retval);
+@@ -264,6 +296,11 @@ int Interp::pycall(setup_pointer /*settings*/,
  	bp::handle_exception();
  	PyErr_Clear();
      }
@@ -594,7 +615,7 @@ index e3f8b60..34f6fbc 100644
      if (py_exception) {
  	ERM("pycall: %s.%s:\n%s", module ? module:"", funcname, msg.c_str());
  	status = INTERP_ERROR;
-@@ -298,3 +323,36 @@ pycontext &pycontext::operator=(const pycontext &other) {
+@@ -298,3 +335,36 @@ pycontext &pycontext::operator=(const pycontext &other) {
      impl = new pycontext_impl(*other.impl);
      return *this;
  }
@@ -741,7 +762,7 @@ index 90cc136..d2634e9 100644
  {
      waitFlag = 0;
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index a8ee5a6..9133a28 100644
+index c5aec97..a93574e 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -577,7 +577,12 @@ extern int emcTaskMopup();
@@ -791,7 +812,23 @@ index a8ee5a6..9133a28 100644
  			    } else if (execRetval == -1
  				    || execRetval == INTERP_EXIT ) {
  				emcStatus->task.interpState =
-@@ -880,6 +900,10 @@ static bool emcTaskStopAllowsIssue(const NMLmsg *cmd)
+@@ -766,11 +786,14 @@ static void mdi_execute_hook(void)
+ 	return;
+     }
+ 
+-    // determine when a MDI command actually finishes normally.
++    // determine when a MDI command actually finishes normally. One that
++    // finishes while paused (an executor request runs to its end) is
++    // reported done after Resume, so the Pause holds until then.
+     if (interp_list.len() == 0 &&
+ 	emcTaskCommand == NULL &&
+ 	emcStatus->task.execState ==  EMC_TASK_EXEC::DONE &&
+ 	emcStatus->task.interpState != EMC_TASK_INTERP::IDLE &&
++	emcStatus->task.interpState != EMC_TASK_INTERP::PAUSED &&
+ 	emcStatus->motion.traj.queue == 0 &&
+ 	emcStatus->io.status == RCS_STATUS::DONE &&
+ 	!mdi_execute_wait &&
+@@ -880,6 +903,10 @@ static bool emcTaskStopAllowsIssue(const NMLmsg *cmd)
          return !reinterpret_cast<const EMC_MOTION_SET_DOUT *>(cmd)->now;
      case EMC_MOTION_SET_AOUT_TYPE:
          return !reinterpret_cast<const EMC_MOTION_SET_AOUT *>(cmd)->now;
@@ -802,7 +839,7 @@ index a8ee5a6..9133a28 100644
      default:
          return false;
      }
-@@ -1021,6 +1045,9 @@ static void emcTaskStopResume()
+@@ -1024,6 +1051,9 @@ static void emcTaskStopResume()
   */
  static EMC_TASK_HOLD_WAIT emcTaskHoldWait()
  {
@@ -812,7 +849,7 @@ index a8ee5a6..9133a28 100644
      if (emcStatus->task.execState == EMC_TASK_EXEC::WAITING_FOR_HOMING) {
          return EMC_TASK_HOLD_WAIT::HOMING;
      }
-@@ -1723,6 +1750,9 @@ static int emcTaskPlan(void)
+@@ -1726,6 +1756,9 @@ static int emcTaskPlan(void)
  
  		}		// switch (type) in ON, AUTO, PAUSED
  
@@ -822,7 +859,21 @@ index a8ee5a6..9133a28 100644
  		break;		// EMC_TASK_INTERP::PAUSED
  
  	    case EMC_TASK_INTERP::WAITING:
-@@ -3292,7 +3322,8 @@ static int emcTaskExecute(void)
+@@ -2892,8 +2925,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+             retval = -1;
+             break;
+         }
+-	// track interpState also during MDI - it might be an oword sub call
+-	emcStatus->task.interpState = EMC_TASK_INTERP::READING;
++	// track interpState also during MDI - it might be an oword sub call;
++	// an executor request polled while paused keeps the Pause
++	if (emcStatus->task.interpState != EMC_TASK_INTERP::PAUSED) {
++	    emcStatus->task.interpState = EMC_TASK_INTERP::READING;
++	}
+ 
+ 	if (execute_msg->command[0] != 0) {
+ 	    char * command = execute_msg->command;
+@@ -3295,7 +3331,8 @@ static int emcTaskExecute(void)
      case EMC_TASK_EXEC::DONE:
  	STEPPING_CHECK();
  	if (!emcStatus->motion.traj.queueFull &&
@@ -832,7 +883,7 @@ index a8ee5a6..9133a28 100644
  	    emcStatus->task.stopState != EMC_TASK_STOP_STATE::STOPPED &&
  	    emcStatus->task.stopState != EMC_TASK_STOP_STATE::STARTING) {
  	    if (NULL == emcTaskCommand) {
-@@ -3597,7 +3628,9 @@ static int emcTaskExecute(void)
+@@ -3601,7 +3638,9 @@ static int emcTaskExecute(void)
  
      case EMC_TASK_EXEC::WAITING_FOR_DELAY:
  	STEPPING_CHECK();

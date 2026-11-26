@@ -25,3 +25,4 @@ pause-inflight-step
 trapezoidal:inflight-step-short
 system-command
 set-auto-stopped
+step-after-dwell-stop

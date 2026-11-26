@@ -52,7 +52,7 @@ index f889dd3..b6793d2 100644
  }
  
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 57b8240..3e8c047 100644
+index d2e57f0..9da1e97 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -817,7 +817,7 @@ interpret_again:

@@ -24,11 +24,20 @@ mdi("g10 l1 p1 z5")
 wait_for(lambda: "T1 P1 Z+5.000000" in saved(), "the saved edit")
 
 print("*** a reload that fails keeps the table, and the file is not saved over")
+# A refused load changes nothing else either: it does not abort the machine,
+# so a running spindle keeps running.
+mdi("m3 s100")
 edited = "T1 P1 Z+5.000000\nT2 P2 Z+2.000000\nT4 P4 Z+4.000000\nnot a tool line\n"
 with open("tool.tbl", "w") as f:
     f.write(edited)
 c.load_tool_table()
 c.wait_complete()
+wait_error("can't load tool table")
+time.sleep(0.2)
+s.poll()
+if hal.get_value("spindle.0.speed-out") <= 0 or s.task_state != linuxcnc.STATE_ON:
+    fail("the refused table load stopped the machine")
+mdi("m5")
 mdi_mode()
 mdi("g10 l1 p2 z7")
 if table() != edited:

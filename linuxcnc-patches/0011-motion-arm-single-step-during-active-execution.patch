@@ -14,10 +14,11 @@ feature and its program.
  src/emc/motion/command.c    |  24 +++--
  src/emc/motion/control.c    |   9 +-
  src/emc/task/emctaskmain.cc |  48 ++++-----
+ src/emc/tp/tc.c             |  10 +-
  src/emc/tp/tc_types.h       |   3 +
- src/emc/tp/tp.c             | 192 +++++++++++++++++++++++++++++++++---
+ src/emc/tp/tp.c             | 197 +++++++++++++++++++++++++++++++++---
  src/emc/tp/tp_types.h       |   5 +-
- 6 files changed, 230 insertions(+), 51 deletions(-)
+ 7 files changed, 244 insertions(+), 52 deletions(-)
 
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
 index a8e8ae3..ff48890 100644
@@ -99,7 +100,7 @@ index e347bf1..75a9f1c 100644
              emcmotStatus->stepping = 0;
              emcmotStatus->paused = 1;
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 3f7e971..7335937 100644
+index cff0805..f95b3b0 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -503,6 +503,7 @@ static int programStartLine = 0;	// which line to run program from
@@ -118,7 +119,7 @@ index 3f7e971..7335937 100644
  }
  
  // Variables to handle MDI call interrupts
-@@ -903,6 +905,22 @@ static void emcTaskStepInterpreter()
+@@ -906,6 +908,22 @@ static void emcTaskStepInterpreter()
      emcStatus->task.task_paused = 1;
  }
  
@@ -141,7 +142,7 @@ index 3f7e971..7335937 100644
  static void emcTaskStopClear()
  {
      bool was_active = emcStatus &&
-@@ -1583,13 +1601,7 @@ static int emcTaskPlan(void)
+@@ -1586,13 +1604,7 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -156,7 +157,7 @@ index 3f7e971..7335937 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1663,17 +1675,9 @@ static int emcTaskPlan(void)
+@@ -1666,17 +1678,9 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -175,7 +176,7 @@ index 3f7e971..7335937 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1739,13 +1743,7 @@ static int emcTaskPlan(void)
+@@ -1742,13 +1746,7 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -190,7 +191,7 @@ index 3f7e971..7335937 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -4121,6 +4119,10 @@ int main(int argc, char *argv[])
+@@ -4124,6 +4122,10 @@ int main(int argc, char *argv[])
  	// update subordinate status
  
  	emcMotionUpdate(&emcStatus->motion);
@@ -201,6 +202,27 @@ index 3f7e971..7335937 100644
  	// On a motion enabled -> disabled edge (limit switch, amp fault,
  	// following error, etc.) unhome joints marked VOLATILE_HOME. The estop
  	// and machine-off paths already do their own unhome; this catches the
+diff --git a/src/emc/tp/tc.c b/src/emc/tp/tc.c
+index 68f2192..3a5089a 100644
+--- a/src/emc/tp/tc.c
++++ b/src/emc/tp/tc.c
+@@ -556,7 +556,15 @@ int tcSetTermCond(TC_STRUCT *prev_tc, TC_STRUCT *tc, int term_cond) {
+     }
+     if (prev_tc) {
+         tp_debug_print("setting term condition %d on tc id %d, type %d\n", term_cond, prev_tc->id, prev_tc->motion_type);
+-        prev_tc->term_cond = term_cond;
++        if (prev_tc->step_saved) {
++            /* An armed Single Step holds this segment at an exact stop.
++             * Record the condition the queue now requires (for example no
++             * blend into a following G33) so cancelling the Step restores
++             * it, not the one saved before. */
++            prev_tc->step_saved_term_cond = term_cond;
++        } else {
++            prev_tc->term_cond = term_cond;
++        }
+     }
+     return 0;
+ }
 diff --git a/src/emc/tp/tc_types.h b/src/emc/tp/tc_types.h
 index bd8ad13..5d6e0b4 100644
 --- a/src/emc/tp/tc_types.h
@@ -216,7 +238,7 @@ index bd8ad13..5d6e0b4 100644
                              // this segment (g64 mode)
  
 diff --git a/src/emc/tp/tp.c b/src/emc/tp/tp.c
-index a9dfacc..85ee681 100644
+index a9dfacc..2a488d8 100644
 --- a/src/emc/tp/tp.c
 +++ b/src/emc/tp/tp.c
 @@ -357,9 +357,9 @@ STATIC inline double tpGetRealFinalVel(TP_STRUCT const * const tp,
@@ -287,16 +309,21 @@ index a9dfacc..85ee681 100644
                  tp->step_pass_id && !tp->step_tc) {
              tpHandleEmptyQueue(tp);
              return TP_ERR_WAITING;
-@@ -4585,6 +4587,146 @@ STATIC int tpGetQueuedG76PassId(TP_STRUCT * const tp)
+@@ -4585,6 +4587,151 @@ STATIC int tpGetQueuedG76PassId(TP_STRUCT * const tp)
      return tc ? tc->g76_pass_id : 0;
  }
  
-+STATIC TC_STRUCT *tpFindSourceBlockTarget(TP_STRUCT * const tp, int motion_id)
++/*
++ * The last queued segment of the position-synchronized run at the head of the
++ * queue. Stopping between the moves of one run would leave the axis behind
++ * the turning spindle, so Step, like Stop, ends at the end of the run.
++ */
++STATIC TC_STRUCT *tpFindSyncRunTarget(TP_STRUCT * const tp)
 +{
 +    TC_STRUCT *target = 0;
 +    for (int i = 0; i < tcqLen(&tp->queue); ++i) {
 +        TC_STRUCT *candidate = tcqItem(&tp->queue, i);
-+        if (!candidate || candidate->id != motion_id) {
++        if (!candidate || candidate->synchronized != TC_SYNC_POSITION) {
 +            break;
 +        }
 +        target = candidate;
@@ -434,7 +461,7 @@ index a9dfacc..85ee681 100644
  int tpPause(TP_STRUCT * const tp)
  {
      if (0 == tp) {
-@@ -4592,10 +4734,12 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4592,10 +4739,12 @@ int tpPause(TP_STRUCT * const tp)
      }
  
      if (tp->stopping) {
@@ -448,7 +475,7 @@ index a9dfacc..85ee681 100644
          TC_STRUCT *tc = tcqItem(&tp->queue, 0);
          /*
           * A G76 cut that has passed spindle index, or its explicitly marked
-@@ -4642,7 +4786,7 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4642,7 +4791,7 @@ int tpPause(TP_STRUCT * const tp)
              tp->pausing = 1;
          }
      } else if (emcmotStatus->stepping &&
@@ -457,7 +484,7 @@ index a9dfacc..85ee681 100644
          /*
           * EMCMOT_STEP requests default-TP pass targeting through the existing
           * tpPause ABI. Alternate planners leave step_target_pending clear and
-@@ -4651,15 +4795,27 @@ int tpPause(TP_STRUCT * const tp)
+@@ -4651,15 +4800,27 @@ int tpPause(TP_STRUCT * const tp)
          int pass_id = tpGetQueuedG76PassId(tp);
          if (pass_id) {
              tp->step_pass_id = pass_id;
@@ -474,9 +501,9 @@ index a9dfacc..85ee681 100644
 -            tp->pausing = 1;
 +            tp->step_motion_id = tc ? tc->id : 0;
 +            if (tc && tc->synchronized == TC_SYNC_POSITION) {
-+                /* A spindle-synchronized move cannot change speed; keep the
-+                 * established end of its source block. */
-+                tp->step_tc = tpFindSourceBlockTarget(tp, tp->step_motion_id);
++                /* A spindle-synchronized move cannot change speed; stop at
++                 * the end of its synchronized run. */
++                tp->step_tc = tpFindSyncRunTarget(tp);
 +                if (tp->step_tc) {
 +                    tpOverrideStepSegment(tp, tp->step_tc,
 +                            TC_TERM_COND_STOP, 0.0);
@@ -489,7 +516,7 @@ index a9dfacc..85ee681 100644
          }
      } else {
          tp->pausing = 1;
-@@ -4672,6 +4828,7 @@ int tpResume(TP_STRUCT * const tp)
+@@ -4672,6 +4833,7 @@ int tpResume(TP_STRUCT * const tp)
      if (0 == tp) {
          return TP_ERR_FAIL;
      }
@@ -497,7 +524,7 @@ index a9dfacc..85ee681 100644
      tp->pausing = 0;
      tp->stopping = 0;
      tp->stop_sync_run = 0;
-@@ -4681,7 +4838,8 @@ int tpResume(TP_STRUCT * const tp)
+@@ -4681,7 +4843,8 @@ int tpResume(TP_STRUCT * const tp)
      tp->step_tc = 0;
      tp->step_target_pending = 0;
      tp->step_pass_id = 0;
@@ -507,7 +534,7 @@ index a9dfacc..85ee681 100644
      if (MOTION_ID_VALID(tp->spindle.waiting_for_index)) {
          emcmotStatus->spindle_status[
              tp->spindle.spindle_num].spindle_index_enable = 1;
-@@ -4701,7 +4859,9 @@ int tpAbort(TP_STRUCT * const tp)
+@@ -4701,7 +4864,9 @@ int tpAbort(TP_STRUCT * const tp)
          tp->step_tc = 0;
          tp->step_target_pending = 0;
          tp->step_pass_id = 0;

@@ -251,6 +251,8 @@ Stop still holds after Resume, and a later `S` word change still arms one.
 Resume or Run during a Stop leaves single-step mode entered by an earlier Step.
 Setting the AUTO or MDI mode aborts the program, also when the mode does not
 change, and so ends a Stop as Abort does.
+Single Step from `STOPPED` continues the program; it never marks a program
+that is still running as finished.
 Resume, Run and Single Step during `STOPPING` are refused with an operator
 error, not remembered: the operator resumes once the machine has stopped.
 A second Stop or a Pause during `STARTING` cancels the Resume: the program
@@ -327,7 +329,10 @@ Adds a separate nine-axis `wear_offset` to every tool record and extends tool
 tables with `WX/WY/WZ/WA/WB/WC/WU/WV/WW`. `G10 L3` edits stored wear with
 partial-axis semantics, while `G43` applies geometry plus wear. Built-in M6
 and M61 activate the resulting combined offset automatically; G49 still
-cancels compensation and same-block explicit G-codes take precedence.
+cancels compensation and same-block explicit G-codes take precedence. M6
+decides whether a tool was loaded from the pocket it loaded, which the
+interpreter resynchronises after an abort (as upstream `RETAIN_G43` does),
+not from the last `T` word read.
 
 Stored wear is available in interpreter parameters `#5430–#5438`, Python tool
 status, and the interpreter Python tool object. On v2.10.0-pre2,
@@ -441,8 +446,12 @@ active block is closer than the distance needed to stop from the current speed
 (within the acceleration and, for the S-curve planner, jerk limits), Step stops
 at the first later block end it can reach instead, and the planner lowers the
 end speeds of the segments before that point so the machine never brakes
-harder than its limits. A Step that is canceled restores every segment it
-changed. Later motion remains queued and does not
+harder than its limits. During position-synchronized motion (`G33`) Step,
+like Stop, ends at the end of the synchronized run, never between its moves,
+which would leave the axis behind the spindle. A Step that is canceled
+restores every segment it changed, including a stricter end condition (no
+blend into a following `G33` or rapid) that motion queued later required.
+Later motion remains queued and does not
 begin, including when several following blocks or threading passes were
 prequeued by readahead.
 
@@ -495,8 +504,8 @@ A deleted file is created again. Only loading the configured file lifts a save
 block. On a random changer, the first table to load after a failed startup sets
 the spindle tool and `iocontrol.0.tool-number` from pocket 0.
 
-A refused tool update or delete tells the operator why and fails only that
-command: spindle, coolant and an open program are unaffected.
+A refused tool update, delete or table load tells the operator why and fails
+only that command: spindle, coolant and an open program are unaffected.
 `linuxcnc-tests/tool-crud-refusal` covers this.
 
 Tool-table reload now preserves the live table when opening, parsing, or
@@ -521,7 +530,8 @@ helpers refuse a request then, as M54/M55 and tool changes are refused.
 A request already started runs to its end when a resumable Stop (patch 0004)
 or a Pause arrives, like any other M function: task keeps running the remap
 that polls it while the program holds, reads nothing past it, and reports
-`hold_wait` `EXECUTOR` meanwhile. Its timeout keeps counting, and a failure
+`hold_wait` `EXECUTOR` meanwhile; in MDI an operation that finishes while paused
+is reported done after Resume. Its timeout keeps counting, and a failure
 or timeout while held ends the program as an execution error, which also
 clears the Stop. A request that has not started yet starts after Resume.
 
@@ -531,6 +541,10 @@ constructs the component nor calls `ready()`, allowing multiple endpoints and
 machine-specific pins to share one component. HAL remains optional: an
 integration regression exercises the same helpers with both the standard HAL
 endpoint and an in-memory endpoint.
+
+A Python remap generator that returns before its first `yield` ends normally,
+as one that returns later does, so the helpers also work in the G-code
+preview, where no request is made.
 
 Python remap generators are closed during interpreter unwind so their
 `finally` cleanup runs on task or operator abort. The regression also covers

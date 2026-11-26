@@ -25,8 +25,8 @@ tests/tooldb tests, which need a db program, are skipped.
  src/emc/nml_intf/emc.cc                       |  33 ++
  src/emc/nml_intf/emc.hh                       |   5 +
  src/emc/nml_intf/emc_nml.hh                   |  44 ++
- src/emc/task/emctaskmain.cc                   |  71 +++-
- src/emc/task/taskclass.cc                     | 369 ++++++++++++++++-
+ src/emc/task/emctaskmain.cc                   |  72 +++-
+ src/emc/task/taskclass.cc                     | 372 ++++++++++++++++-
  src/emc/task/taskclass.hh                     |   7 +-
  src/emc/tooldata/tooldata.hh                  |  21 +
  src/emc/tooldata/tooldata_common.cc           | 386 ++++++++++++++----
@@ -35,7 +35,7 @@ tests/tooldb tests, which need a db program, are skipped.
  .../reload-tool/non-random/test-ui.py         |  14 +
  .../toolchanger/reload-tool/random/test-ui.py |   3 +-
  tests/tooldb/db-g10-offset/skip               |   3 +
- 13 files changed, 946 insertions(+), 128 deletions(-)
+ 13 files changed, 950 insertions(+), 128 deletions(-)
  create mode 100644 tests/tooldb/db-g10-offset/skip
 
 diff --git a/src/emc/nml_intf/emc.cc b/src/emc/nml_intf/emc.cc
@@ -182,10 +182,10 @@ index 6a5632c..e4a04b1 100644
    public:
      EMC_TOOL_SET_NUMBER()
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 7335937..a8ee5a6 100644
+index f95b3b0..c5aec97 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -1280,7 +1280,18 @@ static int emcTaskPlan(void)
+@@ -1283,7 +1283,18 @@ static int emcTaskPlan(void)
  		emcTaskQueueTaskPlanSynchCmd();
  		break;
  	    }
@@ -205,7 +205,7 @@ index 7335937..a8ee5a6 100644
  	    case EMC_TOOL_SET_NUMBER_TYPE: {
  		// send to IO
  		emcTaskQueueCommand(std::make_unique<EMC_TOOL_SET_NUMBER>(*static_cast<EMC_TOOL_SET_NUMBER*>(emcCommand)));
-@@ -1409,6 +1420,18 @@ static int emcTaskPlan(void)
+@@ -1412,6 +1423,18 @@ static int emcTaskPlan(void)
  		emcTaskQueueTaskPlanSynchCmd();
  		break;
  	    }
@@ -224,7 +224,7 @@ index 7335937..a8ee5a6 100644
  
  	    case EMC_TOOL_SET_NUMBER_TYPE: {
  		// send to IO
-@@ -1534,6 +1557,18 @@ static int emcTaskPlan(void)
+@@ -1537,6 +1560,18 @@ static int emcTaskPlan(void)
  		    emcTaskQueueTaskPlanSynchCmd();
  		    break;
  	        }
@@ -243,7 +243,7 @@ index 7335937..a8ee5a6 100644
  
  		// otherwise we can't handle it
  	    	default:
-@@ -1869,6 +1904,18 @@ static int emcTaskPlan(void)
+@@ -1872,6 +1907,18 @@ static int emcTaskPlan(void)
  		emcTaskQueueTaskPlanSynchCmd();
  		break;
  	    }
@@ -262,7 +262,7 @@ index 7335937..a8ee5a6 100644
  
  		// otherwise we can't handle it
  	    default:
-@@ -1972,6 +2019,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
+@@ -1975,6 +2022,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
  
      case EMC_TOOL_LOAD_TOOL_TABLE_TYPE:
      case EMC_TOOL_SET_OFFSET_TYPE:
@@ -271,7 +271,7 @@ index 7335937..a8ee5a6 100644
  	return EMC_TASK_EXEC::WAITING_FOR_MOTION_AND_IO;
  	break;
  
-@@ -2604,6 +2653,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2607,6 +2656,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
                                    emc_tool_set_offset_msg->orientation);
  	break;
  
@@ -286,7 +286,7 @@ index 7335937..a8ee5a6 100644
      case EMC_TOOL_SET_NUMBER_TYPE:
  	emc_tool_set_number_msg = reinterpret_cast<EMC_TOOL_SET_NUMBER *>(cmd);
  	retval = emcToolSetNumber(emc_tool_set_number_msg->tool);
-@@ -3079,6 +3136,8 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
+@@ -3082,6 +3139,8 @@ static EMC_TASK_EXEC emcTaskCheckPostconditions(NMLmsg * cmd)
      case EMC_TOOL_UNLOAD_TYPE:
      case EMC_TOOL_LOAD_TOOL_TABLE_TYPE:
      case EMC_TOOL_SET_OFFSET_TYPE:
@@ -295,7 +295,7 @@ index 7335937..a8ee5a6 100644
      case EMC_TOOL_SET_NUMBER_TYPE:
      case EMC_SPINDLE_SPEED_TYPE:
      case EMC_SPINDLE_ON_TYPE:
-@@ -3263,10 +3322,18 @@ static int emcTaskExecute(void)
+@@ -3266,10 +3325,19 @@ static int emcTaskExecute(void)
  		// emcTaskCheckPostconditions(), i.e. the only one whose commands
  		// can reach a WAITING_FOR_* state. See issuingQueuedCommand.
  		issuingQueuedCommand = true;
@@ -310,13 +310,14 @@ index 7335937..a8ee5a6 100644
 +		    // carries on. Everything else aborts.
 +		    emcStatus->task.execState =
 +			issued_type == EMC_TOOL_UPDATE_TYPE ||
-+			issued_type == EMC_TOOL_DELETE_TYPE
++			issued_type == EMC_TOOL_DELETE_TYPE ||
++			issued_type == EMC_TOOL_LOAD_TOOL_TABLE_TYPE
 +			? EMC_TASK_EXEC::DONE : EMC_TASK_EXEC::ERROR;
  		    retval = -1;
  		} else {
  		    emcStatus->task.execState = emcTaskCheckPostconditions(emcTaskCommand.get());
 diff --git a/src/emc/task/taskclass.cc b/src/emc/task/taskclass.cc
-index 0d076c8..3bac973 100644
+index 0d076c8..b4ec501 100644
 --- a/src/emc/task/taskclass.cc
 +++ b/src/emc/task/taskclass.cc
 @@ -17,6 +17,7 @@
@@ -438,7 +439,7 @@ index 0d076c8..3bac973 100644
      reload_tool_number(emcioStatus.tool.toolInSpindle);
  
      if (0 != iniTool(emc_inifile)) {
-@@ -589,10 +612,70 @@ int Task::emcToolUnload()//EMC_TOOL_UNLOAD_TYPE
+@@ -589,10 +612,73 @@ int Task::emcToolUnload()//EMC_TOOL_UNLOAD_TYPE
      return 0;
  }
  
@@ -459,7 +460,10 @@ index 0d076c8..3bac973 100644
  {
      if(!strlen(file)) file = tooltable_filename;//use filename from ini if none is provided
 -    tooldata_load(file);
-+    if (hal_get_bool(iocontrol_data->tool_prepare) || hal_get_bool(iocontrol_data->tool_change)) return -1;
++    if (hal_get_bool(iocontrol_data->tool_prepare) || hal_get_bool(iocontrol_data->tool_change)) {
++        emcOperatorError("can't load tool table %s during a tool change; the table in use is kept", file);
++        return -1;
++    }
 +    CANON_TOOL_TABLE loaded[CANON_POCKETS_MAX];
 +    int loaded_last = 0;
 +    bool refused_lines = false;
@@ -510,7 +514,7 @@ index 0d076c8..3bac973 100644
      reload_tool_number(emcioStatus.tool.toolInSpindle);
      return 0;
  }
-@@ -634,9 +717,10 @@ int Task::emcToolSetOffset(int idx, int toolno, const EmcPose& offset,
+@@ -634,9 +720,10 @@ int Task::emcToolSetOffset(int idx, int toolno, const EmcPose& offset,
          UNEXPECTED_MSG;
      }
      bool stored = (0 == tooldata_save(tooltable_filename));
@@ -522,7 +526,7 @@ index 0d076c8..3bac973 100644
          int pno = idx; // for random_toolchanger
          if (!random_toolchanger) { pno = tdata.pocketno; }
          if (tooldata_db_notify(TOOL_OFFSET,toolno,pno,tdata)) {
-@@ -656,6 +740,247 @@ int Task::emcToolSetOffset(int idx, int toolno, const EmcPose& offset,
+@@ -656,6 +743,247 @@ int Task::emcToolSetOffset(int idx, int toolno, const EmcPose& offset,
      return 0;
  }
  
