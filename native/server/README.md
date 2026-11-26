@@ -59,9 +59,14 @@ message contains exactly one protobuf message from
   `ProgramPreviewEvent`.
 
 There is no custom header or top-level envelope. Position connections begin
-with a replacement followed by deltas. A clear, reconfiguration, generation
-change, or retention rollover produces another replacement. Values retain the
-stable ten-double X, Y, Z, A, B, C, U, V, W, motion-type layout.
+with a replacement followed by deltas that only append. Points carry
+contiguous sequences: the point at index `i` of a frame has sequence
+`first_sequence + i`, and a delivered point never changes. Every frame carries
+`oldest_sequence`, the oldest point the server still retains; capacity eviction
+only advances it, and consumers drop their points before it. A clear,
+reconfiguration, or a consumer whose cursor fell behind `oldest_sequence`
+produces another replacement. Values retain the stable ten-double X, Y, Z, A,
+B, C, U, V, W, motion-type layout.
 
 HAL value telemetry uses the same attachment lifecycle as scope telemetry.
 Create or update a subscription with `HalService.CreateValueSubscription` and
@@ -81,8 +86,9 @@ RPCs on the shared gRPC control plane. Their response supplies a WebSocket
 attachment path; capture and roll frames flow only over the shared telemetry
 listener, which owns frame acknowledgement and backpressure.
 Position history keeps its acquisition cadence while coalescing mutations into
-50 ms delivery windows for viewers. Slow consumers receive coalesced
-latest-state deltas rather than every sampled transition. Client WebSocket
+50 ms delivery windows for viewers. A collinear sample extends the newest point
+only until a read delivers that point; afterwards it starts a new point, so a
+straight move adds about one point per delivery window. Client WebSocket
 messages are forbidden on both telemetry routes.
 
 The HAL service uses the pinned LinuxCNC HAL runtime for topology, exact

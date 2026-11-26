@@ -21,12 +21,12 @@ bool PositionTelemetry::append(const PositionSample& sample) {
   return true;
 }
 
-PositionHistoryBatch PositionTelemetry::snapshot() const {
+PositionHistoryBatch PositionTelemetry::snapshot() {
   return history_.snapshot();
 }
 
 PositionHistoryBatch PositionTelemetry::since(std::uint64_t sequence,
-                                              std::uint64_t generation) const {
+                                              std::uint64_t generation) {
   return history_.since(sequence, 0, generation);
 }
 

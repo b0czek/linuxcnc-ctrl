@@ -389,8 +389,8 @@ void position_cursor_generation_and_replacement_test() {
 
   const auto initial = history.snapshot();
   assert(initial.reset);
-  assert(initial.generation == 2);
   assert(initial.first_sequence == 1);
+  assert(initial.oldest_sequence == 1);
   assert(initial.next_sequence == 3);
   assert(initial.packed.size() == 2 * kPositionStride);
   assert(initial.packed[0] == 1.05);
@@ -398,9 +398,11 @@ void position_cursor_generation_and_replacement_test() {
 
   const auto rolled = history.since(0);
   assert(rolled.reset);
+  assert(rolled.first_sequence == 1);
   assert(rolled.packed.size() == 2 * kPositionStride);
   const auto bounded = history.since(1, 1);
   assert(!bounded.reset);
+  assert(bounded.first_sequence == 1);
   assert(bounded.packed.size() == kPositionStride);
   assert(bounded.packed[0] == 1.05);
   assert(history.since(history.next_sequence()).packed.empty());
@@ -422,17 +424,23 @@ void position_cursor_generation_and_replacement_test() {
   assert(history.since(history.next_sequence(), 0, cleared.generation)
              .packed.empty());
 
+  // Capacity eviction keeps a synchronized consumer on deltas and tells it
+  // which prefix the history no longer retains.
   PositionHistory retained(2);
   assert(retained.append(position(1.0, 1)));
   assert(retained.append(position(2.0, 2)));
   const auto synchronized = retained.snapshot();
+  assert(synchronized.oldest_sequence == 0);
   assert(retained.append(position(3.0, 3)));
   const auto evicted =
       retained.since(synchronized.next_sequence, 0, synchronized.generation);
-  assert(evicted.reset);
-  assert(evicted.packed.size() == 2 * kPositionStride);
-  assert(evicted.packed[0] == 2.0);
-  assert(evicted.packed[kPositionStride] == 3.0);
+  assert(!evicted.reset);
+  assert(evicted.generation == synchronized.generation);
+  assert(evicted.oldest_sequence == 1);
+  assert(evicted.first_sequence == 2);
+  assert(evicted.next_sequence == 3);
+  assert(evicted.packed.size() == kPositionStride);
+  assert(evicted.packed[0] == 3.0);
 
   PositionHistory non_finite_history(8);
   auto finite = position(1.0);
@@ -456,35 +464,52 @@ void position_collinear_compaction_test() {
   assert(straight.append(position(2.0)));
   assert(straight.size() == 2);
   const auto compacted = straight.snapshot();
-  assert(compacted.next_sequence == 3);
+  assert(compacted.first_sequence == 0);
+  assert(compacted.next_sequence == 2);
   assert(compacted.packed.size() == 2 * kPositionStride);
   assert(compacted.packed[0] == 0.0);
   assert(compacted.packed[kPositionStride] == 2.0);
 
-  // A consumer that saw the old tail removes it before appending the new
-  // endpoint. A consumer that never saw that intermediate point only appends.
-  const auto seen_tail = straight.since(2);
-  assert(!seen_tail.reset);
-  assert(seen_tail.replace_count == 1);
-  assert(seen_tail.next_sequence == 3);
-  assert(seen_tail.packed.size() == kPositionStride);
-  assert(seen_tail.packed[0] == 2.0);
-  const auto unseen_tail = straight.since(1);
-  assert(unseen_tail.replace_count == 0);
-  assert(unseen_tail.packed.size() == kPositionStride);
+  // Once a read returns the tail, a further collinear sample starts a new
+  // point instead of changing the delivered one. A tail no read has returned
+  // still absorbs collinear samples and keeps its sequence.
+  assert(straight.append(position(3.0)));
+  assert(straight.append(position(4.0)));
+  assert(straight.size() == 3);
+  const auto extended = straight.since(compacted.next_sequence);
+  assert(!extended.reset);
+  assert(extended.first_sequence == 2);
+  assert(extended.next_sequence == 3);
+  assert(extended.packed.size() == kPositionStride);
+  assert(extended.packed[0] == 4.0);
+  assert(straight.append(position(5.0)));
+  assert(straight.size() == 4);
+  const auto after_seal = straight.since(extended.next_sequence);
+  assert(after_seal.first_sequence == 3);
+  assert(after_seal.next_sequence == 4);
+  assert(after_seal.packed.size() == kPositionStride);
+  assert(after_seal.packed[0] == 5.0);
+  // Every delivered point is still reported with its original sequence.
+  const auto whole = straight.snapshot();
+  assert(whole.first_sequence == 0);
+  assert(whole.next_sequence == 4);
+  assert(whole.packed.size() == 4 * kPositionStride);
+  assert(whole.packed[kPositionStride] == 2.0);
+  assert(whole.packed[2 * kPositionStride] == 4.0);
 
-  PositionHistory coalesced(16);
-  assert(coalesced.append(position_xy(0.0, 0.0)));
-  assert(coalesced.append(position_xy(1.0, 0.0)));
-  assert(coalesced.append(position_xy(1.0, 1.0)));
-  assert(coalesced.append(position_xy(1.0, 2.0)));
-  const auto before_intermediate = coalesced.since(2);
-  assert(before_intermediate.replace_count == 0);
-  assert(before_intermediate.packed.size() == kPositionStride);
-  assert(before_intermediate.packed[1] == 2.0);
-  const auto after_intermediate = coalesced.since(3);
-  assert(after_intermediate.replace_count == 1);
-  assert(after_intermediate.packed.size() == kPositionStride);
+  // A bounded read seals only the points it returned.
+  PositionHistory bounded(16);
+  assert(bounded.append(position_xy(0.0, 0.0)));
+  assert(bounded.append(position_xy(1.0, 0.0)));
+  assert(bounded.append(position_xy(1.0, 1.0)));
+  assert(bounded.since(0, 1).packed.size() == kPositionStride);
+  assert(bounded.append(position_xy(1.0, 2.0)));
+  assert(bounded.size() == 3);
+  const auto unreturned = bounded.since(1);
+  assert(unreturned.first_sequence == 1);
+  assert(unreturned.next_sequence == 3);
+  assert(unreturned.packed.size() == 2 * kPositionStride);
+  assert(unreturned.packed[kPositionStride + 1] == 2.0);
 
   PositionHistory corner(16);
   assert(corner.append(position_xy(0.0, 0.0)));
