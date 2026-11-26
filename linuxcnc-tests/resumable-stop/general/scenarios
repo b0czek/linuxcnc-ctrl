@@ -8,6 +8,7 @@ rapid-no-atspeed
 paused-resume
 paused-run
 abort-empty
+abort-armed-step
 orientation
 dwell
 dwell-atspeed

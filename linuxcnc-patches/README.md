@@ -195,8 +195,9 @@ Adds a dedicated `EMC_TASK_PLAN_STOP` command. Stop decelerates an active AUTO
 program without clearing interpreter or motion queues, safely finishes
 position-synchronized threading and rigid tapping, stops saved spindle and
 coolant outputs, and restores them before Run, Resume, or Single Step continues
-the program. The command is rejected when no AUTO program is active; callers
-must issue `EMC_TASK_ABORT` explicitly when execution should be terminated.
+the program. The command is rejected when no AUTO program is active (the
+interpreter is idle, also while task finishes an availability change or a tool
+table edit); callers must issue `EMC_TASK_ABORT` explicitly when execution should be terminated.
 Abort, E-stop, faults, mode changes, M0/M1, and Pause retain their existing
 behavior.
 
@@ -252,7 +253,9 @@ Resume or Run during a Stop leaves single-step mode entered by an earlier Step.
 Setting the AUTO or MDI mode aborts the program, also when the mode does not
 change, and so ends a Stop as Abort does.
 Single Step from `STOPPED` continues the program; it never marks a program
-that is still running as finished.
+that is still running as finished. With no motion queued (Stop during a dwell
+or an M-code) motion is resumed instead and the interpreter steps the next
+line.
 Resume, Run and Single Step during `STOPPING` are refused with an operator
 error, not remembered: the operator resumes once the machine has stopped.
 A second Stop or a Pause during `STARTING` cancels the Resume: the program
@@ -277,7 +280,7 @@ jerk-limited planner and five with the trapezoidal planner. They cover
 Stop/Resume and Stop/Single-Step preserving the queued program, spindle and
 coolant handling, the at-speed wait on Resume including a stale at-speed
 signal, Pause while Resume is pending, Resume and Step refused while
-stopping, Stop waiting for a running user M-code, Pause during an in-flight Step, Resume of a spindle restored at S0, commands queued behind a thread, `G33` threading including a chain of
+stopping, Stop waiting for a running user M-code, Pause during an in-flight Step, Abort with an in-flight Step armed, Resume of a spindle restored at S0, commands queued behind a thread, `G33` threading including a chain of
 `G33` moves and `G33`/`G95`/`G33`, `G33.1` rigid tapping, Stop during and after
 an interrupted `G28.2`, and that `STOPPED` is never reported while moving.
 
@@ -448,7 +451,10 @@ at the first later block end it can reach instead, and the planner lowers the
 end speeds of the segments before that point so the machine never brakes
 harder than its limits. During position-synchronized motion (`G33`) Step,
 like Stop, ends at the end of the synchronized run, never between its moves,
-which would leave the axis behind the spindle. A Step that is canceled
+which would leave the axis behind the spindle; when the run's next move is
+queued after Step was armed, the stop moves to it. A blend already under way
+when Step is armed is finished, so the earliest stop is the end of the segment
+it blends into. A Step that is canceled
 restores every segment it changed, including a stricter end condition (no
 blend into a following `G33` or rapid) that motion queued later required.
 Later motion remains queued and does not
@@ -456,7 +462,8 @@ begin, including when several following blocks or threading passes were
 prequeued by readahead.
 
 The temporary exact boundary is restored if Step is canceled by Resume, Stop or
-Pause; Pause during an in-flight Step is an ordinary Pause. Existing paused source-line stepping and two-stage G76 stepping remain intact.
+Pause; Pause during an in-flight Step is an ordinary Pause. Motion's abort
+also drops an armed Step, so the planner is not paused again afterwards. Existing paused source-line stepping and two-stage G76 stepping remain intact.
 Runtime scenarios arm Step during an ordinary block with three later blocks
 queued, at full speed among blocks shorter than the stopping distance (checking
 the peak deceleration through HAL), and during an active G76 cut with later

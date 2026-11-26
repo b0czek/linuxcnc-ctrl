@@ -414,7 +414,7 @@ index e814320..029af60 100644
          if (!motion_enable_flag)              { continue; }
          if (!hal_get_bool(axis_data->ajog_enable)) { continue; }
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index ff48890..9d6fb2c 100644
+index 0347123..072bb70 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
 @@ -80,6 +80,16 @@ extern int motion_num_spindles;
@@ -533,7 +533,7 @@ index ff48890..9d6fb2c 100644
              SET_MOTION_ERROR_FLAG(0);
  	    /* clear joint errors (regardless of mode) */
  	    for (joint_num = 0; joint_num < ALL_JOINTS; joint_num++) {
-@@ -610,6 +691,11 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -613,6 +694,11 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    /* abort one joint number or axis number */
  	    /* can happen at any time */
  	    rtapi_print_msg(RTAPI_MSG_DBG, "JOG_ABORT: %i", joint_num);
@@ -545,7 +545,7 @@ index ff48890..9d6fb2c 100644
  	    if (GET_MOTION_TELEOP_FLAG()) {
  	        /* tell teleop planner to stop */
  	        if ((emcmotCommand->axis >= 0) && (emcmotCommand->axis < EMCMOT_MAX_AXIS)) {
-@@ -644,6 +730,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -647,6 +733,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    break;
  
  	case EMCMOT_COORD:
@@ -556,7 +556,7 @@ index ff48890..9d6fb2c 100644
  	    /* change the mode to coordinated axis motion */
  	    /* can be done at any time */
  	    /* this code doesn't actually make the transition, it merely
-@@ -666,6 +756,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -669,6 +759,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    break;
  
  	case EMCMOT_TELEOP:
@@ -567,7 +567,7 @@ index ff48890..9d6fb2c 100644
  	    rtapi_print_msg(RTAPI_MSG_DBG, "TELEOP");
              switch_to_teleop_mode();
  	    break;
-@@ -740,10 +834,17 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -743,10 +837,17 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	case EMCMOT_UPDATE_JOINT_HOMING_PARAMS:
  	    rtapi_print_msg(RTAPI_MSG_DBG, "UPDATE_JOINT_HOMING_PARAMS");
  	    rtapi_print_msg(RTAPI_MSG_DBG, " %d", joint_num);
@@ -586,7 +586,7 @@ index ff48890..9d6fb2c 100644
  	    update_joint_homing_params(joint_num,
  	                               emcmotCommand->offset,
  	                               emcmotCommand->home,
-@@ -856,6 +957,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -859,6 +960,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  		SET_JOINT_ERROR_FLAG(joint, 1);
  		break;
  	    }
@@ -601,7 +601,7 @@ index ff48890..9d6fb2c 100644
              // cannot jog if jog-inhibit is TRUE
              if (hal_get_bool(emcmot_hal_data->jog_inhibit)){
                      reportError(_("Cannot jog while jog-inhibit is active."));
-@@ -925,6 +1034,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -928,6 +1037,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  		SET_JOINT_ERROR_FLAG(joint, 1);
  		break;
  	    }
@@ -616,7 +616,7 @@ index ff48890..9d6fb2c 100644
              // cannot jog if jog-inhibit is TRUE
              if (hal_get_bool(emcmot_hal_data->jog_inhibit)){
                      reportError(_("Cannot jog while jog-inhibit is active."));
-@@ -1005,6 +1122,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1008,6 +1125,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  		SET_JOINT_ERROR_FLAG(joint, 1);
  		break;
  	    }
@@ -631,7 +631,7 @@ index ff48890..9d6fb2c 100644
              // cannot jog if jog-inhibit is TRUE
              if (hal_get_bool(emcmot_hal_data->jog_inhibit)){
                      reportError(_("Cannot jog while jog-inhibit is active."));
-@@ -1068,6 +1193,17 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1071,6 +1196,17 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    break;
  
  	case EMCMOT_SET_SPINDLESYNC:
@@ -649,7 +649,7 @@ index ff48890..9d6fb2c 100644
  		tpSetSpindleSync(&emcmotInternal->coord_tp, emcmotCommand->spindle, emcmotCommand->spindlesync, emcmotCommand->flags);
  		break;
  
-@@ -1508,6 +1644,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1511,6 +1647,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	       controller cycle (it *will* be honored) */
  	    rtapi_print_msg(RTAPI_MSG_DBG, "DISABLE");
  	    emcmotInternal->enabling = 0;
@@ -657,7 +657,7 @@ index ff48890..9d6fb2c 100644
  	    if (emcmotConfig->kinType == KINEMATICS_INVERSE_ONLY) {
  		emcmotInternal->teleoperating = 0;
  		emcmotInternal->coordinating = 0;
-@@ -1520,10 +1657,16 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1523,10 +1660,16 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    /* set the emcmotInternal->enabling flag to defer enable until
  	       controller cycle */
  	    rtapi_print_msg(RTAPI_MSG_DBG, "ENABLE");
@@ -675,7 +675,7 @@ index ff48890..9d6fb2c 100644
  		if (emcmotConfig->kinType == KINEMATICS_INVERSE_ONLY) {
  		    emcmotInternal->teleoperating = 0;
  		    emcmotInternal->coordinating = 0;
-@@ -1540,6 +1683,13 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1543,6 +1686,13 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    if (joint == 0) {
  		break;
  	    }
@@ -689,7 +689,7 @@ index ff48890..9d6fb2c 100644
  	    SET_JOINT_ACTIVE_FLAG(joint, 1);
  	    break;
  
-@@ -1552,6 +1702,13 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1555,6 +1705,13 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    if (joint == 0) {
  		break;
  	    }
@@ -703,7 +703,7 @@ index ff48890..9d6fb2c 100644
  	    SET_JOINT_ACTIVE_FLAG(joint, 0);
  	    break;
  
-@@ -1563,6 +1720,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1566,6 +1723,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    rtapi_print_msg(RTAPI_MSG_DBG, "JOINT_HOME");
  	    rtapi_print_msg(RTAPI_MSG_DBG, " %d", joint_num);
  
@@ -718,7 +718,7 @@ index ff48890..9d6fb2c 100644
  	    /* Normally homing requires free (joint) mode. The queued G28.2 path
  	     * (emctaskmain EMC_TASK_EXEC::WAITING_FOR_HOMING) dips motion into
  	     * FREE before issuing this command; while that transition is still
-@@ -1595,9 +1760,17 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1598,9 +1763,17 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    if (!GET_MOTION_ENABLE_FLAG()) {
  		break;
  	    }
@@ -736,7 +736,7 @@ index ff48890..9d6fb2c 100644
  	    break;
  
  	case EMCMOT_JOINT_UNHOME:
-@@ -1611,6 +1784,26 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1614,6 +1787,26 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
                  return;
              }
  
@@ -763,7 +763,7 @@ index ff48890..9d6fb2c 100644
              // For configs that require homing and have joints configured as VOLATILE_HOME
              // 'get_allhomed()' will change from TRUE to FALSE. If that happens we need to
              // switch motion mode to 'free'.
-@@ -1629,6 +1822,160 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1632,6 +1825,160 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  
              break;
  
@@ -924,7 +924,7 @@ index ff48890..9d6fb2c 100644
  	case EMCMOT_CLEAR_PROBE_FLAGS:
  	    rtapi_print_msg(RTAPI_MSG_DBG, "CLEAR_PROBE_FLAGS");
  	    emcmotStatus->probing = 0;
-@@ -1825,6 +2172,11 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1828,6 +2175,11 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -936,7 +936,7 @@ index ff48890..9d6fb2c 100644
          for (n = s0; n<=s1; n++){
  
  	        if (hal_get_bool(emcmot_hal_data->spindle[n].spindle_orient))
-@@ -1930,8 +2282,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1933,8 +2285,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -950,7 +950,7 @@ index ff48890..9d6fb2c 100644
  	        if (n > emcmotConfig->numSpindles){
                  rtapi_print_msg(RTAPI_MSG_ERR, "spindle number <%d> too high in M19",n);
                  break;
-@@ -1981,6 +2337,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1984,6 +2340,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -961,7 +961,7 @@ index ff48890..9d6fb2c 100644
          for (n = s0; n<=s1; n++){
  	        if (emcmotStatus->spindle_status[n].speed > 0) {
  		    emcmotStatus->spindle_status[n].speed += emcmotStatus->spindle_status[n].increment;
-@@ -2005,6 +2365,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -2008,6 +2368,10 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -972,7 +972,7 @@ index ff48890..9d6fb2c 100644
          for (n = s0; n<=s1; n++){
              if (emcmotStatus->spindle_status[n].speed > emcmotStatus->spindle_status[n].increment) {
                  emcmotStatus->spindle_status[n].speed -= emcmotStatus->spindle_status[n].increment;
-@@ -2051,8 +2415,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -2054,8 +2418,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
              s0 = 0;
              s1 = motion_num_spindles - 1;
          }
@@ -2267,7 +2267,7 @@ index d2634e9..f889dd3 100644
  
      // clear out the pending command
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 5880f9a..418bcd5 100644
+index fd0335e..900c430 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -171,6 +171,61 @@ volatile int done;
@@ -2434,7 +2434,7 @@ index 5880f9a..418bcd5 100644
      return EMC_TASK_HOLD_WAIT::NONE;
  }
  
-@@ -1208,6 +1307,31 @@ static int emcTaskPlan(void)
+@@ -1210,6 +1309,31 @@ static int emcTaskPlan(void)
          return emcTaskIssueCommand(emcCommand);
      }
  
@@ -2466,7 +2466,7 @@ index 5880f9a..418bcd5 100644
      if (emcStatus->task.stopState != EMC_TASK_STOP_STATE::IDLE &&
              (type == EMC_TASK_PLAN_RUN_TYPE ||
               type == EMC_TASK_PLAN_RESUME_TYPE ||
-@@ -1231,6 +1355,36 @@ static int emcTaskPlan(void)
+@@ -1233,6 +1357,36 @@ static int emcTaskPlan(void)
          return 0;
      }
  
@@ -2503,7 +2503,7 @@ index 5880f9a..418bcd5 100644
      // handle any new command
      switch (emcStatus->task.state) {
      case EMC_TASK_STATE::OFF:
-@@ -1743,9 +1897,7 @@ static int emcTaskPlan(void)
+@@ -1745,9 +1899,7 @@ static int emcTaskPlan(void)
  		    break;
  
  		case EMC_TASK_PLAN_STEP_TYPE:
@@ -2514,7 +2514,7 @@ index 5880f9a..418bcd5 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -2011,6 +2163,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
+@@ -2013,6 +2165,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
      case EMC_TRAJ_CLEAR_PROBE_TRIPPED_FLAG_TYPE:	// and this
      case EMC_AUX_INPUT_WAIT_TYPE:
      case EMC_SPINDLE_WAIT_ORIENT_COMPLETE_TYPE:
@@ -2523,7 +2523,7 @@ index 5880f9a..418bcd5 100644
  	return EMC_TASK_EXEC::WAITING_FOR_MOTION_AND_IO;
  	break;
  
-@@ -2217,10 +2371,12 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2219,10 +2373,12 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  		emcTrajSetMode(EMC_TRAJ_MODE::FREE);
  	    }
  	    homingWaitJoint = target_joint;
@@ -2536,7 +2536,7 @@ index 5880f9a..418bcd5 100644
  	    if (retval != 0) {
  		// emcJointHome() rejected the request outright (e.g. an
  		// invalid joint number) -- homing will never start, so the
-@@ -2230,9 +2386,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2232,9 +2388,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  		// from it) stays stuck at FREE/MANUAL until the operator
  		// manually cycles mode again.
  		homingWaiting = false;
@@ -2547,7 +2547,7 @@ index 5880f9a..418bcd5 100644
  	    }
  	}
  	break;
-@@ -2246,6 +2400,24 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2248,6 +2402,24 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	retval = emcJointUnhome(unhome_msg->joint);
  	break;
  
@@ -2572,7 +2572,7 @@ index 5880f9a..418bcd5 100644
      case EMC_JOG_CONT_TYPE:
  	jog_cont_msg = reinterpret_cast<EMC_JOG_CONT *>(cmd);
  	retval = emcJogCont(jog_cont_msg->joint_or_axis,
-@@ -2613,6 +2785,26 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2615,6 +2787,26 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	retval = emcSpindleOff(spindle_off_msg->spindle, spindle_off_msg->wait_for_spindle_at_speed);
  	break;
  

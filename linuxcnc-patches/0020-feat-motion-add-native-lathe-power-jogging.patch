@@ -292,7 +292,7 @@ index 5d61f0b..f1ce1d7 100644
  
  #ifdef __cplusplus
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index e8a68ce..554c1b5 100644
+index b96b098..3f5a562 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
 @@ -157,6 +157,19 @@ STATIC int spindle_range_is_available(int first, int last)
@@ -315,7 +315,7 @@ index e8a68ce..554c1b5 100644
  /* limits_ok() returns 1 if none of the hard limits are set,
     0 if any are set. Called on a linear and circular move. */
  STATIC int limits_ok(void)
-@@ -946,6 +959,22 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -949,6 +962,22 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	    joint->min_ferror = emcmotCommand->minFerror;
  	    break;
  
@@ -688,10 +688,10 @@ index feab3fb..a9fc353 100644
    public:
      EMC_JOG_CONT()
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index 418bcd5..d2e57f0 100644
+index 900c430..db1e711 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -1527,6 +1527,7 @@ static int emcTaskPlan(void)
+@@ -1529,6 +1529,7 @@ static int emcTaskPlan(void)
  	    case EMC_JOINT_HOME_TYPE:
  	    case EMC_JOINT_UNHOME_TYPE:
  	    case EMC_JOG_CONT_TYPE:
@@ -699,7 +699,7 @@ index 418bcd5..d2e57f0 100644
  	    case EMC_JOG_INCR_TYPE:
  	    case EMC_JOG_ABS_TYPE:
  	    case EMC_JOG_STOP_TYPE:
-@@ -2431,6 +2432,13 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2433,6 +2434,13 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
                              jog_stop_msg->jjogmode);
  	break;
  

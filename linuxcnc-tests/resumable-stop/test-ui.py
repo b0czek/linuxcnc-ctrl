@@ -478,6 +478,37 @@ def run_stop_while_program_paused_test(restart_with_run):
     wait_for_program_complete(10.0)
 
 
+def run_abort_armed_step_test():
+    # Abort while an in-flight Step is armed. Motion must not pause the
+    # planner again for the dropped Step and leave paused set.
+    open_auto_program("inflight-step.ngc")
+    c.auto(linuxcnc.AUTO_RUN, 0)
+    wait_for(
+        lambda: s.queue >= 3
+        and s.position[0] > 1.0
+        and s.position[0] < 7.0,
+        "program did not prequeue later blocks during its first move",
+    )
+    c.auto(linuxcnc.AUTO_STEP)
+    wait_for(
+        lambda: s.single_stepping and not s.task_paused and not s.paused,
+        "in-flight Single Step was not armed",
+    )
+    c.abort()
+    wait_complete("abort with an armed Step did not complete")
+    wait_for(
+        lambda: s.queue == 0 and abs(s.current_vel) < 0.001,
+        "abort with an armed Step did not stop motion",
+    )
+    time.sleep(0.3)
+    s.poll()
+    if s.paused:
+        fail("abort with an armed Step left motion paused")
+    open_auto_program("after-abort.ngc")
+    c.auto(linuxcnc.AUTO_RUN, 0)
+    wait_for_program_complete(6.0)
+
+
 def run_abort_from_empty_stopped_queue_test():
     open_auto_program("pause.ngc")
 
@@ -1340,6 +1371,12 @@ def run_step_after_dwell_stop_test():
         "task did not enter STOPPED during G4",
     )
     c.auto(linuxcnc.AUTO_STEP)
+    # Nothing is queued, so motion has no Step to take; task resumes it
+    # instead of leaving the Stop's hold on the planner.
+    wait_for(
+        lambda: s.stop_state == linuxcnc.STOP_IDLE and not s.paused,
+        "Step from STOPPED with an empty queue left motion held",
+    )
     time.sleep(0.3)
     s.poll()
     if s.interp_state == linuxcnc.INTERP_IDLE:
@@ -2201,6 +2238,7 @@ SCENARIOS = {
     "paused-resume": lambda: run_stop_while_program_paused_test(False),
     "paused-run": lambda: run_stop_while_program_paused_test(True),
     "abort-empty": run_abort_from_empty_stopped_queue_test,
+    "abort-armed-step": run_abort_armed_step_test,
     "queued-g33": run_queued_threading_stop_resume_test,
     "g33": run_threading_stop_resume_test,
     "g33-no-following-rapid": run_g33_does_not_execute_following_rapid_test,

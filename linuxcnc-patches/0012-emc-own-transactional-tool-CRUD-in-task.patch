@@ -182,10 +182,10 @@ index 6a5632c..e4a04b1 100644
    public:
      EMC_TOOL_SET_NUMBER()
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index f95b3b0..c5aec97 100644
+index 635418d..6c57192 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
-@@ -1283,7 +1283,18 @@ static int emcTaskPlan(void)
+@@ -1285,7 +1285,18 @@ static int emcTaskPlan(void)
  		emcTaskQueueTaskPlanSynchCmd();
  		break;
  	    }
@@ -205,7 +205,7 @@ index f95b3b0..c5aec97 100644
  	    case EMC_TOOL_SET_NUMBER_TYPE: {
  		// send to IO
  		emcTaskQueueCommand(std::make_unique<EMC_TOOL_SET_NUMBER>(*static_cast<EMC_TOOL_SET_NUMBER*>(emcCommand)));
-@@ -1412,6 +1423,18 @@ static int emcTaskPlan(void)
+@@ -1414,6 +1425,18 @@ static int emcTaskPlan(void)
  		emcTaskQueueTaskPlanSynchCmd();
  		break;
  	    }
@@ -224,7 +224,7 @@ index f95b3b0..c5aec97 100644
  
  	    case EMC_TOOL_SET_NUMBER_TYPE: {
  		// send to IO
-@@ -1537,6 +1560,18 @@ static int emcTaskPlan(void)
+@@ -1539,6 +1562,18 @@ static int emcTaskPlan(void)
  		    emcTaskQueueTaskPlanSynchCmd();
  		    break;
  	        }
@@ -243,7 +243,7 @@ index f95b3b0..c5aec97 100644
  
  		// otherwise we can't handle it
  	    	default:
-@@ -1872,6 +1907,18 @@ static int emcTaskPlan(void)
+@@ -1874,6 +1909,18 @@ static int emcTaskPlan(void)
  		emcTaskQueueTaskPlanSynchCmd();
  		break;
  	    }
@@ -262,7 +262,7 @@ index f95b3b0..c5aec97 100644
  
  		// otherwise we can't handle it
  	    default:
-@@ -1975,6 +2022,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
+@@ -1977,6 +2024,8 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
  
      case EMC_TOOL_LOAD_TOOL_TABLE_TYPE:
      case EMC_TOOL_SET_OFFSET_TYPE:
@@ -271,7 +271,7 @@ index f95b3b0..c5aec97 100644
  	return EMC_TASK_EXEC::WAITING_FOR_MOTION_AND_IO;
  	break;
  
-@@ -2607,6 +2656,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2609,6 +2658,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
                                    emc_tool_set_offset_msg->orientation);
  	break;
  

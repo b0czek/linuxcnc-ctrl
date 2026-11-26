@@ -24,10 +24,10 @@ so the new concurrency checks never refuse it.
  5 files changed, 119 insertions(+), 78 deletions(-)
 
 diff --git a/src/emc/motion/command.c b/src/emc/motion/command.c
-index 9d6fb2c..e8a68ce 100644
+index 072bb70..b96b098 100644
 --- a/src/emc/motion/command.c
 +++ b/src/emc/motion/command.c
-@@ -1753,10 +1753,29 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
+@@ -1756,10 +1756,29 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
  	                   joint_num);
                  return;
  	    }

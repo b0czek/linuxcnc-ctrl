@@ -684,7 +684,7 @@ index 55fb417..90cc136 100644
  }
 -
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index fafc18c..cff0805 100644
+index ec76402..14f26b5 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -503,6 +503,22 @@ static int programStartLine = 0;	// which line to run program from
@@ -720,7 +720,7 @@ index fafc18c..cff0805 100644
  }
  
  static void emcTaskStepInterpreter()
-@@ -1574,6 +1589,10 @@ static int emcTaskPlan(void)
+@@ -1576,6 +1591,10 @@ static int emcTaskPlan(void)
  		    emcStatus->motion.traj.single_stepping = 1;
  		    stepping = 1;	// set stepping mode in case it's not
  		    steppingWait = 0;	// clear the wait
@@ -731,7 +731,7 @@ index fafc18c..cff0805 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1726,6 +1745,10 @@ static int emcTaskPlan(void)
+@@ -1728,6 +1747,10 @@ static int emcTaskPlan(void)
  		    emcStatus->motion.traj.single_stepping = 1;
  		    stepping = 1;	// set stepping mode in case it's not
  		    steppingWait = 0;	// clear the wait
@@ -742,7 +742,7 @@ index fafc18c..cff0805 100644
  		    break;
  
  		    // otherwise we can't handle it
-@@ -1983,6 +2006,11 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
+@@ -1985,6 +2008,11 @@ static EMC_TASK_EXEC emcTaskCheckPreconditions(NMLmsg * cmd)
  	return EMC_TASK_EXEC::WAITING_FOR_MOTION_AND_IO;
  	break;
  
@@ -754,7 +754,7 @@ index fafc18c..cff0805 100644
      case EMC_TRAJ_DELAY_TYPE:
  	return EMC_TASK_EXEC::WAITING_FOR_MOTION_AND_IO;
  	break;
-@@ -2288,7 +2316,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2290,7 +2318,9 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
                                     emcTrajLinearMoveMsg->type, emcTrajLinearMoveMsg->vel,
                                     emcTrajLinearMoveMsg->ini_maxvel, emcTrajLinearMoveMsg->acc, emcTrajLinearMoveMsg->ini_maxjerk,
                                     emcTrajLinearMoveMsg->vlimit_scale,

@@ -569,7 +569,7 @@ index ed6a962..6010ecb 100644
  {
  }
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index a3b5256..3b544e1 100644
+index a3b5256..3e73c7b 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -124,6 +124,39 @@ static int emcTaskEager = 0;
@@ -643,7 +643,7 @@ index a3b5256..3b544e1 100644
  	// now handle call logic
  	// check for subsystems done
  	if (interp_list.len() == 0 &&
-@@ -781,6 +824,292 @@ static bool allow_while_idle_type() {
+@@ -781,6 +824,294 @@ static bool allow_while_idle_type() {
      return 0;
  }
  
@@ -917,7 +917,9 @@ index a3b5256..3b544e1 100644
 +                return;
 +            }
 +        }
-+        if (stop_single_step) {
++        // Motion refuses a Step with nothing queued (Stop between moves);
++        // resume it instead, and the interpreter steps the next line.
++        if (stop_single_step && emcStatus->motion.traj.queue > 0) {
 +            emcTrajStep();
 +        } else {
 +            emcTrajResume();
@@ -936,7 +938,7 @@ index a3b5256..3b544e1 100644
  /*
    emcTaskPlan()
  
-@@ -809,6 +1138,33 @@ static int emcTaskPlan(void)
+@@ -809,6 +1140,33 @@ static int emcTaskPlan(void)
  	return retval;
      }
  
@@ -970,7 +972,7 @@ index a3b5256..3b544e1 100644
      // handle any new command
      switch (emcStatus->task.state) {
      case EMC_TASK_STATE::OFF:
-@@ -1734,6 +2090,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -1734,6 +2092,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	    // found to have been rejected), invisibly to the task-level
  	    // MDI/AUTO/MANUAL state.
  	    homingPriorMode = emcStatus->motion.traj.mode;
@@ -978,7 +980,7 @@ index a3b5256..3b544e1 100644
  	    if (homingPriorMode != EMC_TRAJ_MODE::FREE) {
  		emcTrajSetMode(EMC_TRAJ_MODE::FREE);
  	    }
-@@ -1937,6 +2294,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -1937,6 +2296,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  	retval = emcTrajPause();
  	break;
  
@@ -990,7 +992,7 @@ index a3b5256..3b544e1 100644
      case EMC_TRAJ_RESUME_TYPE:
  	emcStatus->task.task_paused = 0;
  	retval = emcTrajResume();
-@@ -2039,6 +2401,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2039,6 +2403,11 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_SPINDLE_WAIT_ORIENT_COMPLETE_TYPE:
  	wait_spindle_orient_complete_msg = reinterpret_cast<EMC_SPINDLE_WAIT_ORIENT_COMPLETE *>(cmd);
@@ -1002,7 +1004,7 @@ index a3b5256..3b544e1 100644
  	taskExecDelayTimeout = etime() + wait_spindle_orient_complete_msg->timeout;
  	break;
  
-@@ -2099,6 +2466,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2099,6 +2468,14 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
      case EMC_SPINDLE_ORIENT_TYPE:
  	spindle_orient_msg = reinterpret_cast<EMC_SPINDLE_ORIENT *>(cmd);
@@ -1017,17 +1019,15 @@ index a3b5256..3b544e1 100644
  	retval = emcSpindleOrient(spindle_orient_msg->spindle, spindle_orient_msg->orientation,
  			spindle_orient_msg->mode);
  	break;
-@@ -2191,7 +2566,49 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
+@@ -2191,7 +2568,47 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
  
  	// task commands
  
 +    case EMC_TASK_PLAN_STOP_TYPE: {
++        // Only a program: an availability change or tool table edit in
++        // AUTO also keeps task busy, but has no program to resume.
 +        bool active_auto_program =
-+            emcStatus->task.interpState != EMC_TASK_INTERP::IDLE ||
-+            emcStatus->task.execState != EMC_TASK_EXEC::DONE ||
-+            emcStatus->motion.traj.queue > 0 ||
-+            interp_list.len() > 0 ||
-+            emcTaskCommand != nullptr;
++            emcStatus->task.interpState != EMC_TASK_INTERP::IDLE;
 +        // During a queued G28.2 motion is dipped into FREE and task.mode
 +        // reads MANUAL; the program that issued the home still owns task.
 +        EMC_TASK_MODE program_mode =

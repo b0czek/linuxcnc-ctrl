@@ -762,7 +762,7 @@ index 90cc136..d2634e9 100644
  {
      waitFlag = 0;
 diff --git a/src/emc/task/emctaskmain.cc b/src/emc/task/emctaskmain.cc
-index c5aec97..a93574e 100644
+index 6c57192..0d3448c 100644
 --- a/src/emc/task/emctaskmain.cc
 +++ b/src/emc/task/emctaskmain.cc
 @@ -577,7 +577,12 @@ extern int emcTaskMopup();
@@ -849,7 +849,7 @@ index c5aec97..a93574e 100644
      if (emcStatus->task.execState == EMC_TASK_EXEC::WAITING_FOR_HOMING) {
          return EMC_TASK_HOLD_WAIT::HOMING;
      }
-@@ -1726,6 +1756,9 @@ static int emcTaskPlan(void)
+@@ -1728,6 +1758,9 @@ static int emcTaskPlan(void)
  
  		}		// switch (type) in ON, AUTO, PAUSED
  
