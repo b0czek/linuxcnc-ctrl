@@ -21,15 +21,12 @@ enum FrameKind {
 // consumer's copy; a delta appends. Consumers drop points before
 // oldest_sequence, which capacity eviction advances without a replacement.
 message PositionHistoryFrame {
-  reserved 5;
-  reserved "replacement_count";
-
   FrameKind kind = 1;
   uint64 generation = 2;
   uint64 first_sequence = 3;
   uint64 next_sequence = 4;
+  uint64 oldest_sequence = 5;
   repeated double values = 6 [packed = true];
-  uint64 oldest_sequence = 7;
 }
 
 message HalValueFrameEntry {
